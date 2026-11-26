@@ -86,6 +86,37 @@ explicite pour toute exception. Un changement de bibliothèque ou
 un fork requiert une décision séparée et le rejeu des parcours OIDC.
 [Manifeste amont](https://github.com/ramosbugs/openidconnect-rs/blob/e20ddbb01ca68356f2979bc125f5613ab45b4e7e/Cargo.toml)
 
+**Décision du 26 novembre 2026 — exception bornée RUSTSEC-2023-0071.**
+La recherche crates.io du 26 novembre confirme qu'`openidconnect 4.1.0`
+(31 octobre 2026) est la dernière publication et exige encore `rsa ^0.9.2` ;
+`rsa 0.10.0` (8 novembre 2026) est la série corrigée mais aucune version
+d'openidconnect ne l'utilise : la migration n'a pas de cible amont. Le claim
+clé publique est revérifié sur la base `426b5aaf` : client public sans secret
+(`src/oidc/login.rs`, `CoreClient::from_provider_metadata(..., None)`, PKCE
+S256, vérificateur d'ID token limité à RS256, ni private_key_jwt ni objet de
+requête signé) ; l'import JWKS refuse tout champ de clé privée `d`, `p`, `q`,
+`dp`, `dq`, `qi`, `oth`, `k` (`src/oidc/keys.rs`) ; la vérification de
+signature construit `rsa::RsaPublicKey` et appelle `verify`
+(openidconnect `core/crypto.rs`) ; les ID tokens chiffrés JWE sont rejetés
+comme non supportés (`verification/mod.rs`), sans chemin de déchiffrement
+RSA ; les access tokens sont vérifiés par `jsonwebtoken 12.0.0`, déjà sur
+`rsa 0.10.0` corrigé. Aucun usage de `RsaPrivateKey`, de JWK privée ou de
+`ClientSecret` dans `src/`, `tests/` ni `examples/`. L'attaque Marvin ciblant
+les opérations à clé privée, le risque n'est pas atteignable dans ce produit.
+`.cargo/audit.toml` porte l'ignore borné à cet advisory pour
+`cargo audit`, avec justification datée et conditions de revue ; le pin
+`=4.1.0` est conservé et `Cargo.lock` reste inchangé. L'exception doit être
+retirée dès qu'une version d'openidconnect exige `rsa >= 0.10` ; elle ne
+couvre ni un futur usage private_key_jwt/JWE, ni un nouvel advisory sur le
+chemin de vérification. Le câblage de `cargo audit` dans la CI reste à faire
+par le coordinateur ; la commande de revue est `cargo audit` à la racine.
+Relevé du 26 novembre 2026 : `cargo-audit 0.23.0`, base RustSec `b9b8a3c2c`,
+348 dépendances du lockfile. Sans config effective, l'avis rsa 0.9.10 est
+signalé et la commande échoue ; avec `.cargo/audit.toml`, `cargo audit` sort
+en code 0 et ne conserve que l'avertissement informatif `chrono` non maintenu
+(RUSTSEC-2026-0543), qui reste ouvert. `cargo-audit 0.23` lit
+`.cargo/audit.toml` ou `~/.cargo/audit.toml`, pas un `audit.toml` à la racine.
+
 **Paquets système de l’image de contrôle.** Le rapprochement du 24
 novembre 2026 couvre 65 paquets source Debian Bookworm installés dans
 l’image ARM64 de `7e3a6166`. Pour les entrées résolues avec version
