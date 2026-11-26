@@ -5,6 +5,7 @@
 pub mod checkpoint;
 pub mod clock;
 pub(crate) mod cold_terminal;
+pub mod conversation;
 pub(crate) mod discovery;
 pub(crate) mod egress_owner;
 #[doc(hidden)]

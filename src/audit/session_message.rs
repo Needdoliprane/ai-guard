@@ -666,12 +666,70 @@ impl Store {
         })
     }
 
+    /// Trusted-control read of the retained conversation binding (metadata
+    /// only) for the broker composition. Never exposes the instruction body.
+    pub(crate) fn session_conversation_binding_read(
+        &self,
+        access: &HumanSourceAccess<'_>,
+        session_id: &str,
+    ) -> anyhow::Result<SessionConversationBindingV1> {
+        crate::control::session_control::canonical_uuid(session_id)
+            .map_err(|_| failure(IdentityFailureV1::InvalidRequest))?;
+        self.with_modern_read(access, |tx| {
+            if !super::session_prepare::installed(tx)? {
+                return Err(failure(IdentityFailureV1::MigrationRequired));
+            }
+            let binding =
+                conversation_row(tx, session_id)?.ok_or(failure(IdentityFailureV1::NotFound))?;
+            anyhow::ensure!(
+                binding.tenant_id == self.tenant_id,
+                failure(IdentityFailureV1::NotFound)
+            );
+            Ok(binding)
+        })
+    }
+
+    /// Trusted-control dispatch queue: the queued operation identities of one
+    /// session in durable enqueue order. Metadata only — never the body. An
+    /// issued, transmitted, acknowledged or unknown message is never listed
+    /// again: delivery uncertainty is retained, never automatically resent.
+    pub(crate) fn session_message_queue(
+        &self,
+        access: &HumanSourceAccess<'_>,
+        session_id: &str,
+    ) -> anyhow::Result<Vec<Uuid>> {
+        crate::control::session_control::canonical_uuid(session_id)
+            .map_err(|_| failure(IdentityFailureV1::InvalidRequest))?;
+        self.with_modern_read(access, |tx| {
+            if !super::session_prepare::installed(tx)? {
+                return Err(failure(IdentityFailureV1::MigrationRequired));
+            }
+            let binding =
+                conversation_row(tx, session_id)?.ok_or(failure(IdentityFailureV1::NotFound))?;
+            anyhow::ensure!(
+                binding.tenant_id == self.tenant_id,
+                failure(IdentityFailureV1::NotFound)
+            );
+            let mut statement = tx.prepare(
+                "SELECT operation_id FROM session_messages WHERE session_id=?1 AND status='queued' ORDER BY event_seq",
+            )?;
+            let rows = statement.query_map([session_id], |r| r.get::<_, String>(0))?;
+            let mut operations = Vec::new();
+            for row in rows {
+                operations.push(
+                    Uuid::parse_str(&row?).map_err(|_| failure(IdentityFailureV1::Conflict))?,
+                );
+            }
+            Ok(operations)
+        })
+    }
+
     /// Trusted-control emission issue: the durable latch before the first
     /// frame byte. Revalidates the exact retained binding at the effect point
     /// (STOP, deadline, resolved channel, fingerprint) and the retained
     /// initiator's current authority. After the issue, delivery is unknown
     /// until the complete write is observed; a replayed issue never re-emits.
-    #[allow(dead_code)] // Broker composition supplies the caller.
+    /// Called by the broker composition (`broker::conversation`).
     pub(crate) fn issue_session_message_emission_scoped(
         &self,
         epoch: &crate::human_authority::HumanSourcesWriteEpoch,
@@ -760,7 +818,6 @@ impl Store {
 
     /// Record the observed complete frame write on the exact owned channel.
     /// Only an issued emission (delivery unknown) can become transmitted.
-    #[allow(dead_code)] // Broker composition supplies the caller.
     pub(crate) fn record_session_message_transmitted_scoped(
         &self,
         epoch: &crate::human_authority::HumanSourcesWriteEpoch,
@@ -822,7 +879,6 @@ impl Store {
     /// transmitted message can become acknowledged; a divergent receipt under
     /// the same operation is a conflict. The acknowledgement proves the
     /// provider accepted the input, never that the instruction was executed.
-    #[allow(dead_code)] // Broker composition supplies the caller.
     pub(crate) fn record_session_message_acknowledged_scoped(
         &self,
         epoch: &crate::human_authority::HumanSourcesWriteEpoch,
@@ -892,7 +948,6 @@ impl Store {
     /// and epoch-checked: the expected epoch must equal the retained one and
     /// the binding advances it explicitly. A closed conversation never
     /// reopens. No HTTP route binds a channel.
-    #[allow(dead_code)] // Broker composition supplies the caller.
     pub(crate) fn bind_session_conversation_scoped(
         &self,
         epoch: &crate::human_authority::HumanSourcesWriteEpoch,
@@ -980,7 +1035,6 @@ impl Store {
     /// Trusted-control close of the conversation (STOP priority): the right to
     /// emit is closed durably before the worker stop follows the broker's
     /// guard. A message never reopens it.
-    #[allow(dead_code)] // Broker composition supplies the caller.
     pub(crate) fn close_session_conversation_scoped(
         &self,
         epoch: &crate::human_authority::HumanSourcesWriteEpoch,
@@ -1050,3 +1104,7 @@ impl Store {
         Ok(binding)
     }
 }
+
+#[cfg(test)]
+#[path = "session_message_composition_tests.rs"]
+mod composition_tests;

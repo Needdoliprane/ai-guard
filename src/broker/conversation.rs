@@ -1,0 +1,362 @@
+//! Broker composition of SendSessionMessage: the trusted-control caller that
+//! wires the durable effect points of `audit::session_message` to the exact
+//! owned conversation channel of an admitted worker.
+//!
+//! Lifecycle composition (SESSION_CONTROL, BROKER_SUPERVISION):
+//! - after the supervised admission resolves the exact channel facts, the
+//!   trusted control binds them durably (`bind_session_conversation_scoped`)
+//!   before the owned stdio channel is attached here;
+//! - a queued instruction reaches the worker only through the durable latch
+//!   (`issue_session_message_emission_scoped`) before the first frame byte,
+//!   then the observed complete write (`record_session_message_transmitted_scoped`)
+//!   and the exact correlated official response
+//!   (`record_session_message_acknowledged_scoped`);
+//! - STOP closes the right to emit durably first
+//!   (`close_session_conversation_scoped`), then closes the channel.
+//!
+//! This composition never spawns a provider client, never opens a network
+//! socket, never enables Bridge and never loosens a preset: it receives the
+//! stdio pipe the trusted runtime already owns under network None and the
+//! approved Rust egress direction. It never restarts a worker, never resets a
+//! quota or time budget, and never resends after a possible emission: delivery
+//! uncertainty is retained by the durable latch. Restart, attempt or owner
+//! changes never retarget a pinned message: the store revalidates the exact
+//! binding fingerprint at the effect point and this composer refuses any
+//! divergence instead of writing.
+//!
+//! The production bridge from the supervised broker admission (broker process)
+//! to this gateway-side owned-source composition is a separate integration
+//! step; the behavior below is proven end to end against a real owned Store
+//! and a controlled stdio fixture child, not a provider (NOT_RUN).
+
+use crate::audit::session_message::SessionMessageFailureV1;
+use crate::audit::{HumanSourceAccess, Store};
+use crate::control::session_control::{
+    BindSessionConversationV1, CloseSessionConversationV1, IssueSessionMessageEmissionV1,
+    SessionConversationBindingV1, SessionConversationChannelV1, SessionConversationStatusV1,
+    SessionMessageAckV1, SessionMessageReceiptV1, canonical_uuid,
+};
+use crate::control::session_message::{
+    AckObservationV1, ConversationAdapterV1, OutcomeObservationV1, StdioConversation,
+};
+use crate::human_authority::{
+    HumanAuthorityFailure, HumanSourcesReadEpoch, HumanSourcesWriteEpoch, OwnedHumanSources,
+    OwnedSourceToken,
+};
+use std::{
+    collections::BTreeMap,
+    sync::{Arc, Mutex},
+    time::{Duration, Instant},
+};
+use uuid::Uuid;
+
+/// Upper bound of response frames reconciled for one issued turn. Beyond it
+/// the turn keeps its truthful durable status and the channel is freed; no
+/// instruction is ever resent.
+const MAX_RECONCILE_FRAMES: usize = 256;
+
+/// Bounded acquisition of the owned-source epoch gate. The gate is a real
+/// single-writer exclusion: a concurrent short transaction (or STOP) may hold
+/// it momentarily. Acquisition retries only the transient `GateBusy` cause,
+/// never another failure, and never extends a binding or protocol deadline.
+const EPOCH_RETRY_DEADLINE: Duration = Duration::from_secs(10);
+const EPOCH_RETRY_INTERVAL: Duration = Duration::from_millis(5);
+
+/// One admitted conversation: the exact durable binding it was bound against,
+/// its pinned fingerprint, the correlation state and the exact owned channel.
+struct BoundConversation {
+    binding: SessionConversationBindingV1,
+    fingerprint: String,
+    adapter: ConversationAdapterV1,
+    channel: StdioConversation,
+}
+
+/// The trusted-control composition driving admitted session conversations.
+/// Holds no durable state itself: every fact is recorded through the owned
+/// Store under its write epoch before (or exactly at) the observed effect.
+pub struct SessionConversationComposerV1<'a> {
+    store: &'a Store,
+    owner: &'a OwnedHumanSources,
+    source: &'a OwnedSourceToken,
+    read_deadline: Duration,
+    sessions: Mutex<BTreeMap<String, Arc<Mutex<BoundConversation>>>>,
+}
+
+impl<'a> SessionConversationComposerV1<'a> {
+    /// Compose over one retained owned source. The read deadline bounds each
+    /// response observation; it never extends the binding's original expiry.
+    pub fn new(
+        store: &'a Store,
+        owner: &'a OwnedHumanSources,
+        source: &'a OwnedSourceToken,
+        read_deadline: Duration,
+    ) -> anyhow::Result<Self> {
+        anyhow::ensure!(
+            !read_deadline.is_zero() && read_deadline <= Duration::from_secs(60),
+            "conversation read deadline must be bounded and non-zero"
+        );
+        Ok(Self {
+            store,
+            owner,
+            source,
+            read_deadline,
+            sessions: Mutex::new(BTreeMap::new()),
+        })
+    }
+
+    /// Write epoch with bounded transient-busy retry (STOP keeps priority over
+    /// the business drain by closing the right to emit at the effect point).
+    fn write_epoch(&self) -> anyhow::Result<HumanSourcesWriteEpoch> {
+        let start = Instant::now();
+        loop {
+            match self.owner.try_write_epoch() {
+                Ok(epoch) => return Ok(epoch),
+                Err(HumanAuthorityFailure::GateBusy) if start.elapsed() < EPOCH_RETRY_DEADLINE => {
+                    std::thread::sleep(EPOCH_RETRY_INTERVAL);
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+    }
+
+    /// Read epoch with the same bounded transient-busy retry.
+    fn read_epoch(&self) -> anyhow::Result<HumanSourcesReadEpoch> {
+        let start = Instant::now();
+        loop {
+            match self.owner.try_read_epoch() {
+                Ok(epoch) => return Ok(epoch),
+                Err(HumanAuthorityFailure::GateBusy) if start.elapsed() < EPOCH_RETRY_DEADLINE => {
+                    std::thread::sleep(EPOCH_RETRY_INTERVAL);
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+    }
+
+    /// Bind the exact resolved channel facts after the supervised admission,
+    /// durably before the owned stdio channel is attached. A failed bind leaves
+    /// no channel effect: the presented pipe is closed on drop. An explicit
+    /// rebind (restart) advances the epoch durably and only then tears down the
+    /// replaced attempt; a pinned message is never silently retargeted.
+    pub fn admit_channel(
+        &self,
+        operation_id: Uuid,
+        session_id: &str,
+        expected_input_epoch: u64,
+        channel: SessionConversationChannelV1,
+        stdio: StdioConversation,
+    ) -> anyhow::Result<SessionConversationBindingV1> {
+        canonical_uuid(session_id)?;
+        let epoch = self.write_epoch()?;
+        let binding = self.store.bind_session_conversation_scoped(
+            &epoch,
+            self.source,
+            &BindSessionConversationV1 {
+                version: 1,
+                operation_id,
+                session_id: session_id.into(),
+                expected_input_epoch,
+                channel,
+            },
+        )?;
+        let fingerprint = binding.fingerprint()?;
+        let slot = Arc::new(Mutex::new(BoundConversation {
+            binding: binding.clone(),
+            fingerprint,
+            adapter: ConversationAdapterV1::new(),
+            channel: stdio,
+        }));
+        let replaced = self
+            .sessions
+            .lock()
+            .expect("conversation registry")
+            .insert(session_id.into(), slot);
+        if let Some(replaced) = replaced {
+            // The durable bind committed: the replaced attempt's channel is
+            // torn down explicitly, never by a message.
+            let mut old = replaced.lock().expect("replaced conversation");
+            old.adapter.close_turn();
+            old.channel.close();
+        }
+        Ok(binding)
+    }
+
+    /// Drive the queued instructions of one session to the exact owned channel,
+    /// one turn at a time. Each turn is latched durably before its first byte;
+    /// only the observed complete write is transmitted and only the exact
+    /// correlated typed response is acknowledged. A refusal, a cut or a timeout
+    /// keeps the truthful durable status and never resends.
+    pub fn dispatch(&self, session_id: &str) -> anyhow::Result<Vec<SessionMessageReceiptV1>> {
+        canonical_uuid(session_id)?;
+        let slot = self
+            .sessions
+            .lock()
+            .expect("conversation registry")
+            .get(session_id)
+            .cloned();
+        let Some(slot) = slot else {
+            // No attached channel: distinguish the closed right to emit from a
+            // binding that was never admitted, truthfully.
+            let epoch = self.read_epoch()?;
+            let access = HumanSourceAccess::read(&epoch, self.source)?;
+            let binding = self
+                .store
+                .session_conversation_binding_read(&access, session_id)?;
+            return Err(if binding.status == SessionConversationStatusV1::Closed {
+                SessionMessageFailureV1::SessionClosed
+            } else {
+                SessionMessageFailureV1::ChannelNotAdmitted
+            }
+            .into());
+        };
+        let mut bound = slot.lock().expect("admitted conversation");
+        let mut receipts = Vec::new();
+        loop {
+            let queued = {
+                let epoch = self.read_epoch()?;
+                let access = HumanSourceAccess::read(&epoch, self.source)?;
+                self.store.session_message_queue(&access, session_id)?
+            };
+            let Some(operation_id) = queued.first().copied() else {
+                break;
+            };
+            if bound.adapter.pending().is_some() {
+                // A previous turn has no reconciled outcome yet: one turn at a
+                // time, never interleaved.
+                break;
+            }
+            // The durable latch before the first frame byte. The store
+            // revalidates STOP, the original deadline, the resolved channel,
+            // the exact pinned fingerprint and the retained initiator here.
+            let emission = {
+                let epoch = self.write_epoch()?;
+                self.store.issue_session_message_emission_scoped(
+                    &epoch,
+                    self.source,
+                    &IssueSessionMessageEmissionV1 {
+                        version: 1,
+                        operation_id,
+                        expected_binding_fingerprint: bound.fingerprint.clone(),
+                    },
+                )?
+            };
+            anyhow::ensure!(
+                emission.binding_fingerprint == bound.fingerprint
+                    && emission.input_epoch == bound.binding.input_epoch,
+                SessionMessageFailureV1::BindingChanged
+            );
+            let request = bound
+                .adapter
+                .issue_turn(operation_id, session_id, &emission.content)?;
+            let frame = request.frame()?;
+            if let Err(error) = bound.channel.write_frame(&frame) {
+                // Possible emission with no observed complete write: delivery
+                // stays unknown, retained by the latch; never resent.
+                bound.adapter.close_turn();
+                return Err(error.into());
+            }
+            let mut receipt = {
+                let epoch = self.write_epoch()?;
+                self.store.record_session_message_transmitted_scoped(
+                    &epoch,
+                    self.source,
+                    operation_id,
+                )?
+            };
+            let mut acknowledged = false;
+            for _ in 0..MAX_RECONCILE_FRAMES {
+                let line = match bound.channel.read_line(self.read_deadline) {
+                    Ok(line) => line,
+                    // Cut or timeout: no reconcilable observation. The durable
+                    // status stays truthful; the turn is freed, never resent.
+                    Err(_) => break,
+                };
+                let Ok(value) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
+                    continue;
+                };
+                if !value.is_object() {
+                    continue;
+                }
+                if !acknowledged {
+                    match bound.adapter.reconcile_response(&value) {
+                        Some(AckObservationV1::Acknowledged { turn_id }) => {
+                            let ack = SessionMessageAckV1 {
+                                rpc_id: request.rpc_id,
+                                turn_id,
+                            };
+                            let epoch = self.write_epoch()?;
+                            receipt = self.store.record_session_message_acknowledged_scoped(
+                                &epoch,
+                                self.source,
+                                operation_id,
+                                &ack,
+                            )?;
+                            acknowledged = true;
+                        }
+                        Some(AckObservationV1::Rejected) => {
+                            // The provider refused the turn: transmitted, never
+                            // acknowledged, never executed.
+                            bound.adapter.close_turn();
+                            break;
+                        }
+                        // Discordant id, malformed, unrelated frame or a
+                        // duplicate: no new fact, keep reconciling.
+                        _ => continue,
+                    }
+                } else {
+                    match bound.adapter.reconcile_outcome(&value) {
+                        Some(OutcomeObservationV1::Completed { .. }) => {
+                            bound.adapter.close_turn();
+                            break;
+                        }
+                        // Divergent provenance or unrelated notification: the
+                        // turn result never advances on someone else's frame.
+                        _ => continue,
+                    }
+                }
+            }
+            if bound.adapter.pending().is_some() {
+                // No reconcilable outcome within the bound: free the channel.
+                // The acknowledgement (if observed) remains the durable fact;
+                // an unacknowledged emission keeps its uncertainty.
+                bound.adapter.close_turn();
+            }
+            receipts.push(receipt);
+        }
+        Ok(receipts)
+    }
+
+    /// STOP priority: close the right to emit durably first, then close the
+    /// exact owned channel. An audit failure leaves the channel untouched (no
+    /// effect); the worker stop itself follows the broker's separate guard. A
+    /// message never reopens the conversation, restarts the worker or resets
+    /// its quota/time budget.
+    pub fn stop(
+        &self,
+        operation_id: Uuid,
+        session_id: &str,
+    ) -> anyhow::Result<SessionConversationBindingV1> {
+        canonical_uuid(session_id)?;
+        let epoch = self.write_epoch()?;
+        let binding = self.store.close_session_conversation_scoped(
+            &epoch,
+            self.source,
+            &CloseSessionConversationV1 {
+                version: 1,
+                operation_id,
+                session_id: session_id.into(),
+            },
+        )?;
+        let removed = self
+            .sessions
+            .lock()
+            .expect("conversation registry")
+            .remove(session_id);
+        if let Some(slot) = removed {
+            let mut bound = slot.lock().expect("admitted conversation");
+            bound.adapter.close_turn();
+            bound.channel.close();
+        }
+        Ok(binding)
+    }
+}
