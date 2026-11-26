@@ -1270,6 +1270,165 @@ fn composition_bind_failure_leaves_no_channel() {
 }
 
 #[test]
+fn composition_bind_replay_preserves_current_slot_and_rejects_history() {
+    let harness = Harness::new();
+    harness.install_markers();
+    let retained = harness.retained("composition-bind-replay.json");
+    let (principal, membership) = provision_membership(&retained).unwrap();
+    let scope = personal_scope(&retained, &principal, &membership);
+    let session = launched_session(&retained, &scope, &principal);
+    let session_id = &session.session_id;
+    let session_uuid = Uuid::parse_str(session_id).unwrap();
+    let composer = SessionConversationComposerV1::new(
+        &retained.store,
+        &retained.owner,
+        &retained.source,
+        Duration::from_secs(10),
+    )
+    .unwrap();
+    let first_id = Uuid::new_v4();
+    let second_id = Uuid::new_v4();
+    let bind = |id, epoch, attempt| {
+        composer.admit_channel(
+            id,
+            session_id,
+            epoch,
+            channel_facts(attempt),
+            spawn_fixture("normal"),
+        )
+    };
+    let send = |epoch, expected_rpc| {
+        let operation = Uuid::new_v4();
+        send_message(
+            &retained,
+            &scope,
+            operation,
+            session_uuid,
+            epoch,
+            "synthetic instruction",
+        )
+        .unwrap();
+        let receipts = composer.dispatch(session_id).unwrap();
+        assert_eq!(receipts.len(), 1);
+        assert_eq!(receipts[0].operation_id, operation);
+        assert_eq!(receipts[0].ack.as_ref().unwrap().rpc_id, expected_rpc);
+    };
+
+    let first = bind(first_id, 0, "attempt-1").unwrap();
+    send(1, 1);
+    assert_eq!(bind(first_id, 0, "attempt-1").unwrap(), first);
+    assert_eq!(
+        bind(first_id, 1, "attempt-1")
+            .unwrap_err()
+            .downcast_ref::<IdentityFailureV1>(),
+        Some(&IdentityFailureV1::Conflict)
+    );
+    assert_eq!(
+        bind(first_id, 0, "different-attempt")
+            .unwrap_err()
+            .downcast_ref::<IdentityFailureV1>(),
+        Some(&IdentityFailureV1::Conflict)
+    );
+    // The original adapter keeps its RPC sequence across both replay and refusal.
+    send(1, 2);
+
+    let second = bind(second_id, 1, "attempt-2").unwrap();
+    assert_eq!(second.input_epoch, 2);
+    assert_eq!(
+        message_failure(&bind(first_id, 0, "attempt-1").unwrap_err()),
+        Some(SessionMessageFailureV1::BindingChanged)
+    );
+    send(2, 1);
+
+    let closed = composer.stop(Uuid::new_v4(), session_id).unwrap();
+    assert_eq!(closed.status, SessionConversationStatusV1::Closed);
+    assert_eq!(closed.input_epoch, 2);
+    assert_eq!(
+        message_failure(&bind(second_id, 1, "attempt-2").unwrap_err()),
+        Some(SessionMessageFailureV1::SessionClosed)
+    );
+    assert_eq!(
+        message_failure(&composer.dispatch(session_id).unwrap_err()),
+        Some(SessionMessageFailureV1::SessionClosed)
+    );
+    assert_eq!(
+        kind_count(
+            &retained.store,
+            "control.session_message.conversation_bound"
+        ),
+        2
+    );
+}
+
+#[test]
+fn composition_bind_replay_requires_explicit_rebind_after_restart() {
+    let harness = Harness::new();
+    harness.install_markers();
+    let retained = harness.retained("composition-bind-restart.json");
+    let (principal, membership) = provision_membership(&retained).unwrap();
+    let scope = personal_scope(&retained, &principal, &membership);
+    let session = launched_session(&retained, &scope, &principal);
+    let session_id = &session.session_id;
+    let first_id = Uuid::new_v4();
+    let open_composer = || {
+        SessionConversationComposerV1::new(
+            &retained.store,
+            &retained.owner,
+            &retained.source,
+            Duration::from_secs(10),
+        )
+        .unwrap()
+    };
+    {
+        let composer = open_composer();
+        let binding = composer
+            .admit_channel(
+                first_id,
+                session_id,
+                0,
+                channel_facts("attempt-1"),
+                spawn_fixture("normal"),
+            )
+            .unwrap();
+        assert_eq!(binding.input_epoch, 1);
+    }
+
+    // A new composer has the same durable Store and no local pipe or RPC state.
+    let restarted = open_composer();
+    let refusal = restarted
+        .admit_channel(
+            first_id,
+            session_id,
+            0,
+            channel_facts("attempt-1"),
+            spawn_fixture("normal"),
+        )
+        .unwrap_err();
+    assert_eq!(
+        message_failure(&refusal),
+        Some(SessionMessageFailureV1::ChannelNotAdmitted)
+    );
+    let rebound = restarted
+        .admit_channel(
+            Uuid::new_v4(),
+            session_id,
+            1,
+            channel_facts("attempt-2"),
+            spawn_fixture("normal"),
+        )
+        .unwrap();
+    assert_eq!(rebound.input_epoch, 2);
+    assert_eq!(rebound.attempt_id.as_deref(), Some("attempt-2"));
+    assert_eq!(
+        kind_count(
+            &retained.store,
+            "control.session_message.conversation_bound"
+        ),
+        2
+    );
+}
+
+#[test]
 fn composition_stop_after_issue_before_first_byte() {
     assert_eq!(
         assert_stop_fences_remaining_conversation_bytes(0, false, |_| "synthetic instruction"
