@@ -488,6 +488,27 @@ fn revalidate_initiator(tx: &Connection, row: &MessageRow) -> anyhow::Result<()>
     Ok(())
 }
 
+fn revalidate_emission_binding(
+    tx: &Connection,
+    row: &MessageRow,
+    expected_fingerprint: &str,
+    now: chrono::DateTime<chrono::Utc>,
+) -> anyhow::Result<()> {
+    let binding =
+        conversation_row(tx, &row.session_id)?.ok_or(failure(IdentityFailureV1::NotFound))?;
+    require_emittable_binding(&binding, now)?;
+    anyhow::ensure!(
+        binding.status == SessionConversationStatusV1::Active,
+        SessionMessageFailureV1::ChannelNotAdmitted
+    );
+    let fingerprint = binding.fingerprint()?;
+    anyhow::ensure!(
+        fingerprint == row.binding_fingerprint && fingerprint == expected_fingerprint,
+        SessionMessageFailureV1::BindingChanged
+    );
+    revalidate_initiator(tx, row)
+}
+
 impl Store {
     /// Durably enqueue one short instruction on the caller's own owned source.
     /// The transaction revalidates Store authority, the personal
@@ -836,20 +857,7 @@ impl Store {
             SessionMessageFailureV1::EmissionAlreadyIssued
         );
         let clock = workload::capture_control_time(&tx)?;
-        let binding =
-            conversation_row(&tx, &row.session_id)?.ok_or(failure(IdentityFailureV1::NotFound))?;
-        require_emittable_binding(&binding, clock.at())?;
-        anyhow::ensure!(
-            binding.status == SessionConversationStatusV1::Active,
-            SessionMessageFailureV1::ChannelNotAdmitted
-        );
-        let fingerprint = binding.fingerprint()?;
-        anyhow::ensure!(
-            fingerprint == row.binding_fingerprint
-                && fingerprint == command.expected_binding_fingerprint,
-            SessionMessageFailureV1::BindingChanged
-        );
-        revalidate_initiator(&tx, &row)?;
+        revalidate_emission_binding(&tx, &row, &command.expected_binding_fingerprint, clock.at())?;
         let mut event = Event::new(EMISSION_ISSUED_KIND);
         event.id = issue_id;
         event.timestamp = crate::broker_registry::format_time(clock.at());
@@ -887,6 +895,44 @@ impl Store {
             binding_fingerprint: row.binding_fingerprint,
             content_hash: row.content_hash,
             content: row.content,
+        })
+    }
+
+    /// Validate the dispatch's live handoff before a single nonblocking write.
+    /// This read never returns the body or issues another emission. The caller
+    /// retains the same write epoch through the syscall to fence durable STOP.
+    pub(crate) fn revalidate_session_message_emission_scoped(
+        &self,
+        epoch: &crate::human_authority::HumanSourcesWriteEpoch,
+        source: &crate::human_authority::OwnedSourceToken,
+        emission: &SessionMessageEmissionV1,
+    ) -> anyhow::Result<()> {
+        let access = HumanSourceAccess::write(epoch, source)?;
+        self.with_modern_read(&access, |tx| {
+            if !super::session_prepare::installed(tx)? {
+                return Err(failure(IdentityFailureV1::MigrationRequired));
+            }
+            let row = message_row(tx, &emission.operation_id.to_string())?
+                .ok_or(failure(IdentityFailureV1::NotFound))?;
+            let clock = workload::capture_control_time(tx)?;
+            revalidate_emission_binding(tx, &row, &emission.binding_fingerprint, clock.at())?;
+            anyhow::ensure!(
+                row.session_id == emission.session_id
+                    && u64::try_from(row.input_epoch)? == emission.input_epoch
+                    && row.content_hash == emission.content_hash,
+                SessionMessageFailureV1::BindingChanged
+            );
+            let issue_id = message_event_id(
+                b"ai-guard:session-message-emission:v1",
+                emission.operation_id,
+            );
+            anyhow::ensure!(
+                row.status == status_str(SessionMessageStatusV1::Unknown)
+                    && event_by_id(tx, &issue_id)?
+                        .is_some_and(|stored| stored.event.kind == EMISSION_ISSUED_KIND),
+                IdentityFailureV1::Conflict
+            );
+            Ok(())
         })
     }
 

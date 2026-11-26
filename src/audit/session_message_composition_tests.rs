@@ -746,10 +746,12 @@ fn composition_delivers_two_turns_then_stop_closes_right_and_channel() {
     assert_eq!(binding.input_epoch, 1);
     assert_eq!(binding.worker_id.as_deref(), Some("worker-1"));
 
-    // First instruction: queued durably, then delivered and acknowledged.
-    let body_one = "synthetic instruction one: summarize the fixture report";
+    // The first instruction spans writes but is one complete acknowledged frame.
+    let body_one_sentence = "synthetic instruction one: summarize the fixture report. ";
+    let body_one = body_one_sentence.repeat(100);
     let operation_one = Uuid::new_v4();
-    let queued = send_message(&retained, &scope, operation_one, session_uuid, 1, body_one).unwrap();
+    let queued =
+        send_message(&retained, &scope, operation_one, session_uuid, 1, &body_one).unwrap();
     assert_eq!(queued.status, SessionMessageStatusV1::Queued);
     let delivered = composer.dispatch(&session_id).unwrap();
     assert_eq!(delivered.len(), 1);
@@ -795,7 +797,7 @@ fn composition_delivers_two_turns_then_stop_closes_right_and_channel() {
             .collect::<rusqlite::Result<Vec<_>>>()
             .unwrap();
         for payload in payloads {
-            assert!(!payload.contains(body_one) && !payload.contains(body_two));
+            assert!(!payload.contains(body_one_sentence) && !payload.contains(body_two));
         }
     }
 
@@ -1267,6 +1269,15 @@ fn composition_bind_failure_leaves_no_channel() {
 
 #[test]
 fn composition_stop_after_issue_before_first_byte() {
+    assert_stop_fences_remaining_conversation_bytes(false);
+}
+
+#[test]
+fn composition_stop_between_write_chunks() {
+    assert_stop_fences_remaining_conversation_bytes(true);
+}
+
+fn assert_stop_fences_remaining_conversation_bytes(after_first_chunk: bool) {
     use std::{io::Read, os::fd::OwnedFd, os::unix::net::UnixStream, sync::mpsc, time::Instant};
 
     const WAIT: Duration = Duration::from_secs(5);
@@ -1291,8 +1302,8 @@ fn composition_stop_after_issue_before_first_byte() {
     .unwrap();
     let (paused, wait_for_pause) = mpsc::channel();
     let (resume, wait_for_resume) = mpsc::channel();
-    composer.set_before_first_write_for_test(move || {
-        paused.send(()).unwrap();
+    composer.set_before_write_for_test(usize::from(after_first_chunk), move |written| {
+        paused.send(written).unwrap();
         wait_for_resume
             .recv_timeout(WAIT * 2)
             .expect("fixture did not release dispatch");
@@ -1306,18 +1317,23 @@ fn composition_stop_after_issue_before_first_byte() {
             channel,
         )
         .unwrap();
+    let content = if after_first_chunk {
+        "x".repeat(crate::control::session_control::SESSION_MESSAGE_MAX_CONTENT_BYTES)
+    } else {
+        "synthetic instruction".into()
+    };
     send_message(
         &retained,
         &scope,
         operation,
         Uuid::parse_str(session_id).unwrap(),
         1,
-        "synthetic instruction",
+        &content,
     )
     .unwrap();
 
-    // The observer sees committed audit without borrowing the STOP write
-    // epoch, which can remain held while channel teardown waits for dispatch.
+    // Observe the durable close independently of channel teardown, which
+    // waits for dispatch to release its slot.
     let observer = rusqlite::Connection::open_with_flags(
         retained.source.descriptor().storage_binding.path(),
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
@@ -1327,12 +1343,16 @@ fn composition_stop_after_issue_before_first_byte() {
     let issue_id = message_event_id(b"ai-guard:session-message-emission:v1", operation);
     let close_id = message_event_id(b"ai-guard:session-conversation-close:v1", stop_operation);
 
-    let closed = std::thread::scope(|threads| {
+    let (closed, dispatch_result, written_before_stop) = std::thread::scope(|threads| {
         let resume = resume;
         let dispatch = threads.spawn(|| composer.dispatch(session_id));
-        wait_for_pause
+        let written_before_stop = wait_for_pause
             .recv_timeout(WAIT)
             .expect("dispatch did not pause");
+        assert_eq!(written_before_stop > 0, after_first_chunk);
+        if after_first_chunk {
+            assert!(written_before_stop < content.len());
+        }
         let issued = event_by_id(&observer, &issue_id)
             .unwrap()
             .expect("dispatch paused before the emission audit committed");
@@ -1352,17 +1372,29 @@ fn composition_stop_after_issue_before_first_byte() {
             std::thread::sleep(Duration::from_millis(5));
         }
         resume.send(()).unwrap();
-        let _ = dispatch.join().expect("dispatch thread panicked");
-        stop.join()
+        let dispatch_result = dispatch.join().expect("dispatch thread panicked");
+        let closed = stop
+            .join()
             .expect("STOP thread panicked")
-            .expect("STOP failed")
+            .expect("STOP failed");
+        (closed, dispatch_result, written_before_stop)
     });
 
     assert_eq!(closed.status, SessionConversationStatusV1::Closed);
-    let mut byte = [0];
-    let received = peer.read(&mut byte).expect("stdio peer did not reach EOF");
+    let mut received = Vec::new();
+    peer.read_to_end(&mut received)
+        .expect("stdio peer did not reach EOF");
     assert_eq!(
-        received, 0,
-        "the stdio peer received an octet after STOP committed"
+        received.len(),
+        written_before_stop,
+        "the stdio peer received bytes after STOP committed"
     );
+    assert!(!received.contains(&b'\n'));
+    assert_eq!(
+        message_failure(&dispatch_result.unwrap_err()),
+        Some(SessionMessageFailureV1::SessionClosed)
+    );
+    assert_eq!(message_status(&retained.store, operation), "unknown");
+    assert_eq!(kind_count(&retained.store, EMISSION_ISSUED_KIND), 1);
+    assert_eq!(kind_count(&retained.store, TRANSMITTED_KIND), 0);
 }

@@ -22,10 +22,18 @@
 
 use super::{bounded, content_hash, invalid};
 use serde_json::Value;
+use std::{
+    io::{self, Write},
+    os::fd::AsRawFd,
+    time::{Duration, Instant},
+};
 
 /// Upper bound of one framed conversation line (request or response). A frame
 /// beyond this bound is refused, never partially written or read.
 pub const MAX_FRAME_BYTES: usize = 64 * 1024;
+const MAX_WRITE_CHUNK_BYTES: usize = 4 * 1024;
+const FRAME_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
+const WRITE_RETRY_INTERVAL: Duration = Duration::from_millis(5);
 
 /// The exact `turn/start` request the control writes for one instruction. The
 /// control correlates it locally by `rpc_id`; the operation identity and the
@@ -348,20 +356,73 @@ impl StdioConversation {
         self
     }
 
-    /// Write one complete frame, newline-terminated, and flush. A partial or
+    /// Write one complete newline-terminated frame. A partial or
     /// failed write leaves delivery unknown; the caller never resends blindly.
-    pub fn write_frame(&mut self, frame: &str) -> std::io::Result<()> {
-        use std::io::Write;
-        invalid(frame.len() <= MAX_FRAME_BYTES).map_err(|_| {
-            std::io::Error::new(std::io::ErrorKind::InvalidInput, "frame too large")
-        })?;
+    pub fn write_frame(&mut self, frame: &str) -> io::Result<()> {
+        self.write_frame_guarded(frame, |_, _| Ok(()))
+    }
+
+    /// Enter the effect guard for each syscall, including the newline. Frame
+    /// preparation and any wait for pipe capacity precede guard acquisition.
+    pub(crate) fn write_frame_guarded<G, E>(
+        &mut self,
+        frame: &str,
+        mut enter_effect: impl FnMut(usize, Instant) -> Result<G, E>,
+    ) -> Result<(), E>
+    where
+        E: From<io::Error>,
+    {
+        if frame.len() > MAX_FRAME_BYTES {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "frame too large").into());
+        }
         let stdin = self
             .stdin
             .as_mut()
-            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::BrokenPipe, "stdin closed"))?;
-        stdin.write_all(frame.as_bytes())?;
-        stdin.write_all(b"\n")?;
-        stdin.flush()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::BrokenPipe, "stdin closed"))?;
+        let fd = stdin.as_raw_fd();
+        // SAFETY: the owned ChildStdin keeps fd live for both fcntl calls.
+        let nonblocking = unsafe {
+            let flags = libc::fcntl(fd, libc::F_GETFL);
+            flags >= 0 && libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) == 0
+        };
+        if !nonblocking {
+            return Err(io::Error::last_os_error().into());
+        }
+        let mut line = Vec::with_capacity(frame.len() + 1);
+        line.extend_from_slice(frame.as_bytes());
+        line.push(b'\n');
+        let deadline = Instant::now() + FRAME_WRITE_TIMEOUT;
+        let mut written = 0;
+        while written < line.len() {
+            let chunk = &line[written..(written + MAX_WRITE_CHUNK_BYTES).min(line.len())];
+            let result = {
+                let _effect = enter_effect(written, deadline)?;
+                if Instant::now() >= deadline {
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "conversation write timed out",
+                    )
+                    .into());
+                }
+                // ChildStdin is unbuffered. This is one nonblocking write;
+                // the guard drops before retry or any wait.
+                stdin.write(chunk)
+            };
+            match result {
+                Ok(0) => return Err(io::Error::from(io::ErrorKind::WriteZero).into()),
+                Ok(count) => written += count,
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    let delay = deadline.saturating_duration_since(Instant::now());
+                    std::thread::sleep(WRITE_RETRY_INTERVAL.min(delay));
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn close_input(&mut self) {
+        self.stdin = None;
     }
 
     /// Read the next non-empty line within the deadline. Harness noise lines
@@ -374,7 +435,7 @@ impl StdioConversation {
 
     /// Close the write side and reap the child. Used by STOP and by teardown.
     pub fn close(&mut self) {
-        self.stdin = None;
+        self.close_input();
         let _ = self.child.kill();
         let _ = self.child.wait();
     }

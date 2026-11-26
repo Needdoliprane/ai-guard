@@ -71,6 +71,12 @@ struct BoundConversation {
     channel: StdioConversation,
 }
 
+#[cfg(test)]
+struct BeforeWritePause {
+    min_written: usize,
+    run: Box<dyn FnOnce(usize) + Send>,
+}
+
 /// The trusted-control composition driving admitted session conversations.
 /// Holds no durable state itself: every fact is recorded through the owned
 /// Store under its write epoch before (or exactly at) the observed effect.
@@ -81,7 +87,7 @@ pub struct SessionConversationComposerV1<'a> {
     read_deadline: Duration,
     sessions: Mutex<BTreeMap<String, Arc<Mutex<BoundConversation>>>>,
     #[cfg(test)]
-    before_first_write: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    before_write: Mutex<Option<BeforeWritePause>>,
 }
 
 impl<'a> SessionConversationComposerV1<'a> {
@@ -104,27 +110,50 @@ impl<'a> SessionConversationComposerV1<'a> {
             read_deadline,
             sessions: Mutex::new(BTreeMap::new()),
             #[cfg(test)]
-            before_first_write: Mutex::new(None),
+            before_write: Mutex::new(None),
         })
     }
 
     #[cfg(test)]
-    pub(crate) fn set_before_first_write_for_test(
+    pub(crate) fn set_before_write_for_test(
         &mut self,
-        pause: impl FnOnce() + Send + 'static,
+        min_written: usize,
+        pause: impl FnOnce(usize) + Send + 'static,
     ) {
-        *self.before_first_write.get_mut().unwrap() = Some(Box::new(pause));
+        *self.before_write.get_mut().unwrap() = Some(BeforeWritePause {
+            min_written,
+            run: Box::new(pause),
+        });
+    }
+
+    #[cfg(test)]
+    fn pause_before_write_for_test(&self, written: usize) {
+        let mut pending = self.before_write.lock().unwrap();
+        if pending
+            .as_ref()
+            .is_some_and(|pause| written >= pause.min_written)
+        {
+            let pause = pending.take().unwrap();
+            drop(pending);
+            (pause.run)(written);
+        }
     }
 
     /// Write epoch with bounded transient-busy retry (STOP keeps priority over
     /// the business drain by closing the right to emit at the effect point).
     fn write_epoch(&self) -> anyhow::Result<HumanSourcesWriteEpoch> {
-        let start = Instant::now();
+        self.write_epoch_until(Instant::now() + EPOCH_RETRY_DEADLINE)
+    }
+
+    fn write_epoch_until(&self, deadline: Instant) -> anyhow::Result<HumanSourcesWriteEpoch> {
         loop {
             match self.owner.try_write_epoch() {
                 Ok(epoch) => return Ok(epoch),
-                Err(HumanAuthorityFailure::GateBusy) if start.elapsed() < EPOCH_RETRY_DEADLINE => {
-                    std::thread::sleep(EPOCH_RETRY_INTERVAL);
+                Err(HumanAuthorityFailure::GateBusy) if Instant::now() < deadline => {
+                    std::thread::sleep(
+                        EPOCH_RETRY_INTERVAL
+                            .min(deadline.saturating_duration_since(Instant::now())),
+                    );
                 }
                 Err(error) => return Err(error.into()),
             }
@@ -183,6 +212,8 @@ impl<'a> SessionConversationComposerV1<'a> {
             .lock()
             .expect("conversation registry")
             .insert(session_id.into(), slot);
+        // A replaced dispatch can need an epoch while it still owns the slot.
+        drop(epoch);
         if let Some(replaced) = replaced {
             // The durable bind committed: the replaced attempt's channel is
             // torn down explicitly, never by a message.
@@ -261,18 +292,26 @@ impl<'a> SessionConversationComposerV1<'a> {
                 .adapter
                 .issue_turn(operation_id, session_id, &emission.content)?;
             let frame = request.frame()?;
-            #[cfg(test)]
-            {
-                let pause = self.before_first_write.lock().unwrap().take();
-                if let Some(pause) = pause {
-                    pause();
-                }
-            }
-            if let Err(error) = bound.channel.write_frame(&frame) {
+            if let Err(error) = bound.channel.write_frame_guarded(
+                &frame,
+                |_written, deadline| -> anyhow::Result<_> {
+                    #[cfg(test)]
+                    self.pause_before_write_for_test(_written);
+                    let epoch = self.write_epoch_until(deadline)?;
+                    self.store.revalidate_session_message_emission_scoped(
+                        &epoch,
+                        self.source,
+                        &emission,
+                    )?;
+                    Ok(epoch)
+                },
+            ) {
                 // Possible emission with no observed complete write: delivery
-                // stays unknown, retained by the latch; never resent.
+                // stays unknown. Close input so no later frame can follow
+                // a truncated one.
                 bound.adapter.close_turn();
-                return Err(error.into());
+                bound.channel.close_input();
+                return Err(error);
             }
             let mut receipt = {
                 let epoch = self.write_epoch()?;
@@ -366,6 +405,9 @@ impl<'a> SessionConversationComposerV1<'a> {
                 session_id: session_id.into(),
             },
         )?;
+        // The durable close already fences writing. Dispatch must be able to
+        // read that close under its own epoch while it still owns the slot.
+        drop(epoch);
         let removed = self
             .sessions
             .lock()
