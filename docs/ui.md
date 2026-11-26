@@ -46,7 +46,7 @@ sessions. Candidate validation and visual evidence remain NOT_RUN here.
 
 ## Créer et intervenir sur une session — cible autorisée le 15 novembre 2026
 
-Le [contrat FR](engineering/SESSION_CONTROL.fr.md) et le [contrat EN](engineering/SESSION_CONTROL.md) rendent obligatoires deux actions nominatives : Nouvelle session et Envoyer une consigne. Elles restent à implémenter et qualifier ; cette section n’étend pas rétroactivement le périmètre livré.
+Le [contrat FR](engineering/SESSION_CONTROL.fr.md) et le [contrat EN](engineering/SESSION_CONTROL.md) rendent obligatoires deux actions nominatives : Nouvelle session et Envoyer une consigne. Le plan de contrôle durable et les vues owned sont implémentés (préparation/lancement retenus, consigne enregistrée/transmise/acquittée/inconnue, idempotence par opération stable, permissions distinctes côté serveur) ; la qualification de bout en bout sur runtimes et fournisseurs réels reste à conduire et n’est pas acquise par les seuls tests fixture. Cette section n’étend pas rétroactivement le périmètre qualifié.
 
 Nouvelle session choisit une cible projet/source opaque autorisée, tâche initiale et client/mode permis ; résolution effective et prérequis viennent de Rust. Préparer ne lance rien ; Lancer confirme l’intention exacte. Un timeout propose la relecture de la même opération, sans second Submit. Aucun chemin, argv, moteur, credential ou réseau libre dans le formulaire.
 
