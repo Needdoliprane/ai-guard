@@ -11,4 +11,6 @@ Utilisez un dashboard et un gateway configurés en `owned_sources`. Connectez-vo
 
 Pour retrouver une session existante, ouvrez **Ressources** et choisissez **Consulter le canal** sur une session dont vous êtes propriétaire. Le dashboard relit la liaison auprès du gateway. Choisissez **Utiliser ce canal** quand il est actif et que son échéance permet encore l’envoi. **Relire le canal** vérifie son état courant. Si l’époque d’entrée change, sélectionnez explicitement le nouveau canal.
 
+Si votre contexte autorise l’envoi et ne propose pas la vue Ressources, ouvrez **Sessions** et saisissez l’identifiant exact d’une session dont vous êtes propriétaire. Le gateway vérifie le contexte, le tenant et la propriété de la session.
+
 L’implémentation actuelle couvre les opérations durables du plan de contrôle et les vues du dashboard. Les tests du composeur du broker utilisent un enfant stdio contrôlé et un vrai Store owned. Le raccord à l’admission supervisée de production et les parcours complets avec runtimes et fournisseurs restent ouverts. [Contrat de session](../../engineering/SESSION_CONTROL.fr.md) · [Gates de qualification](../../engineering/PRODUCTION_READINESS.md)

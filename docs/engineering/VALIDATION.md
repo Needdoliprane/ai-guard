@@ -34,6 +34,14 @@ Manifeste
 Le candidat `b7ca640d` reprend les mêmes blobs testés pour le front et
 le périmètre Rust. La réception par un fournisseur réel reste ouverte.
 
+Sur `6e998fdc`, 437 tests front et le build passent, avec 8 tests
+ignorés. Un contexte qui dispose du droit d’envoi sans accès à
+Ressources peut saisir un UUID canonique connu. Le test vérifie un
+seul appel au gateway, le même message pour un refus de propriété ou
+une session absente et une nouvelle sélection explicite avant l’envoi.
+Le candidat `a67a18a4` reprend les mêmes fichiers front. Manifeste
+`7756a876ac42f4b05b756461c3fa16c3fc9110c6d2d3dabb84845e2ca53ec1fb`.
+
 ## 26 novembre 2026 — CI du candidat session
 
 Sur `16dd21b9`, le job front et les vérifications Rust préalables

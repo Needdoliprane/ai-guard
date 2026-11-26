@@ -11,4 +11,6 @@ Use a dashboard and gateway configured for `owned_sources`. Sign in with a named
 
 To return to an existing session, open **Ressources** and choose **Consulter le canal** on a session you own. The dashboard reads the binding from the gateway. Select **Utiliser ce canal** when the channel is active and has time remaining. **Relire le canal** checks the current status. If the input epoch changes, select the new channel explicitly.
 
+If your context grants sending and has no Resources view, open **Sessions** and enter the exact identifier of a session you own. The gateway still checks the context, tenant and session ownership.
+
 The current implementation covers the durable control-plane operations and the dashboard views. The broker composition exercises a controlled stdio child and a real owned Store in tests. The bridge from supervised production admission and the end-to-end runtime and provider paths remain open. [Session contract](../../engineering/SESSION_CONTROL.md) · [Qualification gates](../../engineering/PRODUCTION_READINESS.md)
