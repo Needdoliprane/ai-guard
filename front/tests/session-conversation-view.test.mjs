@@ -27,16 +27,24 @@ const exactFacts = {
 };
 const tick = () => new Promise((resolve) => setImmediate(resolve));
 
-async function mount(t, read, write = () => assert.fail("aucun envoi attendu"), receipt = () => assert.fail("aucune relecture de reçu attendue")) {
+async function mount(t, read, write = () => assert.fail("aucun envoi attendu"),
+  receipt = () => assert.fail("aucune relecture de reçu attendue"), offered = contexts) {
   const calls = [];
+  const accessReads = [];
   let dashboard;
   t.after(() => dashboard?.close());
   const root = installNodes(t, { fetch: async (path, options) => {
     const contextId = options.headers["X-AiGuard-Context"];
-    if (path === "/api/v1/human/identity") return Response.json({ ...identity(), contexts });
-    if (path.startsWith("/api/v1/human/resources")) return Response.json(page(contextId, [resource(secondUuid), shared]));
+    if (path === "/api/v1/human/identity") {
+      accessReads.push(path);
+      return Response.json({ ...identity(), contexts: offered });
+    }
+    if (path.startsWith("/api/v1/human/resources")) {
+      accessReads.push(path);
+      return Response.json(page(contextId, [resource(secondUuid), shared]));
+    }
     calls.push({ path, method: options.method, contextId, signal: options.signal });
-    if (path === route) return read();
+    if (path.startsWith(owned) && path.endsWith("/conversation")) return read(path);
     if (path === owned + "messages") return write(JSON.parse(options.body));
     if (path.startsWith(owned + "messages/")) return receipt(path.split("/").at(-1));
     assert.fail("requête inattendue " + path);
@@ -53,7 +61,7 @@ async function mount(t, read, write = () => assert.fail("aucun envoi attendu"), 
   };
   click("context-0");
   await tick();
-  return { root, byKey, click, calls };
+  return { root, byKey, click, calls, accessReads };
 }
 
 test("la ligne propriétaire ouvre Sessions et seul le canal actif sélectionné peut recevoir une consigne", async (t) => {
@@ -313,4 +321,116 @@ test("l’expiration conserve un envoi incertain consultable par son identifiant
   assert.deepEqual(checked, [sent[0].operation_id]);
   assert.match(root.textContent, /résultat de l’envoi épinglé reste inconnu/);
   assert.deepEqual(calls.map(({ method }) => method), ["GET", "POST", "GET"]);
+});
+
+const sendOnly = [{
+  ...context(),
+  capabilities: ["send_session_message"],
+  operations: catalogue({ session_message_send: send }),
+}];
+
+function submitKnownSession(byKey, sessionId) {
+  const input = byKey("sc-known-id");
+  const form = byKey("sc-known-form");
+  assert.ok(input && form, "la saisie directe est proposée dans Sessions");
+  input.value = sessionId;
+  const submit = new Event("submit", { cancelable: true });
+  form.dispatchEvent(submit);
+  assert.equal(submit.defaultPrevented, true, "l’identifiant ne devient pas une navigation");
+}
+
+test("Send seul ouvre Sessions et consulte uniquement l’UUID canonique saisi", async (t) => {
+  const { root, byKey, click, calls, accessReads } = await mount(t, () => Response.json(exactFacts),
+    undefined, undefined, sendOnly);
+  assert.equal(byKey("human-nav-sessions").attributes.get("aria-current"), "page");
+  assert.equal(byKey("human-nav-resources").disabled, true);
+  for (const id of ["", "00000000-0000-0000-0000-000000000000", "AAAAAAAA-0000-4000-8000-000000000000",
+    secondUuid + "?x=1", " " + secondUuid]) {
+    submitKnownSession(byKey, id);
+    assert.match(root.textContent, /UUID canonique/);
+  }
+  assert.equal(calls.length, 0);
+  submitKnownSession(byKey, secondUuid);
+  await tick();
+  assert.deepEqual(accessReads, ["/api/v1/human/identity"]);
+  assert.deepEqual(calls.map(({ path, method, contextId }) => [path, method, contextId]), [[route, "GET", "context-a"]]);
+  assert.equal(byKey("sm-send"), undefined);
+  click("sc-select");
+  assert.ok(byKey("sm-send"));
+});
+
+test("Send seul présente le même écran pour un refus et une session introuvable", async (t) => {
+  let responseStatus = 403;
+  const { root, byKey, calls, accessReads } = await mount(t,
+    () => errorResponse(responseStatus, responseStatus === 403 ? "permission_denied" : "not_found"),
+    undefined, undefined, sendOnly);
+  submitKnownSession(byKey, secondUuid);
+  await tick();
+  const refused = root.textContent;
+  assert.match(refused, /Session indisponible dans ce contexte/);
+  assert.equal(byKey("sc-select"), undefined);
+  assert.equal(byKey("sm-send"), undefined);
+
+  responseStatus = 404;
+  submitKnownSession(byKey, secondUuid);
+  await tick();
+  assert.equal(root.textContent, refused);
+  assert.deepEqual(calls.map(({ path, method }) => [path, method]), [[route, "GET"], [route, "GET"]]);
+  assert.deepEqual(accessReads, ["/api/v1/human/identity"]);
+});
+
+test("saisir une autre session ne redirige pas l’opération déjà incertaine", async (t) => {
+  const otherRoute = owned + uuid + "/conversation";
+  const held = Promise.withResolvers();
+  const sent = [];
+  const checked = [];
+  const { byKey, click, calls } = await mount(t,
+    (path) => path === route ? Response.json(exactFacts) : held.promise,
+    (request) => { sent.push(request); return errorResponse(503, "identity_unavailable"); },
+    (operationId) => {
+      checked.push(operationId);
+      return Response.json({
+        version: 1, operation_id: operationId, message_id: "msg-1", session_id: secondUuid,
+        input_hash: "a".repeat(64), content_hash: "b".repeat(64), binding_fingerprint: "c".repeat(64),
+        input_epoch: 1, status: "queued", ack: null, audit_seq: 21, audit_hash: "d".repeat(64), replayed: true,
+      });
+    }, sendOnly);
+  submitKnownSession(byKey, secondUuid);
+  await tick();
+  click("sc-select");
+  byKey("sm-content").value = "Consigne de la première session.";
+  click("sm-send");
+  await tick();
+
+  submitKnownSession(byKey, uuid);
+  assert.equal(byKey("sm-send-retry"), undefined);
+  assert.equal(byKey("sm-content"), undefined);
+  held.resolve(Response.json({ ...exactFacts, session_id: uuid, input_epoch: 8 }));
+  await tick();
+  assert.equal(byKey("sc-select").disabled, true);
+  assert.equal(sent.length, 1);
+
+  click("sm-unknown-refresh");
+  await tick();
+  assert.deepEqual(checked, [sent[0].operation_id]);
+  click("sc-select");
+  assert.equal(byKey("sm-content").value, "");
+  byKey("sm-content").value = "Consigne distincte.";
+  click("sm-send");
+  await tick();
+  assert.deepEqual(calls.filter(({ method }) => method === "GET").slice(0, 2).map(({ path }) => path), [route, otherRoute]);
+  assert.deepEqual(sent.map(({ session_id, expected_input_epoch }) => [session_id, expected_input_epoch]), [[secondUuid, 1], [uuid, 8]]);
+  assert.notEqual(sent[0].operation_id, sent[1].operation_id);
+});
+
+test("un contexte révoqué retire la saisie et relit les accès", async (t) => {
+  const { root, byKey, calls, accessReads } = await mount(t, () => errorResponse(403, "context_revoked", "select_context"),
+    undefined, undefined, sendOnly);
+  submitKnownSession(byKey, secondUuid);
+  await tick();
+  assert.equal(byKey("sc-known-id"), undefined);
+  assert.equal(byKey("sm-send"), undefined);
+  assert.match(root.textContent, /Choisir un contexte/);
+  assert.deepEqual(calls.map(({ path, method }) => [path, method]), [[route, "GET"]]);
+  assert.deepEqual(accessReads, ["/api/v1/human/identity", "/api/v1/human/identity"]);
 });

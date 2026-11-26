@@ -526,7 +526,7 @@ export class HumanDashboard {
       this.#sessionLaunch = view; page.append(view.element); view.start();
     }
     if (this.#canSessionMessage()) {
-      const view = new SessionConversationView({ context, api: this.#api,
+      const view = new SessionConversationView({ context, api: this.#api, allowKnownSession: !this.#canResources(),
         onAccessDoubt: () => { if (!this.#closed && this.#sessionConversation === view) void this.#loadIdentity(); },
         onReadStateChange: () => this.#updateRefreshState() });
       this.#sessionConversation = view; page.append(view.element);
@@ -1095,7 +1095,7 @@ export class HumanDashboard {
           try {
             const selected = this.#selectOfferedContext(context.id);
             if (!selected) return;
-            const landing = landingDestination(selected);
+            const landing = landingDestination(selected) ?? (this.#canSessionMessage() ? "sessions" : null);
             if (landing) this.#openView(landing);
             else { this.#mode = "contexts"; this.#message = "Ce contexte n’offre aucune opération de consultation disponible dans ce build. Faites vérifier vos accès."; this.#render(); }
           } catch (error) { this.#identityError = failure(error); this.#render(); }

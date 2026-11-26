@@ -2,12 +2,13 @@ import { button, el } from "./dom.ts";
 import { HumanApiError, HumanSuperseded, type HumanApiClient } from "./human-api.ts";
 import { HumanContractError } from "./human-model.ts";
 import { formatDate } from "./model.ts";
-import { messageDestination, type SessionConversationViewV1, type SessionMessageDestination } from "./session-message-model.ts";
+import { isNonNilCanonicalUuid, messageDestination, type SessionConversationViewV1, type SessionMessageDestination } from "./session-message-model.ts";
 import type { MessageDestinationRefusal } from "./session-message-flow.ts";
 import { SessionMessageView, type SessionMessageHost } from "./session-message-view.ts";
 
 interface SessionConversationHost extends SessionMessageHost {
   api: SessionMessageHost["api"] & Pick<HumanApiClient, "sessionConversation">;
+  allowKnownSession: boolean;
 }
 const statusLabel = {
   prepared: "Préparé · en attente d’admission", active: "Actif", closed: "Fermé",
@@ -53,7 +54,9 @@ export class SessionConversationView {
     });
     this.#refreshButton.dataset.focusKey = "sc-refresh";
     this.#body.setAttribute("aria-live", "polite");
-    this.#panel.append(el("h2", "", "Canal de conversation"), this.#body, el("div", "sl-actions", this.#refreshButton));
+    this.#panel.append(el("h2", "", "Canal de conversation"));
+    if (host.allowKnownSession) this.#panel.append(this.#knownSessionForm());
+    this.#panel.append(this.#body, el("div", "sl-actions", this.#refreshButton));
     this.element.append(this.#panel);
     this.#render();
   }
@@ -85,10 +88,17 @@ export class SessionConversationView {
       if (this.#selected && (this.#status(facts) !== "active" || !sameChannel(this.#selected, facts))) this.#withdraw();
     } catch (error) {
       if (this.#read !== read || error instanceof HumanSuperseded) return;
-      if (error instanceof HumanApiError && (error.status === 403 || error.status === 404)) this.#withdraw(true);
+      if (error instanceof HumanApiError && (error.status === 403 || error.status === 404)) {
+        this.#withdraw(true);
+        if (this.#host.allowKnownSession) {
+          this.#refused = null;
+          this.#error = "Session indisponible dans ce contexte.";
+          return;
+        }
+        if (error.status === 403) this.#host.onAccessDoubt();
+      }
       this.#error = error instanceof HumanApiError || error instanceof HumanContractError ?
         error.message : "Lecture du canal impossible. Réessayez.";
-      if (error instanceof HumanApiError && error.status === 403) this.#host.onAccessDoubt();
     } finally {
       if (this.#read === read) { this.#read = null; this.#render(); }
     }
@@ -110,6 +120,39 @@ export class SessionConversationView {
     this.#selectButton = null;
     this.#message.close();
     this.element.replaceChildren();
+  }
+
+  #knownSessionForm() {
+    const input = el("input", "text-input");
+    input.id = "sc-known-id"; input.type = "text"; input.autocomplete = "off";
+    input.autocapitalize = "off"; input.spellcheck = false; input.dataset.focusKey = "sc-known-id";
+    const label = el("label", "field-label", "Identifiant de la session"); label.htmlFor = input.id;
+    const problem = el("p", "control-error");
+    problem.id = "sc-known-id-error"; problem.hidden = true; problem.setAttribute("role", "alert");
+    input.setAttribute("aria-describedby", problem.id);
+    const submit = el("button", "button button-secondary", "Consulter le canal");
+    submit.type = "submit"; submit.dataset.focusKey = "sc-known-submit";
+    const form = el("form", "sl-rows", el("div", "sl-field", label, input, problem), el("div", "sl-actions", submit));
+    form.dataset.focusKey = "sc-known-form";
+    const showProblem = (text: string) => {
+      problem.textContent = text; problem.hidden = !text;
+      input.setAttribute("aria-invalid", String(!!text));
+    };
+    input.addEventListener("input", () => showProblem(""));
+    form.addEventListener("submit", (event) => {
+      event.preventDefault();
+      if (this.#closed) return;
+      const sessionId = input.value;
+      if (!isNonNilCanonicalUuid(sessionId)) {
+        showProblem("Saisissez l’UUID canonique de la session, en minuscules, avec ses tirets.");
+        input.focus();
+        return;
+      }
+      showProblem("");
+      input.value = "";
+      void this.selectSession(sessionId);
+    });
+    return form;
   }
 
   #destinationRefused(destination: SessionMessageDestination, code: MessageDestinationRefusal) {
@@ -196,10 +239,13 @@ export class SessionConversationView {
     } else {
       const refusal = this.#refused?.code;
       const status = refusal === "session_closed" ? statusLabel.closed : refusal ? statusLabel[refusal] : "";
-      this.#body.replaceChildren(status ? el("p", "", status) : "",
-        this.#error ? el("p", "control-error", this.#error) :
-          el("p", "muted", this.#read ? "Lecture du canal…" : this.#sessionId ? "Canal à relire." :
-            "Choisissez une session dont vous êtes propriétaire dans Ressources."));
+      const prompt = this.#read ? "Lecture du canal…" : this.#sessionId ? "Canal à relire." :
+        this.#host.allowKnownSession ? "" : "Choisissez une session dont vous êtes propriétaire dans Ressources.";
+      const notices = [];
+      if (status) notices.push(el("p", "", status));
+      if (this.#error) notices.push(el("p", "control-error", this.#error));
+      else if (prompt) notices.push(el("p", "muted", prompt));
+      this.#body.replaceChildren(...notices);
     }
     this.#host.onReadStateChange();
   }
