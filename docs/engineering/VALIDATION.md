@@ -1,5 +1,25 @@
 # Validation courante
 
+## 27 novembre 2026 — publication unique MySQL owned 14 et 15
+
+Sur `e992a5a1` (arbre `d5b590e7`), le sélecteur exact
+`owned_fresh_source_publishes_once_and_refuses_reentry` passe une fois
+en TLS puis une fois en mTLS sur MySQL 8.4.13 ARM64. Les deux
+exécutions utilisent le même libtest épinglé. Elles couvrent la
+publication initiale des formats 14 et 15, le refus sur cible non vide
+à la réentrée et le refus des lecteurs Legacy. Le profil mTLS exige
+le certificat client. Les conteneurs, réseaux, ports et fichiers
+privés sont fermés ou retirés à la fin de chaque profil.
+
+Un premier passage TLS était sorti 101 avec une cause non classée.
+Le conducteur suivant ajoute le droit de verrouillage de la lecture
+Legacy sur les seuls schémas de recette. Le texte de diagnostic TLS
+v2 attribue à tort une catégorie d’échec malgré les codes retour 0
+du libtest et du conducteur. Les reçus originaux restent intacts et
+le départ mTLS est lié à l’empreinte du reçu TLS.
+Manifeste `f1dc4f0f94d608b7c464a33405f4063340c22212cf5c615b359c31b94b7d6128`.
+L’admission par le gateway et la restauration owned restent à éprouver.
+
 ## 27 novembre 2026 — vérifications Legacy et diagnostic fournisseur
 
 Sur `093c640e` (arbre `b56ae467`), Cargo publie le CLI et le binaire
