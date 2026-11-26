@@ -40,10 +40,12 @@ pub(crate) struct TlsMaterial {
 }
 impl TlsMaterial {
     pub(crate) async fn create() -> Self {
+        // Canonical temporary parent: PrivateFile::open walks every component
+        // with O_NOFOLLOW and refuses the macOS /var symlink alias.
         let root = tempfile::Builder::new()
             .permissions(fs::Permissions::from_mode(0o700))
             .prefix("held-create-tls-")
-            .tempdir()
+            .tempdir_in(fs::canonicalize(std::env::temp_dir()).unwrap())
             .expect("create private loopback TLS fixture directory");
         let certificate = root.path().join("server-chain.pem");
         let leaf_certificate = root.path().join("server-leaf.pem");
@@ -224,7 +226,7 @@ impl Peer {
         let credential_root = tempfile::Builder::new()
             .permissions(fs::Permissions::from_mode(0o700))
             .prefix("held-create-credential-")
-            .tempdir()
+            .tempdir_in(fs::canonicalize(std::env::temp_dir()).unwrap())
             .expect("create a private bearer fixture directory");
         let token = credential_root.path().join("bearer");
         private_write(&token, TOKEN.as_bytes());

@@ -9,10 +9,13 @@ use crate::audit::authentication::{
 use crate::setup::storage::{Preparation, SecretMaterial};
 use std::{fs, os::unix::fs::PermissionsExt, path::Path};
 
+/// Private (0700) parent on the canonical temporary path: the control walk
+/// opens every component with O_NOFOLLOW and refuses the macOS /var alias,
+/// so the fixture must not hand a symlinked pathname to Directory/PrivateFile.
 fn parent() -> tempfile::TempDir {
     tempfile::Builder::new()
         .permissions(fs::Permissions::from_mode(0o700))
-        .tempdir()
+        .tempdir_in(fs::canonicalize(std::env::temp_dir()).unwrap())
         .unwrap()
 }
 fn legacy() -> SetupManifestV1 {

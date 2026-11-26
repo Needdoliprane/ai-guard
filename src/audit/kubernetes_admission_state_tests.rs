@@ -26,9 +26,11 @@ impl Fixture {
         Self::new_expiries(EXPIRY, EXPIRY)
     }
     pub(crate) fn new_expiries(binding_expiry: &str, grant_expiry: &str) -> Self {
+        // Canonical temporary parent: Directory::open_existing walks every
+        // component with O_NOFOLLOW and refuses the macOS /var symlink alias.
         let directory = tempfile::Builder::new()
             .permissions(fs::Permissions::from_mode(0o700))
-            .tempdir()
+            .tempdir_in(fs::canonicalize(std::env::temp_dir()).unwrap())
             .unwrap();
         let path = directory.path().join("tenant.sqlite");
         let store =
