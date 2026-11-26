@@ -1,5 +1,23 @@
 # Validation courante
 
+## 27 novembre 2026 — canal de conversation dans Chromium
+
+Le front de `bf64c76e` passe les six vérifications dans Chromium
+148.0.7778.96 sur une fixture HTTP en loopback. Les 131 fichiers suivis
+du front correspondent au gel. Le navigateur ouvre le canal depuis
+Ressources ou avec un UUID connu, vérifie le focus et le clavier, relit
+une fois après `session_closed` et retire l’envoi à échéance sans requête
+supplémentaire. Un changement de contexte annule la lecture en vol et
+efface la sélection et le brouillon.
+
+La recette produit un seul POST synthétique, zéro requête externe et
+zéro erreur de page. La fermeture de Chromium et du listener est
+vérifiée. Reçu `ba73fd2acea75c89d5a6322f1354a0280692662026b7b6e89094bc6e1139a7c0`.
+Manifeste des douze pièces privées
+`cad808da4f3c851dda5054621893c8c4e4e8a011d4bcb1415a6962d038012f4d`.
+La recette utilise des réponses de fixture. Le passage par le gateway
+Rust et l’envoi à un fournisseur réel restent à éprouver ensemble.
+
 ## 27 novembre 2026 — publication unique MySQL owned 14 et 15
 
 Sur `e992a5a1` (arbre `d5b590e7`), le sélecteur exact
