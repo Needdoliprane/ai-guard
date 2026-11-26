@@ -1003,9 +1003,10 @@ impl Store {
     }
 
     /// Record the exact correlated official protocol acknowledgement. Only a
-    /// transmitted message can become acknowledged; a divergent receipt under
-    /// the same operation is a conflict. The acknowledgement proves the
-    /// provider accepted the input, never that the instruction was executed.
+    /// transmitted message on its still-active binding can become acknowledged.
+    /// An exact replay serves an already committed receipt after STOP or rebind.
+    /// The acknowledgement proves the provider accepted the input, never that
+    /// the instruction was executed.
     pub(crate) fn record_session_message_acknowledged_scoped(
         &self,
         epoch: &crate::human_authority::HumanSourcesWriteEpoch,
@@ -1040,6 +1041,23 @@ impl Store {
         anyhow::ensure!(
             row.status == status_str(SessionMessageStatusV1::Transmitted),
             IdentityFailureV1::Conflict
+        );
+        // STOP or rebind can commit before a local slot learns of it. Fence
+        // a fresh ACK against the durable binding within this transaction.
+        let binding =
+            conversation_row(&tx, &row.session_id)?.ok_or(failure(IdentityFailureV1::NotFound))?;
+        anyhow::ensure!(
+            binding.status != SessionConversationStatusV1::Closed,
+            SessionMessageFailureV1::SessionClosed
+        );
+        anyhow::ensure!(
+            binding.status == SessionConversationStatusV1::Active,
+            SessionMessageFailureV1::ChannelNotAdmitted
+        );
+        anyhow::ensure!(
+            u64::try_from(row.input_epoch).ok() == Some(binding.input_epoch)
+                && binding.fingerprint()? == row.binding_fingerprint,
+            SessionMessageFailureV1::BindingChanged
         );
         let clock = workload::capture_control_time(&tx)?;
         let mut event = Event::new(ACKNOWLEDGED_KIND);
