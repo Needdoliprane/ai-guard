@@ -108,8 +108,12 @@ les opérations à clé privée, le risque n'est pas atteignable dans ce produit
 `=4.1.0` est conservé et `Cargo.lock` reste inchangé. L'exception doit être
 retirée dès qu'une version d'openidconnect exige `rsa >= 0.10` ; elle ne
 couvre ni un futur usage private_key_jwt/JWE, ni un nouvel advisory sur le
-chemin de vérification. Le câblage de `cargo audit` dans la CI reste à faire
-par le coordinateur ; la commande de revue est `cargo audit` à la racine.
+chemin de vérification. Le job `dependency-audit` de la [CI](../../.github/workflows/ci.yaml)
+installe `cargo-audit 0.23.0` avec son verrou et exécute
+`cargo audit --file Cargo.lock` à la racine avec la base RustSec rafraîchie.
+Le job fait partie du succès de CI exigé par le workflow de release sur
+le commit exact. Les suites Rust et frontend ont leurs propres jobs et
+résultats. Consigner le résultat de l’audit sur la candidate de release.
 Relevé du 26 novembre 2026 : `cargo-audit 0.23.0`, base RustSec `b9b8a3c2c`,
 348 dépendances du lockfile. Sans config effective, l'avis rsa 0.9.10 est
 signalé et la commande échoue ; avec `.cargo/audit.toml`, `cargo audit` sort

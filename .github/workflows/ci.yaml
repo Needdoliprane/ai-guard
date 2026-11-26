@@ -64,6 +64,20 @@ jobs:
                 .version == $version and .build.revision == $revision)
             '
 
+  dependency-audit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the pinned RustSec scanner
+        run: cargo install --locked --version '=0.23.0' cargo-audit
+      - name: Audit the locked Rust dependencies
+        run: |
+          test -f .cargo/audit.toml
+          cargo audit --file Cargo.lock
+
   frontend-check:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
