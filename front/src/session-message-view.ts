@@ -36,6 +36,7 @@ export class SessionMessageView {
   /** A destination change that arrived while a send was in flight; applied once it settles. */
   #pendingDestination: SessionMessageDestination | null | undefined = undefined;
   #closed = false;
+  #channelCurrent = true;
   #abort = new AbortController();
   /** The exact send intent last sent, kept so a retry replays the identical body (same operation, same content). */
   #intent: { content: string; key: string } | null = null;
@@ -58,10 +59,13 @@ export class SessionMessageView {
   }
   get reading() { return this.#journey.sending; }
   start() { this.#render(); }
-  /** The journey holds no periodic read; an explicit refresh re-renders its current state. Status is re-read by action. */
-  refresh() { this.#render(); return Promise.resolve(); }
+  setChannelCurrent(current: boolean) {
+    if (this.#channelCurrent === current) return;
+    this.#channelCurrent = current;
+    this.#paintForm();
+  }
   /**
-   * Set the destination from a real launch receipt. A changed session or epoch withdraws the held receipt (the old
+   * Set the destination from a current conversation read. A changed session or epoch withdraws the held receipt (the old
    * binding can no longer be targeted); while a send is in flight the change is deferred until it settles.
    */
   setDestination(destination: SessionMessageDestination | null) {
@@ -69,9 +73,13 @@ export class SessionMessageView {
     this.#applyDestination(destination);
   }
   #applyDestination(destination: SessionMessageDestination | null) {
-    const changed = this.#destination?.sessionId !== destination?.sessionId || this.#destination?.inputEpoch !== destination?.inputEpoch;
+    const changed = this.#destination?.sessionId !== destination?.sessionId || this.#destination?.inputEpoch !== destination?.inputEpoch ||
+      this.#destination?.sourceId !== destination?.sourceId;
     this.#destination = destination;
-    if (changed) { this.#journey.reset(); this.#intent = null; this.#problem = null; }
+    if (changed) {
+      this.#resetJourney();
+      this.#contentInput.value = "";
+    }
     this.#render();
   }
   close() {
@@ -96,7 +104,7 @@ export class SessionMessageView {
     const sendLabel = retry ? "Réessayer le même envoi" : "Envoyer la consigne";
     const send = button(sendLabel, "button button-primary", () => { void this.#send(); });
     send.dataset.focusKey = retry ? "sm-send-retry" : "sm-send";
-    send.disabled = sending || !offers.send || !destination || expired || phase === "sent";
+    send.disabled = !this.#channelCurrent || sending || !offers.send || !destination || expired || phase === "sent";
     const reset = button("Nouvelle consigne", "button button-secondary", () => this.#reset());
     reset.dataset.focusKey = "sm-reset"; reset.disabled = sending || (phase === "editing" && !this.#intent);
     const fields: (HTMLElement | null)[] = [
@@ -107,18 +115,18 @@ export class SessionMessageView {
         el("p", "field-help", "8192 octets maximum. Seuls le saut de ligne et la tabulation sont admis comme caractères de contrôle. Le masquage des secrets est appliqué par le contrôle avant enregistrement.")),
       this.#problem ? el("p", "control-error", CONTENT_PROBLEM_TEXT[this.#problem]) : null,
       !offers.send ? el("p", "control-error", "Ce contexte n’offre pas l’envoi de consigne : aucune requête n’est émise. La lecture, l’administration et l’approbation de lancement ne l’impliquent pas. Faites vérifier vos droits.") : null,
-      !destination && offers.send ? el("p", "muted", "Aucune session retenue dans ce contexte. La destination provient d’un reçu de lancement réel ; lancez d’abord une session pour obtenir une liaison vers laquelle envoyer.") : null,
+      !destination && offers.send ? el("p", "muted", "Aucune session retenue. Choisissez un canal actif pour envoyer une consigne.") : null,
       expired ? el("p", "control-error", "L’échéance d’origine de la session est dépassée : elle garde priorité sur toute nouvelle consigne. Relisez la session.") : null,
       el("div", "sl-actions", send, reset)];
     this.#form.replaceChildren(...fields.filter((node): node is HTMLElement => node !== null));
   }
   #destinationCard() {
     const destination = this.#destination;
-    if (!destination) return el("div", "sl-conversation", el("h4", "", "Destination"), el("p", "muted", "Inconnue · aucun reçu de lancement retenu."));
+    if (!destination) return el("div", "sl-conversation", el("h4", "", "Destination"), el("p", "muted", "Aucun canal sélectionné."));
     const unknown = (value: string | null) => value === null ? el("span", "muted", "Inconnu · en attente de l’admission du broker") : mono(value);
     return el("div", "sl-conversation",
       el("h4", "", "Destination retenue"),
-      el("p", "muted", "Issue du reçu de lancement de cette session : la liaison est épinglée par son époque d’entrée. Un redémarrage ou un changement de canal avance l’époque et refuse une consigne périmée au lieu de la rediriger."),
+      el("p", "muted", "L’envoi cible l’époque d’entrée affichée. Le contrôle vérifie cette époque avant d’enregistrer la consigne."),
       el("div", "sl-rows",
         row("Session", mono(destination.sessionId)),
         row("Époque d’entrée", String(destination.inputEpoch)),
@@ -179,14 +187,17 @@ export class SessionMessageView {
   }
   #reset() {
     if (this.#journey.sending) return;
-    this.#journey.reset(); this.#intent = null; this.#problem = null;
-    this.#abort = new AbortController();
+    this.#resetJourney();
     this.#render();
+  }
+  #resetJourney() {
+    this.#abort.abort(); this.#abort = new AbortController();
+    this.#journey = new SessionMessageJourney(); this.#intent = null; this.#problem = null;
   }
   async #send() {
     const offers = sessionMessageOffers(this.#host.context);
     const destination = this.#destination;
-    if (this.#closed || this.#journey.sending || !offers.send || !destination || destinationExpired(destination, this.#now())) return;
+    if (this.#closed || !this.#channelCurrent || this.#journey.sending || !offers.send || !destination || destinationExpired(destination, this.#now())) return;
     // A retry after an unknown outcome replays the identical intent; a fresh send reads the current instruction.
     if (this.#journey.phase !== "unknown" || !this.#intent) {
       const content = this.#contentInput.value;
@@ -195,11 +206,12 @@ export class SessionMessageView {
       this.#intent = { content, key: JSON.stringify([destination.sessionId, destination.inputEpoch, content]) };
     }
     const intent = this.#intent;
+    const outcome = this.#journey.send(intent.key, (operationId) => this.#host.api.sessionMessageSend(
+      { version: 1, operation_id: operationId, session_id: destination.sessionId,
+        expected_input_epoch: destination.inputEpoch, content: intent.content }, this.#abort.signal));
     this.#render();
     try {
-      await this.#journey.send(intent.key, (operationId) => this.#host.api.sessionMessageSend(
-        { version: 1, operation_id: operationId, session_id: destination.sessionId,
-          expected_input_epoch: destination.inputEpoch, content: intent.content }, this.#abort.signal));
+      await outcome;
     } catch (error) {
       if (error instanceof HumanSuperseded || this.#closed) return;
     }
@@ -210,13 +222,15 @@ export class SessionMessageView {
   }
   async #refreshStatus() {
     if (this.#closed || this.#journey.sending || !this.#journey.receipt) return;
+    const journey = this.#journey;
     try {
-      await this.#journey.refresh((operationId) => this.#host.api.sessionMessageReceipt(operationId, this.#abort.signal));
+      await journey.refresh((operationId) => this.#host.api.sessionMessageReceipt(operationId, this.#abort.signal));
     } catch (error) {
       if (error instanceof HumanSuperseded || this.#closed) return;
     }
-    if (this.#journey.error && messageContextLost(this.#journey.error)) { this.#host.onAccessDoubt(); return; }
-    if (!this.#closed) this.#render();
+    if (this.#closed || this.#journey !== journey) return;
+    if (journey.error && messageContextLost(journey.error)) { this.#host.onAccessDoubt(); return; }
+    this.#render();
   }
   #applyPendingDestination() {
     if (this.#pendingDestination !== undefined) {

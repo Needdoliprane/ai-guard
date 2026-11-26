@@ -1,7 +1,6 @@
 // Strict wire models of the SendSessionMessage journey served by the owned human routes:
 // POST /api/v1/human/owned/sessions/messages and GET /api/v1/human/owned/sessions/messages/{operation_id}.
-// Pure: no DOM, no network, no clock. The control revalidates the personal SendSessionMessage context, the session's
-// owner ACL, the retained binding (STOP, deadline, epoch pin) and the masking policy before the mandatory audit and the
+// The control revalidates the personal SendSessionMessage context, the session’s owner ACL, the retained binding (STOP, deadline, epoch pin) and the masking policy before the mandatory audit and the
 // message row commit together. The browser only names the session, the input epoch it read and the short instruction;
 // the body is protected tenant business data, never duplicated into the audit, URLs, argv, logs or errors.
 // Truthful delivery: queued (durably recorded) != transmitted (a complete frame written to the exact owned channel) !=
@@ -9,7 +8,6 @@
 // None of these states means the instruction was executed.
 import { HumanContractError, boundedText, object, uuid, type HumanContext } from "./human-model.ts";
 import { can } from "./access-model.ts";
-import type { SessionLaunchReceipt } from "./session-launch-model.ts";
 
 function require(condition: unknown): asserts condition { if (!condition) throw new HumanContractError(); }
 function closed(value: unknown, fields: readonly string[]): asserts value is Record<string, unknown> {
@@ -19,7 +17,7 @@ const hex64 = (value: unknown): value is string => typeof value === "string" && 
 const epochNumber = (value: unknown): value is number => typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 const auditSeq = (value: unknown): value is number => typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 // A canonical hyphenated UUID, never nil: the control refuses a nil operation or session.
-const canonicalUuid = (value: unknown): value is string => uuid(value) && value === value.toLowerCase() && value !== "00000000-0000-0000-0000-000000000000";
+export const isNonNilCanonicalUuid = (value: unknown): value is string => uuid(value) && value === value.toLowerCase() && value !== "00000000-0000-0000-0000-000000000000";
 
 /** Upper bound of one send body, exactly as the route enforces it. */
 export const SESSION_MESSAGE_BODY_BYTES = 16384;
@@ -41,21 +39,15 @@ export interface SessionMessageReceipt {
   audit_seq: number; audit_hash: string; replayed: boolean;
 }
 
-/**
- * The destination of a send journey, derived only from a real retained launch receipt's conversation binding.
- * The browser never invents a session or an epoch: an arbitrary UUID is not a binding. null when the binding's
- * session is not a canonical UUID the message contract can pin.
- */
+/** The pinned destination of a send journey, taken from a current active channel. */
 export interface SessionMessageDestination {
-  sessionId: string; inputEpoch: number; tenantId: string; sourceId: string; launchTargetId: string;
+  sessionId: string; inputEpoch: number; tenantId: string; sourceId: string;
   provider: string | null; protocol: string | null; expiresAt: string;
 }
-export function messageDestination(receipt: SessionLaunchReceipt): SessionMessageDestination | null {
-  const binding = receipt.conversation;
-  if (!canonicalUuid(binding.session_id)) return null;
-  return { sessionId: binding.session_id, inputEpoch: binding.input_epoch, tenantId: binding.tenant_id,
-    sourceId: binding.source_id, launchTargetId: binding.launch_target_id, provider: binding.provider,
-    protocol: binding.protocol, expiresAt: binding.expires_at };
+export function messageDestination(facts: SessionConversationViewV1, now: number): SessionMessageDestination | null {
+  if (facts.status !== "active" || !isNonNilCanonicalUuid(facts.session_id) || Date.parse(facts.expires_at) <= now) return null;
+  return { sessionId: facts.session_id, inputEpoch: facts.input_epoch, tenantId: facts.tenant_id,
+    sourceId: facts.source_id, provider: facts.provider, protocol: facts.protocol, expiresAt: facts.expires_at };
 }
 /** The original deadline keeps priority over new input: an elapsed binding can no longer be sent to. */
 export function destinationExpired(destination: SessionMessageDestination, now: number): boolean {
@@ -88,7 +80,7 @@ export const CONTENT_PROBLEM_TEXT: Readonly<Record<ContentProblem, string>> = {
 
 /** The closed body of one send, checked against its bounds before any request. The body is tenant business data. */
 export function sessionMessageBody(request: SessionMessageRequest): string {
-  require(request.version === 1 && canonicalUuid(request.operation_id) && canonicalUuid(request.session_id) &&
+  require(request.version === 1 && isNonNilCanonicalUuid(request.operation_id) && isNonNilCanonicalUuid(request.session_id) &&
     epochNumber(request.expected_input_epoch) && messageContentProblem(request.content) === null);
   const body = JSON.stringify({ version: 1, operation_id: request.operation_id, session_id: request.session_id,
     expected_input_epoch: request.expected_input_epoch, content: request.content });
@@ -108,8 +100,8 @@ function ack(value: unknown): SessionMessageAck | null {
 export function parseSessionMessageReceipt(value: unknown, expected: { operationId: string; sessionId?: string }): SessionMessageReceipt {
   closed(value, ["version", "operation_id", "message_id", "session_id", "input_hash", "content_hash", "binding_fingerprint",
     "input_epoch", "status", "ack", "audit_seq", "audit_hash", "replayed"]);
-  require(value.version === 1 && canonicalUuid(value.operation_id) && value.operation_id === expected.operationId &&
-    boundedText(value.message_id, 256) && canonicalUuid(value.session_id) &&
+  require(value.version === 1 && isNonNilCanonicalUuid(value.operation_id) && value.operation_id === expected.operationId &&
+    boundedText(value.message_id, 256) && isNonNilCanonicalUuid(value.session_id) &&
     (expected.sessionId === undefined || value.session_id === expected.sessionId) &&
     hex64(value.input_hash) && hex64(value.content_hash) && hex64(value.binding_fingerprint) &&
     epochNumber(value.input_epoch) && STATUSES.includes(value.status as SessionMessageStatus) &&
@@ -123,9 +115,29 @@ export function parseSessionMessageReceipt(value: unknown, expected: { operation
     audit_seq: value.audit_seq, audit_hash: value.audit_hash, replayed: value.replayed };
 }
 
+/** Current channel facts returned to the authorized owner by the control. */
+export interface SessionConversationViewV1 {
+  version: 1; tenant_id: string; source_id: string; session_id: string; input_epoch: number;
+  provider: string | null; protocol: string | null; expires_at: string;
+  status: "prepared" | "active" | "closed";
+}
+
+export function parseSessionConversation(value: unknown, sessionId: string, tenantId: string): SessionConversationViewV1 {
+  closed(value, ["version", "tenant_id", "source_id", "session_id", "input_epoch", "provider", "protocol", "expires_at", "status"]);
+  const { version, tenant_id, source_id, session_id, input_epoch, provider, protocol, expires_at, status } = value;
+  require(version === 1 && tenant_id === tenantId && boundedText(tenant_id, 128) && boundedText(source_id, 256) &&
+    isNonNilCanonicalUuid(session_id) && session_id === sessionId && epochNumber(input_epoch) &&
+    (provider === null || boundedText(provider, 128)) && (protocol === null || boundedText(protocol, 128)) &&
+    boundedText(expires_at, 40) && /^\d{4}-\d\d-\d\dT.+(?:Z|[+-]\d\d:\d\d)$/.test(expires_at) && Number.isFinite(Date.parse(expires_at)) &&
+    (status === "prepared" || status === "active" || status === "closed") &&
+    (status !== "active" || provider !== null && protocol !== null));
+  return { version, tenant_id, source_id, session_id, input_epoch, provider, protocol, expires_at, status };
+}
+
 export const sessionMessageUrls = {
   send: () => "/api/v1/human/owned/sessions/messages",
-  receipt: (operationId: string) => { require(canonicalUuid(operationId)); return `/api/v1/human/owned/sessions/messages/${operationId}`; },
+  conversation: (sessionId: string) => { require(isNonNilCanonicalUuid(sessionId)); return `/api/v1/human/owned/sessions/${sessionId}/conversation`; },
+  receipt: (operationId: string) => { require(isNonNilCanonicalUuid(operationId)); return `/api/v1/human/owned/sessions/messages/${operationId}`; },
 };
 
 /**
@@ -134,11 +146,11 @@ export const sessionMessageUrls = {
  * context offers nothing here, and a visible button is never an authorization.
  */
 export function sessionMessageOffers(context: HumanContext | null) {
-  return { send: can(context, "session_message_send") };
+  return { send: sessionMessageAvailable(context) };
 }
 /** Whether the send destination is offered at all by this context. */
 export function sessionMessageAvailable(context: HumanContext | null): boolean {
-  return can(context, "session_message_send");
+  return context?.mode === "personal" && can(context, "session_message_send");
 }
 
 /** Truthful, distinct delivery labels. None of these states means the instruction was executed. */

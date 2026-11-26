@@ -10,13 +10,12 @@ import { RENDER_STEP, SupervisionView, defaultSupervisionPreferences } from "./s
 import { JournalView, defaultJournalPreferences } from "./journal-view.ts";
 import { OverviewView, defaultOverviewPreferences } from "./overview-view.ts";
 import type { OverviewPreferences } from "./overview-view.ts";
-import { brokerAuthorityLabel, defaultFleetFilter, grantKey, landingDestination, supervisionAccess } from "./supervision-model.ts";
+import { brokerAuthorityLabel, defaultFleetFilter, grantKey, landingDestination, principalKey, supervisionAccess } from "./supervision-model.ts";
 import { GrantEditor, MembershipEditor } from "./delegation-views.ts";
 import { SessionLaunchView } from "./session-launch-view.ts";
 import { sessionLaunchAvailable } from "./session-launch-model.ts";
-import type { SessionLaunchReceipt } from "./session-launch-model.ts";
-import { SessionMessageView } from "./session-message-view.ts";
-import { messageDestination, sessionMessageAvailable } from "./session-message-model.ts";
+import { SessionConversationView } from "./session-conversation-view.ts";
+import { isNonNilCanonicalUuid, sessionMessageAvailable } from "./session-message-model.ts";
 import { CAPABILITY_LABELS, DELEGATED_OUTCOME_UNKNOWN, DelegatedChangeRecovery, delegatedContextLost, delegatedReplayRefusal,
   delegationOffers } from "./delegation-model.ts";
 import type { Membership } from "./admin-model.ts";
@@ -111,11 +110,9 @@ export class HumanDashboard {
   /** The prepare→launch journey mounted for the selected context; withdrawn with it. */
   #sessionLaunch: SessionLaunchView | null = null;
   /** The send-instruction journey mounted for the selected context; withdrawn with it. */
-  #sessionMessage: SessionMessageView | null = null;
+  #sessionConversation: SessionConversationView | null = null;
   /** The persistent container of the sessions destination, keeping both journeys across navigation within a context. */
   #sessionsPage: HTMLElement | null = null;
-  /** The last real launch receipt of this context: the only provenance of a send destination. Purged with the context. */
-  #lastLaunch: SessionLaunchReceipt | null = null;
   /** A subject asked from the summary: opened once, by the destination that reads it, if it is in the loaded window. */
   #pendingSupervisionDetail: { kind: "worker"; id: string } | null = null;
   #pendingBroker: string | null = null;
@@ -184,7 +181,7 @@ export class HumanDashboard {
     if (this.#closed) return;
     if (document.visibilityState !== "visible") {
       this.#visibilityGeneration++;
-      this.#streamAbort.abort(); this.#supervision?.suspend(); this.#journal?.suspend();
+      this.#streamAbort.abort(); this.#supervision?.suspend(); this.#journal?.suspend(); this.#sessionConversation?.suspend();
       if (!this.#api.readBudgetStopped && this.#usesResourceStream()) {
         this.#resourceStreamNeedsAccess = true;
         this.#invalidation++;
@@ -223,6 +220,7 @@ export class HumanDashboard {
     if (!success) return;
     this.#resourceStreamNeedsAccess = false;
     if (this.#usesResourceStream()) this.#startStream();
+    if (this.#mode === "sessions") void this.#sessionConversation?.refresh();
     this.#refreshActive(true);
   }
   #resumeViews() {
@@ -281,7 +279,7 @@ export class HumanDashboard {
       onReadBudgetExhausted: () => {
         this.#streamAbort.abort(); this.#exportAbort.abort(); clearTimeout(this.#refreshTimer); this.#refreshTimer = undefined;
         this.#resources.stale = true; this.#events.stale = true; this.#brokers.stale = true; this.#workers.stale = true; this.#federation.stale = true;
-        this.#streamStatus = "Lecture automatique suspendue"; this.#supervision?.budgetStopped(); this.#render();
+        this.#streamStatus = "Lecture automatique suspendue"; this.#supervision?.budgetStopped(); this.#sessionConversation?.suspend(); this.#render();
       },
     });
     this.#delegatedChange = new DelegatedChangeRecovery(this.#api);
@@ -513,8 +511,8 @@ export class HumanDashboard {
   #canSessions() { return this.#canSessionLaunch() || this.#canSessionMessage(); }
   #closeSessions() {
     const launch = this.#sessionLaunch; this.#sessionLaunch = null; launch?.close();
-    const message = this.#sessionMessage; this.#sessionMessage = null; message?.close();
-    this.#sessionsPage = null; this.#lastLaunch = null;
+    const conversation = this.#sessionConversation; this.#sessionConversation = null; conversation?.close();
+    this.#sessionsPage = null;
   }
   #openSessions() {
     const context = this.#context;
@@ -524,22 +522,15 @@ export class HumanDashboard {
     if (this.#canSessionLaunch()) {
       const view = new SessionLaunchView({ context, api: this.#api,
         onAccessDoubt: () => { if (!this.#closed && this.#sessionLaunch === view) void this.#loadIdentity(); },
-        onReadStateChange: () => this.#updateRefreshState(),
-        onLaunched: (receipt) => { if (this.#closed || this.#sessionLaunch !== view) return; this.#lastLaunch = receipt; this.#mountSessionMessage(); } });
+        onReadStateChange: () => this.#updateRefreshState() });
       this.#sessionLaunch = view; page.append(view.element); view.start();
     }
-    this.#mountSessionMessage();
-  }
-  /** Mount or retarget the send journey from the real retained launch receipt; never invent a session or an epoch. */
-  #mountSessionMessage() {
-    const context = this.#context; const page = this.#sessionsPage;
-    if (!context || !page || !this.#canSessionMessage()) return;
-    const destination = this.#lastLaunch ? messageDestination(this.#lastLaunch) : null;
-    if (this.#sessionMessage) { this.#sessionMessage.setDestination(destination); return; }
-    const view = new SessionMessageView({ context, api: this.#api,
-      onAccessDoubt: () => { if (!this.#closed && this.#sessionMessage === view) void this.#loadIdentity(); },
-      onReadStateChange: () => this.#updateRefreshState() }, destination);
-    this.#sessionMessage = view; page.append(view.element); view.start();
+    if (this.#canSessionMessage()) {
+      const view = new SessionConversationView({ context, api: this.#api,
+        onAccessDoubt: () => { if (!this.#closed && this.#sessionConversation === view) void this.#loadIdentity(); },
+        onReadStateChange: () => this.#updateRefreshState() });
+      this.#sessionConversation = view; page.append(view.element);
+    }
   }
   /** From a point of attention of the summary to the exact view of its subject, when this context offers it. */
   #openSubject(subject: { kind: "worker" | "broker"; id: string }) {
@@ -738,11 +729,12 @@ export class HumanDashboard {
     if (this.#downloadUrl) URL.revokeObjectURL(this.#downloadUrl); this.#downloadUrl = null;
     this.#exporting = false; this.#exportMessage = ""; this.#exportPages = 0; this.#exportBytes = 0;
   }
-  #openView(mode: DashboardMode) {
+  #openView(mode: DashboardMode, conversationSessionId?: string) {
     if (this.#delegatedChange.phase === "sending") return;
     // One view owns server data at a time: leaving the unified view aborts its reads and drops its rows.
     if (mode !== "supervision" && this.#mode === "supervision") this.#closeSupervision();
     if (mode !== "journal" && this.#mode === "journal") this.#closeJournal();
+    if (mode !== "sessions" && this.#mode === "sessions") this.#sessionConversation?.suspend();
     if (mode !== this.#mode) this.#closeEditor();
     if (mode !== "overview" && this.#mode === "overview") this.#closeOverview();
     // The sessions journeys stay mounted across navigation within the same context: an in-flight or unknown send keeps
@@ -778,7 +770,9 @@ export class HumanDashboard {
       if (this.#mode !== mode || !this.#sessionsPage) {
         this.#stopViewReads(); this.#resources = readState(); this.#events = readState(); this.#selection = null;
         this.#purgeBrokers(); this.#purgeWorkers(); this.#purgeFederation(); this.#mode = mode; this.#openSessions();
-      } else { void this.#sessionLaunch?.refresh(); void this.#sessionMessage?.refresh(); }
+      } else void this.#sessionLaunch?.refresh();
+      if (conversationSessionId) void this.#sessionConversation?.selectSession(conversationSessionId);
+      else void this.#sessionConversation?.refresh();
       this.#streamStatus = "Sessions · préparation, lancement et consigne";
     } else if (mode === "contexts") {
       const keepChange = this.#delegatedChange.phase === "unknown";
@@ -820,7 +814,7 @@ export class HumanDashboard {
     if (this.#mode === "supervision") { if (!automatic) void this.#supervision?.refresh(); return; }
     if (this.#mode === "journal") { if (!automatic) void this.#journal?.reload(); return; }
     if (this.#mode === "overview") { if (!automatic) void this.#overview?.refresh(); return; }
-    if (this.#mode === "sessions") { if (!automatic) { void this.#sessionLaunch?.refresh(); void this.#sessionMessage?.refresh(); } return; }
+    if (this.#mode === "sessions") { if (!automatic) { void this.#sessionLaunch?.refresh(); void this.#sessionConversation?.refresh(); } return; }
     if (isAdminMode(this.#mode)) { if (!automatic) void this.#admin?.view.refresh(); return; }
     if (this.#mode === "federation" && this.#canFederation() && !this.#federationForbidden) void this.#loadFederation(undefined, automatic);
     else if (this.#mode === "workers" && this.#canWorkers() && !this.#workerForbidden) void this.#loadWorkers(undefined, undefined, automatic);
@@ -832,7 +826,7 @@ export class HumanDashboard {
     return this.#identityLoading || this.#delegatedChange.phase === "sending" ||
       this.#mode === "supervision" && this.#supervision?.reading === true ||
       this.#mode === "journal" && this.#journal?.reading === true || this.#mode === "overview" && this.#overview?.reading === true ||
-      this.#mode === "sessions" && (this.#sessionLaunch?.reading === true || this.#sessionMessage?.reading === true) ||
+      this.#mode === "sessions" && (this.#sessionLaunch?.reading === true || this.#sessionConversation?.reading === true) ||
       isAdminMode(this.#mode) && this.#admin?.view.reading === true;
   }
   #updateRefreshState() {
@@ -949,7 +943,7 @@ export class HumanDashboard {
     if (this.#mode === "journal" && this.#journal) { await this.#journal.reload(); this.#render(); return; }
     // Without a served summary there is nothing to read again here: only the accesses, which may now serve it.
     if (this.#mode === "overview") { if (this.#overview) await this.#overview.refresh(); else await this.#loadIdentity(true); this.#render(); return; }
-    if (this.#mode === "sessions") { await this.#sessionLaunch?.refresh(); this.#render(); return; }
+    if (this.#mode === "sessions") { await this.#sessionLaunch?.refresh(); await this.#sessionConversation?.refresh(); this.#render(); return; }
     if (isAdminMode(this.#mode)) { if (this.#admin) await this.#admin.view.refresh(); else await this.#loadIdentity(true); this.#render(); return; }
     if (this.#mode === "federation" && this.#canFederation() && !this.#federationForbidden) {
       await this.#loadFederation(undefined, false, true); return;
@@ -1405,6 +1399,11 @@ export class HumanDashboard {
       state.error = failure(error); state.stale = true;
     } finally { state.loading = false; if (!this.#closed && generation === this.#generation) { this.#render(); if (state.stale && !state.error) this.#schedule(); } }
   }
+  #canReadConversation(item: HumanResource) {
+    const principal = this.#identity?.principal;
+    return this.#canSessionMessage() && !!principal && item.resource.kind === "session" &&
+      isNonNilCanonicalUuid(item.resource.resource_id) && principalKey(item.owner) === principalKey(principal);
+  }
   #renderResources() {
     const state = this.#resources;
     return el("section", "panel human-resource-panel", el("div", "panel-heading", el("div", "", el("h2", "", "Ressources de ce contexte"),
@@ -1421,6 +1420,10 @@ export class HumanDashboard {
             el("div", "human-resource-actions",
               action("Métadonnées", `resource-metadata-${index}`, () => this.#select(item, "metadata"), !this.#canEvents() || !item.permissions.metadata),
               action("Contenu", `resource-content-${index}`, () => this.#select(item, "content"), this.#snapshotOnly() || !this.#canContent() || !item.permissions.metadata || !item.permissions.content),
+              this.#canReadConversation(item) ? action("Consulter le canal", `resource-conversation-${index}`, () => {
+                if (this.#mode === "resources" && this.#resources.value?.items.includes(item) && this.#canReadConversation(item))
+                  this.#openView("sessions", item.resource.resource_id);
+              }) : null,
               badge(item.permissions.export ? this.#snapshotOnly() ? "Droit d’export accordé · indisponible pour ce profil" : "Export autorisé selon la projection" : "Export non autorisé"),
               // Delegated sharing: offered in the administration context when the catalogue grants and serves grants_manage.
               this.#context?.mode === "administration" && delegationOffers(this.#context).grants && this.#delegatedChange.phase === null ?

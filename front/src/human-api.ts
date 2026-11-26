@@ -9,8 +9,8 @@ import { ADMIN_PAGE_BYTES, adminUrls, grantChangeBody, membershipChangeBody, par
 import { OPERATION_FACTS, access, availabilityText } from "./access-model.ts";
 import { parseSessionLaunchReceipt, parseSessionPrepareReceipt, sessionLaunchBody, sessionLaunchUrls, sessionPrepareBody,
   type SessionLaunchReceipt, type SessionLaunchRequest, type SessionPrepareReceipt, type SessionPrepareRequest } from "./session-launch-model.ts";
-import { parseSessionMessageReceipt, sessionMessageBody, sessionMessageUrls,
-  type SessionMessageReceipt, type SessionMessageRequest } from "./session-message-model.ts";
+import { parseSessionConversation, parseSessionMessageReceipt, sessionMessageAvailable, sessionMessageBody, sessionMessageUrls,
+  type SessionConversationViewV1, type SessionMessageReceipt, type SessionMessageRequest } from "./session-message-model.ts";
 
 export class HumanSuperseded extends Error { constructor() { super("Lecture abandonnée après changement de contexte."); } }
 export class HumanApiError extends Error {
@@ -147,6 +147,7 @@ export class HumanApiClient {
       !(body !== undefined && /^\/api\/v1\/human\/owned\/sessions\/(prepare|launch)$/.test(path)) &&
       !(body !== undefined && /^\/api\/v1\/human\/owned\/sessions\/messages$/.test(path)) &&
       !(body === undefined && /^\/api\/v1\/human\/owned\/sessions\/preparations\/[0-9a-f-]{36}$/.test(path)) &&
+      !(body === undefined && /^\/api\/v1\/human\/owned\/sessions\/[0-9a-f-]{36}\/conversation$/.test(path)) &&
       !(body === undefined && /^\/api\/v1\/human\/owned\/sessions\/messages\/[0-9a-f-]{36}$/.test(path))) throw new HumanContractError();
     // The durable read budget bounds reads; a change is not a read and keeps its own refusals.
     if (this.#readBudgetStopped && body === undefined) {
@@ -390,6 +391,16 @@ export class HumanApiClient {
     this.#served(snapshot, "session_launch_prepare");
     const body = await this.#json(await this.#request(sessionLaunchUrls.preparation(operationId), snapshot, signal), snapshot, ADMIN_PAGE_BYTES);
     return this.#finishRead(parseSessionPrepareReceipt(body.value, { operationId }), snapshot, signal);
+  }
+  /** Read the current conversation channel facts from the owned source. */
+  async sessionConversation(sessionId: string, signal?: AbortSignal): Promise<SessionConversationViewV1> {
+    const snapshot = this.#snapshot(true);
+    this.#served(snapshot, "session_message_send");
+    const context = snapshot.context;
+    if (!context || !sessionMessageAvailable(context))
+      throw new HumanApiError(403, "permission_denied", "Ce contexte personnel ne permet pas de consulter le canal.", "review_permissions");
+    const body = await this.#json(await this.#request(sessionMessageUrls.conversation(sessionId), snapshot, signal), snapshot, ADMIN_PAGE_BYTES);
+    return this.#finishRead(parseSessionConversation(body.value, sessionId, context.tenant_id), snapshot, signal);
   }
   /**
    * Durably enqueue one short instruction to an existing session on the caller's own owned source. The control

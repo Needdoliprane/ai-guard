@@ -6,39 +6,13 @@ import { test } from "node:test";
 import { HumanApiError } from "../src/human-api.ts";
 import { catalogue, context, uuid, secondUuid } from "./human-fixtures.mjs";
 import { SessionMessageView } from "../src/session-message-view.ts";
+import { installNodes } from "./session-dom-fixture.mjs";
 
-class Element extends EventTarget {
-  className = ""; classList = { add: (name) => { this.className = `${this.className} ${name}`; } };
-  dataset = {}; children = []; attributes = new Map(); disabled = false; parent = null; value = "";
-  constructor(tag, text = "") { super(); this.tag = tag; this.text = text; }
-  get isConnected() { return this === document.body || this.parent?.isConnected === true; }
-  get textContent() { return this.text + this.children.map((child) => child.textContent).join(""); }
-  set textContent(text) { this.replaceChildren(); this.text = String(text); }
-  contains(node) { return this === node || this.children.some((child) => child.contains(node)); }
-  descendants() { return this.children.flatMap((child) => [child, ...child.descendants()]); }
-  append(...children) { for (const value of children) { const child = typeof value === "string" ? new Element("#text", value) : value; child.remove(); child.parent = this; this.children.push(child); } }
-  replaceChildren(...children) { for (const child of [...this.children]) child.remove(); this.append(...children); }
-  remove() { if (!this.parent) return; this.parent.children.splice(this.parent.children.indexOf(this), 1); this.parent = null; }
-  setAttribute(name, value) { this.attributes.set(name, value); }
-  focus() { if (this.isConnected && !this.disabled) document.activeElement = this; }
-  click() { if (!this.disabled) this.dispatchEvent(new Event("click")); }
-}
-function installNodes(t) {
-  const body = new Element("body");
-  const globals = { Node: Element, HTMLElement: Element,
-    document: { body, activeElement: body, createElement: (tag) => new Element(tag),
-      createElementNS: (_ns, tag) => new Element(tag), createTextNode: (text) => new Element("#text", text) } };
-  for (const [name, value] of Object.entries(globals)) {
-    const original = Object.getOwnPropertyDescriptor(globalThis, name);
-    Object.defineProperty(globalThis, name, { value, configurable: true });
-    t.after(() => original ? Object.defineProperty(globalThis, name, original) : Reflect.deleteProperty(globalThis, name));
-  }
-}
 const tick = () => new Promise((resolve) => setImmediate(resolve));
 const hash = "a".repeat(64); const auditHash = "b".repeat(64);
 const future = new Date(Date.now() + 600000).toISOString();
 const destination = (extra = {}) => ({ sessionId: secondUuid, inputEpoch: 0, tenantId: "tenant-a", sourceId: "source-1",
-  launchTargetId: secondUuid, provider: null, protocol: null, expiresAt: future, ...extra });
+  provider: null, protocol: null, expiresAt: future, ...extra });
 const receipt = (operationId, extra = {}) => ({ version: 1, operation_id: operationId, message_id: "msg-1", session_id: secondUuid,
   input_hash: hash, content_hash: hash, binding_fingerprint: "c".repeat(64), input_epoch: 0, status: "queued", ack: null,
   audit_seq: 21, audit_hash: auditHash, replayed: false, ...extra });
@@ -159,5 +133,23 @@ test("une destination changée (époque avancée) retire le reçu retenu de l’
     view.setDestination(destination({ inputEpoch: 1 }));
     assert.ok(!hasText(view, "Consigne enregistrée"), "le reçu de l’ancienne époque est retiré");
     assert.ok(hasText(view, "Époque d’entrée"));
+  } finally { view.close(); }
+});
+test("une relecture tardive du reçu ne réapparaît pas après le changement d’époque", async (t) => {
+  installNodes(t);
+  const held = Promise.withResolvers();
+  let signal;
+  const api = { sessionMessageSend: async (request) => receipt(request.operation_id),
+    sessionMessageReceipt: (_id, current) => { signal = current; return held.promise; } };
+  const view = new SessionMessageView({ context: sendContext(), api, onAccessDoubt: () => {}, onReadStateChange: () => {} }, destination());
+  try {
+    view.start(); byKey(view, "sm-content").value = "Consigne.";
+    byKey(view, "sm-send").click(); await tick();
+    byKey(view, "sm-status-refresh").click();
+    view.setDestination(destination({ inputEpoch: 1 }));
+    assert.equal(signal.aborted, true);
+    held.resolve(receipt(uuid, { status: "transmitted" }));
+    await tick();
+    assert.equal(hasText(view, "Consigne enregistrée"), false);
   } finally { view.close(); }
 });
