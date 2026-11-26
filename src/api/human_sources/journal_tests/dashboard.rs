@@ -197,6 +197,7 @@ async fn owned_read_proxy(
     Arc<AtomicUsize>,
     Arc<AtomicUsize>,
     tempfile::TempDir,
+    std::net::SocketAddr,
 ) {
     let calls = Arc::new(AtomicUsize::new(0));
     let unexpected = Arc::new(AtomicUsize::new(0));
@@ -263,11 +264,11 @@ async fn owned_read_proxy(
         true,
     )
     .unwrap();
-    (server, dashboard, calls, unexpected, front)
+    (server, dashboard, calls, unexpected, front, address)
 }
 
 async fn require_owned_get_is_relayed(path: &'static str, query: Option<&'static str>) {
-    let (server, dashboard, calls, unexpected, _front) = owned_read_proxy(path, query).await;
+    let (server, dashboard, calls, unexpected, _front, _) = owned_read_proxy(path, query).await;
     let uri = match query {
         Some(query) => format!("{path}?{query}"),
         None => path.to_owned(),
@@ -671,8 +672,393 @@ async fn owned_dashboard_grants_get_still_relays_the_exact_read() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn owned_dashboard_relays_the_session_journey_changes_and_keeps_neighbors_closed() {
+    // Transport canary only: the upstream asserts the exact relayed framing and
+    // bytes. Context, owner ACL, typed validation and durable audit remain the
+    // gateway's authority, never the proxy's.
+    const OPERATION: &str = "915e4e07-26a2-4d71-a45f-3b602a8dcf93";
+    const TARGET: &str = "fc63f922-a31a-4ec9-89b2-9eaf4abbf159";
+    const SESSION: &str = "d05b28d9-84a5-466b-aa67-cb1a331f32e0";
+    let prepare = json!({
+        "version": 1,
+        "operation_id": OPERATION,
+        "launch_target_id": TARGET,
+        "expected_target_revision": 3,
+        "expires_at": "2026-11-26T12:00:00Z",
+    });
+    let launch = json!({
+        "version": 1,
+        "operation_id": "b7d3a1c2-5e6f-4a8b-9c0d-1e2f3a4b5c6d",
+        "launch_target_id": TARGET,
+        "expected_target_revision": 3,
+        "preparation_operation_id": OPERATION,
+        "preparation_input_hash": "synthetic-preparation-fingerprint",
+    });
+    let message = json!({
+        "version": 1,
+        "operation_id": "c8e4b2d3-6f7a-4b9c-8d1e-2f3a4b5c6d7e",
+        "session_id": SESSION,
+        "expected_input_epoch": 2,
+        "content": "Résume le journal de la session.",
+    });
+    let cases = [
+        (
+            "/api/v1/human/owned/sessions/prepare",
+            prepare,
+            4_096usize,
+            "application/json; charset=utf-8",
+        ),
+        (
+            "/api/v1/human/owned/sessions/launch",
+            launch,
+            4_096usize,
+            "application/json",
+        ),
+        (
+            "/api/v1/human/owned/sessions/messages",
+            message,
+            16_384usize,
+            "application/vnd.aiguard+json",
+        ),
+    ];
+    let reached = Arc::new(AtomicUsize::new(0));
+    let unexpected = Arc::new(AtomicUsize::new(0));
+    let mut upstream = Router::new();
+    for (path, change, _, content_type) in &cases {
+        let content_type = *content_type;
+        let expected_body = format!(" \n{}", serde_json::to_string(change).unwrap()).into_bytes();
+        let receipt = json!({"version": 1, "operation_id": change["operation_id"]});
+        let seen = reached.clone();
+        upstream = upstream.route(
+            path,
+            axum::routing::post(move |request: axum::extract::Request| {
+                let expected_body = expected_body.clone();
+                let receipt = receipt.clone();
+                let seen = seen.clone();
+                async move {
+                    assert!(request.uri().query().is_none());
+                    let headers = request.headers();
+                    assert_eq!(headers.get_all("authorization").iter().count(), 1);
+                    assert_eq!(
+                        headers["authorization"].to_str().unwrap(),
+                        format!("Bearer {OWNED_PROXY_BEARER}")
+                    );
+                    assert_eq!(headers.get_all("x-aiguard-context").iter().count(), 1);
+                    assert_eq!(headers["x-aiguard-context"], OWNED_PROXY_CONTEXT);
+                    assert_eq!(headers["content-type"], content_type);
+                    assert!(!headers.contains_key("cookie"));
+                    assert!(!headers.contains_key("x-tenant-id"));
+                    let received = axum::body::to_bytes(request.into_body(), 16_384)
+                        .await
+                        .unwrap();
+                    assert_eq!(received.as_ref(), expected_body.as_slice());
+                    seen.fetch_add(1, Ordering::SeqCst);
+                    axum::Json(receipt)
+                }
+            }),
+        );
+    }
+    let other = unexpected.clone();
+    let upstream = upstream.fallback(move || {
+        let other = other.clone();
+        async move {
+            other.fetch_add(1, Ordering::SeqCst);
+            StatusCode::SERVICE_UNAVAILABLE
+        }
+    });
+    let (server, address) = LoopbackGateway::start(upstream).await;
+    let front = tempfile::tempdir().unwrap();
+    let dashboard = dashboard_router_with_human_mode(
+        &format!("http://{address}"),
+        None,
+        front.path().to_owned(),
+        None,
+        true,
+    )
+    .unwrap();
+    for (path, change, _, content_type) in &cases {
+        let body = format!(" \n{}", serde_json::to_string(change).unwrap()).into_bytes();
+        let response = dashboard
+            .clone()
+            .oneshot(
+                axum::http::Request::post(*path)
+                    .header("authorization", format!("Bearer {OWNED_PROXY_BEARER}"))
+                    .header("x-aiguard-context", OWNED_PROXY_CONTEXT)
+                    .header("content-type", *content_type)
+                    .header("cookie", "unrelated=synthetic")
+                    .header("x-tenant-id", "unrelated")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "{path}");
+        assert_eq!(response.headers()["cache-control"], "no-store");
+        let bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["operation_id"], change["operation_id"]);
+    }
+    assert_eq!(reached.load(Ordering::SeqCst), 3);
+
+    for (path, change, max, _) in &cases {
+        let path = *path;
+        let body = format!(" \n{}", serde_json::to_string(change).unwrap()).into_bytes();
+        let mut oversized = body.clone();
+        oversized.resize(max + 1, b' ');
+        let with_context = |target: String| {
+            axum::http::Request::post(target)
+                .header("authorization", format!("Bearer {OWNED_PROXY_BEARER}"))
+                .header("x-aiguard-context", OWNED_PROXY_CONTEXT)
+                .header("content-type", "application/json")
+        };
+        for (request, content, status) in [
+            (
+                with_context(path.to_owned()),
+                oversized,
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                with_context(format!("{path}?limit=1")),
+                body.clone(),
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                axum::http::Request::post(path)
+                    .header("authorization", format!("Bearer {OWNED_PROXY_BEARER}"))
+                    .header("content-type", "application/json"),
+                body.clone(),
+                StatusCode::FORBIDDEN,
+            ),
+            (
+                with_context(path.to_owned()).header("x-aiguard-context", OWNED_PROXY_CONTEXT),
+                body.clone(),
+                StatusCode::FORBIDDEN,
+            ),
+            (
+                axum::http::Request::post(path)
+                    .header("x-aiguard-context", OWNED_PROXY_CONTEXT)
+                    .header("content-type", "application/json"),
+                body.clone(),
+                StatusCode::UNAUTHORIZED,
+            ),
+            (
+                axum::http::Request::post(path)
+                    .header("authorization", format!("Bearer {OWNED_PROXY_BEARER}"))
+                    .header("x-aiguard-context", OWNED_PROXY_CONTEXT)
+                    .header("content-type", "text/plain"),
+                body.clone(),
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                axum::http::Request::post(path)
+                    .header("authorization", format!("Bearer {OWNED_PROXY_BEARER}"))
+                    .header("x-aiguard-context", OWNED_PROXY_CONTEXT)
+                    .header("content-type", "application/json; invalid-parameter"),
+                body.clone(),
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                with_context(path.to_owned()).header("content-type", "application/json"),
+                body.clone(),
+                StatusCode::BAD_REQUEST,
+            ),
+        ] {
+            let response = dashboard
+                .clone()
+                .oneshot(request.body(Body::from(content)).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), status, "{path}");
+            if status == StatusCode::BAD_REQUEST {
+                let bytes = axum::body::to_bytes(response.into_body(), 4096)
+                    .await
+                    .unwrap();
+                let value: Value = serde_json::from_slice(&bytes).unwrap();
+                assert_eq!(value["error"]["code"], "invalid_request");
+                assert_eq!(value["error"]["retry_action"], "retry");
+            }
+        }
+    }
+    for (method, target, status) in [
+        (
+            "POST",
+            "/api/v1/human/owned/sessions/prepare/extra",
+            StatusCode::METHOD_NOT_ALLOWED,
+        ),
+        (
+            "POST",
+            "/api/v1/human/owned/sessions/messages/915e4e07-26a2-4d71-a45f-3b602a8dcf93",
+            StatusCode::METHOD_NOT_ALLOWED,
+        ),
+        (
+            "POST",
+            "/api/human/owned/sessions/prepare",
+            StatusCode::METHOD_NOT_ALLOWED,
+        ),
+        (
+            "POST",
+            "/api/v1/human/owned/sessions/preparations",
+            StatusCode::METHOD_NOT_ALLOWED,
+        ),
+        (
+            "POST",
+            "/api/v1/human/owned/sessions/unknown",
+            StatusCode::METHOD_NOT_ALLOWED,
+        ),
+        (
+            "GET",
+            "/api/v1/human/owned/sessions/prepare",
+            StatusCode::METHOD_NOT_ALLOWED,
+        ),
+        (
+            "DELETE",
+            "/api/v1/human/owned/sessions/messages",
+            StatusCode::METHOD_NOT_ALLOWED,
+        ),
+    ] {
+        let response = dashboard
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method(method)
+                    .uri(target)
+                    .header("authorization", format!("Bearer {OWNED_PROXY_BEARER}"))
+                    .header("x-aiguard-context", OWNED_PROXY_CONTEXT)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), status, "{method} {target}");
+    }
+    let legacy = dashboard_router_with_human_mode(
+        &format!("http://{address}"),
+        None,
+        front.path().to_owned(),
+        None,
+        false,
+    )
+    .unwrap();
+    let response = legacy
+        .oneshot(
+            axum::http::Request::post("/api/v1/human/owned/sessions/prepare")
+                .header("authorization", format!("Bearer {OWNED_PROXY_BEARER}"))
+                .header("x-aiguard-context", OWNED_PROXY_CONTEXT)
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&cases[0].1).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+    assert_eq!(reached.load(Ordering::SeqCst), 3);
+    assert_eq!(unexpected.load(Ordering::SeqCst), 0);
+    server.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn owned_dashboard_session_preparation_get_relays_the_exact_canonical_uuid_only() {
+    const PATH: &str =
+        "/api/v1/human/owned/sessions/preparations/915e4e07-26a2-4d71-a45f-3b602a8dcf93";
+    let (server, dashboard, calls, unexpected, front, address) = owned_read_proxy(PATH, None).await;
+    let response = dashboard
+        .clone()
+        .oneshot(
+            axum::http::Request::get(PATH)
+                .header("authorization", format!("Bearer {OWNED_PROXY_BEARER}"))
+                .header("x-aiguard-context", OWNED_PROXY_CONTEXT)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let bytes = axum::body::to_bytes(response.into_body(), 4096)
+        .await
+        .unwrap();
+    let value: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(value["error"]["code"], "permission_denied");
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    for (method, target, status) in [
+        (
+            "GET",
+            format!("{PATH}?view=metadata"),
+            StatusCode::SERVICE_UNAVAILABLE,
+        ),
+        (
+            "GET",
+            "/api/v1/human/owned/sessions/preparations/915E4E07-26A2-4D71-A45F-3B602A8DCF93"
+                .to_owned(),
+            StatusCode::SERVICE_UNAVAILABLE,
+        ),
+        (
+            "GET",
+            "/api/v1/human/owned/sessions/preparations/915e4e0726a24d71a45f3b602a8dcf93".to_owned(),
+            StatusCode::SERVICE_UNAVAILABLE,
+        ),
+        (
+            "GET",
+            "/api/v1/human/owned/sessions/preparations".to_owned(),
+            StatusCode::SERVICE_UNAVAILABLE,
+        ),
+        (
+            "GET",
+            format!("{PATH}/extra"),
+            StatusCode::SERVICE_UNAVAILABLE,
+        ),
+        (
+            "GET",
+            "/api/human/owned/sessions/preparations/915e4e07-26a2-4d71-a45f-3b602a8dcf93"
+                .to_owned(),
+            StatusCode::SERVICE_UNAVAILABLE,
+        ),
+        ("HEAD", PATH.to_owned(), StatusCode::SERVICE_UNAVAILABLE),
+        ("POST", PATH.to_owned(), StatusCode::METHOD_NOT_ALLOWED),
+    ] {
+        let response = dashboard
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method(method)
+                    .uri(&target)
+                    .header("authorization", format!("Bearer {OWNED_PROXY_BEARER}"))
+                    .header("x-aiguard-context", OWNED_PROXY_CONTEXT)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), status, "{method} {target}");
+    }
+    let legacy = dashboard_router_with_human_mode(
+        &format!("http://{address}"),
+        None,
+        front.path().to_owned(),
+        None,
+        false,
+    )
+    .unwrap();
+    let response = legacy
+        .oneshot(
+            axum::http::Request::get(PATH)
+                .header("authorization", format!("Bearer {OWNED_PROXY_BEARER}"))
+                .header("x-aiguard-context", OWNED_PROXY_CONTEXT)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(unexpected.load(Ordering::SeqCst), 0);
+    server.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn owned_dashboard_brokers_keeps_head_mutations_legacy_and_neighbor_routes_closed() {
-    let (server, dashboard, calls, unexpected, _front) =
+    let (server, dashboard, calls, unexpected, _front, _) =
         owned_read_proxy("/api/v1/human/owned/brokers", Some("limit=25")).await;
     let unauthenticated = dashboard
         .clone()

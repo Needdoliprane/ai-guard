@@ -397,10 +397,10 @@ pub(super) async fn grant_change_body(
     Ok((bytes, change))
 }
 
-async fn delegated_change_body<T: DeserializeOwned>(
+pub(super) async fn delegated_change_body<T: DeserializeOwned>(
     request: Request,
     max_bytes: usize,
-    invalid: fn() -> (StatusCode, Json<Value>),
+    invalid: impl Fn() -> (StatusCode, Json<Value>),
 ) -> ApiResult<(axum::body::Bytes, T)> {
     let (parts, body) = request.into_parts();
     if parts.headers.get_all(header::CONTENT_TYPE).iter().count() != 1 {
@@ -1121,7 +1121,7 @@ fn finish_page<T: Serialize>(
 /// Upper bound of one retained launch-preparation intent. It names an opaque
 /// target, its revision, an operation id and a deadline; it carries no argv,
 /// host path, credential or free provider choice.
-const SESSION_PREPARE_BODY_MAX_BYTES: usize = 4_096;
+pub(super) const SESSION_PREPARE_BODY_MAX_BYTES: usize = 4_096;
 
 async fn session_prepare_body(
     request: Request,
@@ -1178,7 +1178,7 @@ pub(super) async fn session_launch_prepare(
 /// opaque target and revision, and the consumed preparation by reference and
 /// exact fingerprint; it carries no argv, host path, image, credential or free
 /// provider choice.
-const SESSION_LAUNCH_BODY_MAX_BYTES: usize = 4_096;
+pub(super) const SESSION_LAUNCH_BODY_MAX_BYTES: usize = 4_096;
 
 async fn session_launch_body(
     request: Request,
@@ -1266,7 +1266,7 @@ pub(super) async fn session_preparation(
 /// Upper bound of one short-instruction body. It names the session, the pinned
 /// input epoch, the operation id and the instruction; it carries no argv, host
 /// path, credential or provider choice. The body is tenant business data.
-const SESSION_MESSAGE_BODY_MAX_BYTES: usize = 16_384;
+pub(super) const SESSION_MESSAGE_BODY_MAX_BYTES: usize = 16_384;
 
 async fn session_message_body(
     request: Request,

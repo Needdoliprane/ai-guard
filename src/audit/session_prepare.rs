@@ -348,6 +348,26 @@ fn authorize_prepare(
     Ok(current)
 }
 
+/// Check the recorded initiator after revalidating the current tenant scope.
+fn authorize_receipt_initiator(
+    current: &AuthorizedScopeV1,
+    recorded_principal_key: &str,
+    recorded_membership_id: &str,
+    recorded_organization_scope: &str,
+) -> anyhow::Result<String> {
+    let principal_key = current.principal().key()?;
+    anyhow::ensure!(
+        principal_key == recorded_principal_key,
+        IdentityFailureV1::PermissionDenied
+    );
+    anyhow::ensure!(
+        current.membership_id() == recorded_membership_id
+            && current.organization_scope() == recorded_organization_scope,
+        IdentityFailureV1::ContextRevoked
+    );
+    Ok(principal_key)
+}
+
 /// Resolve one active catalog target and check the exact selection against it.
 /// Shared by Prepare (retains the intent) and Launch (commits it): both must
 /// resolve the current server revision, so a stale expectation is a conflict.
@@ -475,8 +495,8 @@ impl Store {
     /// launch context, the authorized catalog target, its revision and the
     /// deadline before the mandatory audit event and the preparation row commit
     /// together. Prepare creates no grant, reservation or claim. An exact replay
-    /// returns the original receipt to a still-authorized caller; a divergent
-    /// intent under the same operation is a conflict; revocation closes it.
+    /// returns the original receipt to the still-authorized initiator. Divergent
+    /// intent under the same operation is a conflict; revocation closes the replay.
     pub(crate) fn modern_session_launch_prepare(
         &self,
         epoch: &crate::human_authority::HumanSourcesWriteEpoch,
@@ -509,6 +529,12 @@ impl Store {
         let input_hash = request.input_hash()?;
         let operation_id = request.operation_id.to_string();
         if let Some(row) = preparation_row(&tx, &operation_id)? {
+            authorize_receipt_initiator(
+                &current,
+                &row.principal_key,
+                &row.membership_id,
+                &row.organization_scope,
+            )?;
             anyhow::ensure!(row.input_hash == input_hash, IdentityFailureV1::Conflict);
             let event = stored_event(&tx, row.event_seq)?;
             anyhow::ensure!(event.hash == row.event_hash, IdentityFailureV1::Conflict);
@@ -574,10 +600,10 @@ impl Store {
     /// preparation (initiator, membership, fingerprint, deadline) and the current
     /// catalog target before any effect. It then appends the mandatory launch audit
     /// event, creates the nominative session grant through the existing identity
-    /// grant producer, and retains the conversation binding — all atomically. An
-    /// exact replay returns the original receipt to a still-authorized caller; a
-    /// divergent intent under the same operation is a conflict; a source/config
-    /// change, an expired preparation or revocation closes it.
+    /// grant producer, and retains the conversation binding — all atomically.
+    /// The still-authorized initiator can replay the exact committed intent.
+    /// Divergent intent under the same operation is a conflict. A source/config
+    /// change or an expired preparation closes a new launch; revocation closes both.
     ///
     /// This proves the durable launch authority and grant. The supervised worker
     /// admission and the runtime-observed start are the broker's separate effect,
@@ -614,9 +640,19 @@ impl Store {
         let input_hash = request.input_hash()?;
         let operation_id = request.operation_id.to_string();
         if let Some(row) = launch_row(&tx, &operation_id)? {
-            anyhow::ensure!(row.input_hash == input_hash, IdentityFailureV1::Conflict);
             let event = stored_event(&tx, row.event_seq)?;
-            anyhow::ensure!(event.hash == row.event_hash, IdentityFailureV1::Conflict);
+            anyhow::ensure!(
+                event.hash == row.event_hash && event.event.kind == LAUNCHED_KIND,
+                IdentityFailureV1::Conflict
+            );
+            let launched: Launched = serde_json::from_value(event.event.data)?;
+            authorize_receipt_initiator(
+                &current,
+                &launched.principal_key,
+                &launched.membership_id,
+                &launched.organization_scope,
+            )?;
+            anyhow::ensure!(row.input_hash == input_hash, IdentityFailureV1::Conflict);
             let mut receipt: SessionLaunchReceiptV1 = serde_json::from_str(&row.receipt_json)?;
             receipt.replayed = true;
             return Ok((receipt, None));
@@ -626,16 +662,12 @@ impl Store {
         let preparation_operation_id = request.preparation_operation_id.to_string();
         let preparation = preparation_row(&tx, &preparation_operation_id)?
             .ok_or(failure(IdentityFailureV1::NotFound))?;
-        let principal_key = current.principal().key()?;
-        anyhow::ensure!(
-            preparation.principal_key == principal_key,
-            IdentityFailureV1::PermissionDenied
-        );
-        anyhow::ensure!(
-            preparation.membership_id == current.membership_id()
-                && preparation.organization_scope == current.organization_scope(),
-            IdentityFailureV1::ContextRevoked
-        );
+        let principal_key = authorize_receipt_initiator(
+            &current,
+            &preparation.principal_key,
+            &preparation.membership_id,
+            &preparation.organization_scope,
+        )?;
         anyhow::ensure!(
             preparation.input_hash == request.preparation_input_hash,
             IdentityFailureV1::Conflict
@@ -810,7 +842,7 @@ impl Store {
         Ok((receipt, next))
     }
 
-    /// Read one retained preparation receipt for a still-authorized caller.
+    /// Read one retained preparation receipt for its still-authorized initiator.
     /// Revocation of the identity, membership or context closes the read.
     pub(crate) fn modern_session_preparation(
         &self,
@@ -821,9 +853,15 @@ impl Store {
         crate::control::session_control::canonical_uuid(operation_id)
             .map_err(|_| failure(IdentityFailureV1::InvalidRequest))?;
         self.with_modern_read(access, |tx| {
-            let _current = authorize_prepare(tx, scope, &self.tenant_id)?;
+            let current = authorize_prepare(tx, scope, &self.tenant_id)?;
             let row =
                 preparation_row(tx, operation_id)?.ok_or(failure(IdentityFailureV1::NotFound))?;
+            authorize_receipt_initiator(
+                &current,
+                &row.principal_key,
+                &row.membership_id,
+                &row.organization_scope,
+            )?;
             let event = stored_event(tx, row.event_seq)?;
             anyhow::ensure!(event.hash == row.event_hash, IdentityFailureV1::Conflict);
             Ok(SessionPrepareReceiptV1 {

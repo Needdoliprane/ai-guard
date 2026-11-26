@@ -1927,6 +1927,9 @@ pub fn dashboard_router_with_human_mode(
                 human_sources::HUMAN_GRANT_CHANGE_PATH,
                 get(dashboard_proxy).post(dashboard_proxy),
             )
+            .route(HUMAN_SESSION_PREPARE_PATH, post(dashboard_proxy))
+            .route(HUMAN_SESSION_LAUNCH_PATH, post(dashboard_proxy))
+            .route(HUMAN_SESSION_MESSAGE_PATH, post(dashboard_proxy))
     } else {
         router
     };
@@ -2195,10 +2198,52 @@ async fn dashboard_oidc_proxy(
     Ok(response)
 }
 
+/// Exact owned session-journey mutations relayed by the owned dashboard. The
+/// gateway revalidates the personal context, the session owner ACL and the
+/// durable audit before any effect; the proxy only bounds the transport.
+const HUMAN_SESSION_PREPARE_PATH: &str = "/api/v1/human/owned/sessions/prepare";
+const HUMAN_SESSION_LAUNCH_PATH: &str = "/api/v1/human/owned/sessions/launch";
+const HUMAN_SESSION_MESSAGE_PATH: &str = "/api/v1/human/owned/sessions/messages";
+
+#[derive(Clone, Copy)]
+enum DashboardSessionChange {
+    Prepare,
+    Launch,
+    Message,
+}
+
+impl DashboardSessionChange {
+    fn from_path(path: &str) -> Option<Self> {
+        match path {
+            HUMAN_SESSION_PREPARE_PATH => Some(Self::Prepare),
+            HUMAN_SESSION_LAUNCH_PATH => Some(Self::Launch),
+            HUMAN_SESSION_MESSAGE_PATH => Some(Self::Message),
+            _ => None,
+        }
+    }
+
+    fn max_body_bytes(self) -> usize {
+        match self {
+            Self::Prepare => human::SESSION_PREPARE_BODY_MAX_BYTES,
+            Self::Launch => human::SESSION_LAUNCH_BODY_MAX_BYTES,
+            Self::Message => human::SESSION_MESSAGE_BODY_MAX_BYTES,
+        }
+    }
+
+    fn invalid(self) -> (StatusCode, Json<Value>) {
+        match self {
+            Self::Prepare => human::invalid_session_prepare_request(),
+            Self::Launch => human::invalid_session_launch_request(),
+            Self::Message => human::invalid_session_message_request(),
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 enum DashboardHumanChange<'a> {
     Membership(&'a str),
     Grant,
+    Session(DashboardSessionChange),
 }
 
 async fn dashboard_proxy(State(s): State<DashboardState>, request: Request) -> ApiResult<Response> {
@@ -2208,6 +2253,11 @@ async fn dashboard_proxy(State(s): State<DashboardState>, request: Request) -> A
         .map(|suffix| format!("/api/{suffix}"))
         .unwrap_or_else(|| path.to_owned());
     let versioned_human = path.starts_with("/api/v1/human/");
+    let session_preparation_read =
+        versioned_human && human_dashboard_session_preparation(&canonical_path);
+    if session_preparation_read && !s.owned_sources {
+        return Err(human_sources::unavailable());
+    }
     // These are the only POSTs admitted here. Check the target before
     // processing authentication, context or body.
     let change = if s.owned_sources && request.method() == "POST" {
@@ -2216,6 +2266,11 @@ async fn dashboard_proxy(State(s): State<DashboardState>, request: Request) -> A
                 return Err(human::invalid_grant_request());
             }
             DashboardHumanChange::Grant
+        } else if let Some(session) = DashboardSessionChange::from_path(path) {
+            if request.uri().query().is_some() {
+                return Err(session.invalid());
+            }
+            DashboardHumanChange::Session(session)
         } else {
             let membership_id = human_sources::membership_change_id(
                 request.uri(),
@@ -2251,7 +2306,8 @@ async fn dashboard_proxy(State(s): State<DashboardState>, request: Request) -> A
                     && human::owned_event_detail_query(request.uri())
                 || versioned_human
                     && human_dashboard_message_receipt(&canonical_path)
-                    && request.uri().query().is_none());
+                    && request.uri().query().is_none()
+                || session_preparation_read && request.uri().query().is_none());
         if !allowed {
             return Err(human_sources::unavailable());
         }
@@ -2335,6 +2391,10 @@ async fn dashboard_proxy(State(s): State<DashboardState>, request: Request) -> A
         Some(DashboardHumanChange::Grant) => {
             url.set_path(human_sources::HUMAN_OWNED_GRANT_CHANGE_PATH)
         }
+        Some(DashboardHumanChange::Session(_)) => {
+            // The exact admitted path; a query was refused before admission.
+            url.set_path(path);
+        }
         None => {
             url.set_path(path);
             url.set_query(request.uri().query());
@@ -2384,15 +2444,19 @@ async fn dashboard_proxy(State(s): State<DashboardState>, request: Request) -> A
         }
     }
     if let Some(change) = change {
-        let body = match change {
-            DashboardHumanChange::Membership(_) => human::membership_change_body(request).await?.0,
-            DashboardHumanChange::Grant => human::grant_change_body(request).await?.0,
+        let json = header::HeaderValue::from_static("application/json");
+        let (body, content_type) = match change {
+            DashboardHumanChange::Membership(_) => {
+                (human::membership_change_body(request).await?.0, json)
+            }
+            DashboardHumanChange::Grant => (human::grant_change_body(request).await?.0, json),
+            DashboardHumanChange::Session(session) => {
+                dashboard_session_change_body(request, session).await?
+            }
         };
         // Forward the exact change and its operation ID. The gateway rechecks
         // the bearer, selected context, stored subject and current authority.
-        call = call
-            .header(header::CONTENT_TYPE, "application/json")
-            .body(body);
+        call = call.header(header::CONTENT_TYPE, content_type).body(body);
     } else if let Some(cursor) = request.headers().get("last-event-id") {
         call = call.header("last-event-id", cursor);
     }
@@ -2428,6 +2492,25 @@ async fn dashboard_proxy(State(s): State<DashboardState>, request: Request) -> A
     Ok(response)
 }
 
+/// Validate the transport as a bounded JSON object and retain its exact body
+/// and media type. The gateway owns the typed request and authorization.
+async fn dashboard_session_change_body(
+    request: Request,
+    session: DashboardSessionChange,
+) -> ApiResult<(axum::body::Bytes, header::HeaderValue)> {
+    let content_type = request
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .cloned()
+        .ok_or_else(|| session.invalid())?;
+    let (body, _) =
+        human::delegated_change_body::<Value>(request, session.max_body_bytes(), || {
+            session.invalid()
+        })
+        .await?;
+    Ok((body, content_type))
+}
+
 fn human_dashboard_path(path: &str) -> bool {
     [
         "/api/human/identity",
@@ -2450,6 +2533,7 @@ fn human_dashboard_path(path: &str) -> bool {
     .contains(&path)
         || human_dashboard_event_detail(path)
         || human_dashboard_message_receipt(path)
+        || human_dashboard_session_preparation(path)
 }
 
 fn human_dashboard_event_detail(path: &str) -> bool {
@@ -2462,6 +2546,14 @@ fn human_dashboard_event_detail(path: &str) -> bool {
 /// session's owner ACL; the proxy relays the exact canonical UUID detail only.
 fn human_dashboard_message_receipt(path: &str) -> bool {
     path.strip_prefix("/api/human/owned/sessions/messages/")
+        .is_some_and(|id| uuid::Uuid::parse_str(id).is_ok_and(|parsed| parsed.to_string() == id))
+}
+
+/// One retained launch-preparation receipt read. The gateway revalidates the
+/// personal context and the preparation's owner; the proxy relays the exact
+/// canonical UUID detail only, never a query in owned mode.
+fn human_dashboard_session_preparation(path: &str) -> bool {
+    path.strip_prefix("/api/human/owned/sessions/preparations/")
         .is_some_and(|id| uuid::Uuid::parse_str(id).is_ok_and(|parsed| parsed.to_string() == id))
 }
 
