@@ -2,16 +2,17 @@
 // routes. DOM only: the wire, the bounds and the life of the request come from session-message-model.ts and
 // session-message-flow.ts. Rust revalidates the distinct SendSessionMessage permission, the session's owner ACL, the
 // retained binding and the masking policy before the mandatory audit. Every value shown comes from a control receipt;
-// the destination comes only from a real retained launch receipt. queued, transmitted, acknowledged and unknown are
+// the destination comes from a current conversation read. queued, transmitted, acknowledged and unknown are
 // shown distinctly, and none is presented as the instruction being executed.
 import { button, el } from "./dom.ts";
 import { formatDate } from "./model.ts";
 import { HumanSuperseded, type HumanApiClient } from "./human-api.ts";
-import type { HumanContext } from "./human-model.ts";
+import { HumanContractError, type HumanContext } from "./human-model.ts";
 import { CONTENT_PROBLEM_TEXT, MESSAGE_NOT_EXECUTED, MESSAGE_STATUS_BADGE, MESSAGE_STATUS_TEXT, MESSAGE_UNKNOWN_WARNING,
   destinationExpired, messageContentProblem, sessionMessageOffers, type ContentProblem, type SessionMessageDestination,
   type SessionMessageReceipt } from "./session-message-model.ts";
-import { MESSAGE_OUTCOME_UNKNOWN, MESSAGE_PHASE_TEXT, SessionMessageJourney, messageContextLost } from "./session-message-flow.ts";
+import { MESSAGE_PHASE_TEXT, SessionMessageJourney, messageContextLost, messageDestinationRefusal,
+  type MessageDestinationRefusal } from "./session-message-flow.ts";
 
 export interface SessionMessageHost {
   context: HumanContext;
@@ -19,6 +20,7 @@ export interface SessionMessageHost {
   /** A refusal whose reason could not be read: the host reads the identity again and withdraws what became forbidden. */
   onAccessDoubt: () => void;
   onReadStateChange: () => void;
+  onDestinationRefused?: (destination: SessionMessageDestination, code: MessageDestinationRefusal) => void;
   now?: () => number;
 }
 const mono = (text: string) => el("span", "mono", text);
@@ -37,6 +39,7 @@ export class SessionMessageView {
   #pendingDestination: SessionMessageDestination | null | undefined = undefined;
   #closed = false;
   #channelCurrent = true;
+  #readingReceipt = false;
   #abort = new AbortController();
   /** The exact send intent last sent, kept so a retry replays the identical body (same operation, same content). */
   #intent: { content: string; key: string } | null = null;
@@ -57,12 +60,17 @@ export class SessionMessageView {
     this.element.append(this.#form, this.#announce, this.#status, this.#result);
     this.#render();
   }
-  get reading() { return this.#journey.sending; }
+  get reading() { return this.#journey.sending || this.#readingReceipt; }
+  get outcomeUnknown() { return this.#journey.phase === "unknown" && this.#journey.operationId !== null; }
+  get hasReceipt() { return this.#journey.receipt !== null; }
   start() { this.#render(); }
   setChannelCurrent(current: boolean) {
     if (this.#channelCurrent === current) return;
     this.#channelCurrent = current;
+    if (current) this.#announce.before(this.#form);
+    else this.#form.remove();
     this.#paintForm();
+    this.#paintStatus();
   }
   /**
    * Set the destination from a current conversation read. A changed session or epoch withdraws the held receipt (the old
@@ -96,7 +104,6 @@ export class SessionMessageView {
   }
   #paintForm() {
     const offers = sessionMessageOffers(this.#host.context);
-    const sending = this.#journey.sending;
     const destination = this.#destination;
     const expired = destination ? destinationExpired(destination, this.#now()) : false;
     const phase = this.#journey.phase;
@@ -104,9 +111,9 @@ export class SessionMessageView {
     const sendLabel = retry ? "Réessayer le même envoi" : "Envoyer la consigne";
     const send = button(sendLabel, "button button-primary", () => { void this.#send(); });
     send.dataset.focusKey = retry ? "sm-send-retry" : "sm-send";
-    send.disabled = !this.#channelCurrent || sending || !offers.send || !destination || expired || phase === "sent";
+    send.disabled = !this.#channelCurrent || this.reading || !offers.send || !destination || expired || phase === "sent";
     const reset = button("Nouvelle consigne", "button button-secondary", () => this.#reset());
-    reset.dataset.focusKey = "sm-reset"; reset.disabled = sending || (phase === "editing" && !this.#intent);
+    reset.dataset.focusKey = "sm-reset"; reset.disabled = this.reading || (phase === "editing" && !this.#intent);
     const fields: (HTMLElement | null)[] = [
       el("h2", "", "Envoyer une consigne"),
       el("p", "muted", "Une courte consigne vers une session existante. Le contrôle revérifie le droit distinct SendSessionMessage, l’ACL de la session, la liaison retenue (STOP, échéance, époque) et le masquage avant l’audit durable. Le corps est une donnée métier du tenant ; il n’est jamais dupliqué dans l’audit, les URL, argv ou les journaux."),
@@ -144,10 +151,20 @@ export class SessionMessageView {
     const retry = error?.retryAction === "contact_operator" ? " Action requise : contactez l’opérateur." :
       error?.retryAction === "review_permissions" ? " Faites vérifier vos permissions sur ce périmètre." :
         error?.retryAction === "reread" ? " Relisez la session avant de recommencer." : "";
-    const category = MESSAGE_PHASE_TEXT[phase];
+    const readOnlyRecovery = this.outcomeUnknown && !this.#channelCurrent;
+    const category = readOnlyRecovery ? "Le résultat de l’envoi épinglé reste inconnu." : MESSAGE_PHASE_TEXT[phase];
     const children: (HTMLElement | string)[] = [el("p", "control-error", category)];
     if (error) children.push(el("p", "muted", `${error.message}${retry}`));
-    if (phase === "unknown" && category !== MESSAGE_OUTCOME_UNKNOWN) children.push(el("p", "muted", MESSAGE_OUTCOME_UNKNOWN));
+    if (readOnlyRecovery) {
+      const lookup = button("Relire le reçu", "button button-secondary", () => { void this.#refreshStatus(); });
+      lookup.dataset.focusKey = "sm-unknown-refresh"; lookup.disabled = this.reading;
+      const abandon = button("Abandonner la reprise", "button button-secondary", () => {
+        if (!this.reading) { this.#contentInput.value = ""; this.#reset(); }
+      });
+      abandon.dataset.focusKey = "sm-unknown-abandon"; abandon.disabled = this.reading;
+      children.push(el("div", "sl-actions", lookup, abandon),
+        el("p", "muted", "L’abandon est local. L’opération peut déjà avoir été enregistrée."));
+    }
     if (phase === "conflict" || phase === "not_found" || phase === "invalid" || phase === "refused" || phase === "capacity") {
       const again = button("Nouvelle consigne", "button button-secondary", () => this.#reset());
       again.dataset.focusKey = "sm-refusal-reset"; children.push(el("div", "sl-actions", again));
@@ -163,7 +180,7 @@ export class SessionMessageView {
   #receiptCard(receipt: SessionMessageReceipt) {
     const status = receipt.status;
     const refresh = button("Relire le statut", "button button-secondary", () => { void this.#refreshStatus(); });
-    refresh.dataset.focusKey = "sm-status-refresh"; refresh.disabled = this.#journey.sending;
+    refresh.dataset.focusKey = "sm-status-refresh"; refresh.disabled = this.reading;
     const card = el("div", "panel sl-card",
       el("div", "sl-card-head", el("h3", "", "Consigne enregistrée"), badge(status, MESSAGE_STATUS_BADGE[status]),
         receipt.replayed ? badge("Rejeu exact", "blue") : badge("Durable", "teal")),
@@ -186,18 +203,18 @@ export class SessionMessageView {
     return card;
   }
   #reset() {
-    if (this.#journey.sending) return;
+    if (this.reading) return;
     this.#resetJourney();
     this.#render();
   }
   #resetJourney() {
-    this.#abort.abort(); this.#abort = new AbortController();
+    this.#abort.abort(); this.#abort = new AbortController(); this.#readingReceipt = false;
     this.#journey = new SessionMessageJourney(); this.#intent = null; this.#problem = null;
   }
   async #send() {
     const offers = sessionMessageOffers(this.#host.context);
     const destination = this.#destination;
-    if (this.#closed || !this.#channelCurrent || this.#journey.sending || !offers.send || !destination || destinationExpired(destination, this.#now())) return;
+    if (this.#closed || !this.#channelCurrent || this.reading || !offers.send || !destination || destinationExpired(destination, this.#now())) return;
     // A retry after an unknown outcome replays the identical intent; a fresh send reads the current instruction.
     if (this.#journey.phase !== "unknown" || !this.#intent) {
       const content = this.#contentInput.value;
@@ -215,22 +232,33 @@ export class SessionMessageView {
     } catch (error) {
       if (error instanceof HumanSuperseded || this.#closed) return;
     }
+    if (this.#closed) return;
     // A context lost mid-flight is recorded by the journey, not a product refusal: withdraw and read the accesses again.
     if (this.#journey.error && messageContextLost(this.#journey.error)) { this.#host.onAccessDoubt(); return; }
+    const refusal = messageDestinationRefusal(this.#journey.error);
     this.#applyPendingDestination();
+    if (refusal) this.#host.onDestinationRefused?.(destination, refusal);
     if (!this.#closed) this.#render();
   }
   async #refreshStatus() {
-    if (this.#closed || this.#journey.sending || !this.#journey.receipt) return;
+    const destination = this.#destination;
+    if (this.#closed || this.reading || !destination || (!this.hasReceipt && !this.outcomeUnknown)) return;
     const journey = this.#journey;
-    try {
-      await journey.refresh((operationId) => this.#host.api.sessionMessageReceipt(operationId, this.#abort.signal));
-    } catch (error) {
-      if (error instanceof HumanSuperseded || this.#closed) return;
-    }
-    if (this.#closed || this.#journey !== journey) return;
-    if (journey.error && messageContextLost(journey.error)) { this.#host.onAccessDoubt(); return; }
+    this.#readingReceipt = true;
     this.#render();
+    try {
+      await journey.refresh(async (operationId) => {
+        const receipt = await this.#host.api.sessionMessageReceipt(operationId, this.#abort.signal);
+        if (receipt.session_id !== destination.sessionId || receipt.input_epoch !== destination.inputEpoch)
+          throw new HumanContractError();
+        return receipt;
+      });
+      if (!this.#closed && this.#journey === journey && journey.error && messageContextLost(journey.error)) this.#host.onAccessDoubt();
+    } catch (error) {
+      if (!(error instanceof HumanSuperseded)) throw error;
+    } finally {
+      if (!this.#closed && this.#journey === journey) { this.#readingReceipt = false; this.#render(); }
+    }
   }
   #applyPendingDestination() {
     if (this.#pendingDestination !== undefined) {

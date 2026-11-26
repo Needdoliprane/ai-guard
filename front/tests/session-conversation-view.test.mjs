@@ -27,7 +27,7 @@ const exactFacts = {
 };
 const tick = () => new Promise((resolve) => setImmediate(resolve));
 
-async function mount(t, read, write = () => assert.fail("aucun envoi attendu")) {
+async function mount(t, read, write = () => assert.fail("aucun envoi attendu"), receipt = () => assert.fail("aucune relecture de reçu attendue")) {
   const calls = [];
   let dashboard;
   t.after(() => dashboard?.close());
@@ -38,6 +38,7 @@ async function mount(t, read, write = () => assert.fail("aucun envoi attendu")) 
     calls.push({ path, method: options.method, contextId, signal: options.signal });
     if (path === route) return read();
     if (path === owned + "messages") return write(JSON.parse(options.body));
+    if (path.startsWith(owned + "messages/")) return receipt(path.split("/").at(-1));
     assert.fail("requête inattendue " + path);
   } });
   dashboard = new HumanDashboard(root, "synthetic-token", {
@@ -148,6 +149,8 @@ test("une nouvelle époque attend la fin de l’envoi épinglé sur l’ancienne
     deferred.resolve(errorResponse(503, "identity_unavailable"));
   }
   await tick();
+  assert.equal(byKey("sc-select").disabled, true);
+  click("sm-unknown-abandon");
   click("sc-select");
   assert.equal(byKey("sm-content").value, "");
 });
@@ -168,4 +171,146 @@ test("la vue annule la lecture sortante et ne rend rien dans le contexte suivant
   assert.doesNotMatch(root.textContent, /Canal de conversation/);
   assert.equal(byKey("resource-conversation-0"), undefined, "le propriétaire sans droit distinct ne peut pas consulter");
   assert.equal(byKey("sm-send"), undefined);
+});
+
+test("l’échéance retire l’envoi pendant que Sessions reste ouverte, sans nouvelle requête", async (t) => {
+  const now = Date.parse("2026-11-26T20:00:00Z");
+  t.mock.timers.enable({ apis: ["Date", "setTimeout"], now });
+  const facts = { ...exactFacts, expires_at: new Date(now + 1_000).toISOString() };
+  const { root, byKey, click, calls } = await mount(t, () => Response.json(facts));
+  click("resource-conversation-0");
+  await tick();
+  click("sc-select");
+  assert.ok(byKey("sm-send"));
+
+  t.mock.timers.tick(1_000);
+  assert.match(root.textContent, /Expiré/);
+  assert.equal(byKey("sc-select"), undefined);
+  assert.equal(byKey("sm-send"), undefined);
+  assert.deepEqual(calls.map(({ method }) => method), ["GET"]);
+});
+
+for (const [code, latest, expectedStatus] of [
+  ["session_closed", { ...exactFacts, status: "closed" }, /Fermé/],
+  ["binding_changed", { ...exactFacts, input_epoch: 2 }, /Époque d’entrée 2/],
+  ["binding_expired", exactFacts, /Expiré/],
+]) {
+  test("le refus " + code + " retire la sélection et provoque une unique relecture", async (t) => {
+    const held = Promise.withResolvers();
+    let reads = 0;
+    const sent = [];
+    const { root, byKey, click, calls } = await mount(t,
+      () => ++reads === 1 ? Response.json(exactFacts) : held.promise,
+      (request) => { sent.push(request); return errorResponse(409, code, "reread"); });
+    click("resource-conversation-0");
+    await tick();
+    click("sc-select");
+    byKey("sm-content").value = "Pour cette époque.";
+    click("sm-send");
+    await tick();
+    assert.equal(byKey("sm-send"), undefined);
+    assert.deepEqual(calls.map(({ method }) => method), ["GET", "POST", "GET"]);
+    held.resolve(Response.json(latest));
+    await tick();
+    assert.match(root.textContent, expectedStatus);
+    assert.equal(byKey("sm-send"), undefined);
+    if (code === "binding_changed") {
+      click("sc-select");
+      assert.equal(byKey("sm-content").value, "");
+    } else {
+      assert.equal(byKey("sc-select"), undefined);
+    }
+    assert.equal(sent.length, 1);
+    assert.equal(sent[0].expected_input_epoch, 1);
+  });
+}
+
+test("un refus au rejeu garde l’opération inconnue et permet la relecture exacte du reçu", async (t) => {
+  let facts = exactFacts;
+  const sent = [];
+  const checked = [];
+  const { root, byKey, click, calls } = await mount(t, () => Response.json(facts),
+    (request) => {
+      sent.push(request);
+      if (sent.length === 1) return errorResponse(503, "identity_unavailable");
+      facts = { ...exactFacts, input_epoch: 2 };
+      return errorResponse(409, "binding_changed", "reread");
+    }, (operationId) => {
+      checked.push(operationId);
+      return Response.json({
+        version: 1, operation_id: operationId, message_id: "msg-1", session_id: secondUuid,
+        input_hash: "a".repeat(64), content_hash: "b".repeat(64), binding_fingerprint: "c".repeat(64),
+        input_epoch: 1, status: "queued", ack: null, audit_seq: 21, audit_hash: "d".repeat(64), replayed: true,
+      });
+    });
+  click("resource-conversation-0");
+  await tick();
+  click("sc-select");
+  byKey("sm-content").value = "Opération épinglée.";
+  click("sm-send");
+  await tick();
+  click("sm-send-retry");
+  await tick();
+  assert.deepEqual(sent, [sent[0], sent[0]]);
+  assert.match(root.textContent, /résultat de l’envoi épinglé reste inconnu/);
+  assert.equal(byKey("sc-select").disabled, true);
+  assert.equal(byKey("sm-send-retry"), undefined);
+  click("sm-unknown-refresh");
+  await tick();
+  assert.deepEqual(checked, [sent[0].operation_id]);
+  assert.deepEqual(calls.map(({ method }) => method), ["GET", "POST", "POST", "GET", "GET"]);
+  assert.match(root.textContent, /Consigne enregistrée/);
+  click("sc-select");
+  assert.equal(byKey("sm-content").value, "");
+});
+
+test("une lecture qui répète l’époque refusée ne rouvre pas le canal", async (t) => {
+  let facts = exactFacts;
+  let posts = 0;
+  const { root, byKey, click } = await mount(t, () => Response.json(facts), () => {
+    posts++;
+    return errorResponse(409, "binding_changed", "reread");
+  });
+  click("resource-conversation-0");
+  await tick();
+  click("sc-select");
+  byKey("sm-content").value = "Époque déjà périmée.";
+  click("sm-send");
+  await tick();
+  assert.match(root.textContent, /Canal modifié/);
+  assert.equal(byKey("sc-select"), undefined);
+  assert.equal(byKey("sm-send"), undefined);
+  facts = { ...exactFacts, input_epoch: 2 };
+  click("sc-refresh");
+  await tick();
+  click("sc-select");
+  assert.equal(byKey("sm-content").value, "");
+  assert.equal(posts, 1);
+});
+
+test("l’expiration conserve un envoi incertain consultable par son identifiant", async (t) => {
+  const now = Date.parse("2026-11-26T20:00:00Z");
+  t.mock.timers.enable({ apis: ["Date", "setTimeout"], now });
+  const facts = { ...exactFacts, expires_at: new Date(now + 1_000).toISOString() };
+  const sent = [];
+  const checked = [];
+  const { root, byKey, click, calls } = await mount(t, () => Response.json(facts),
+    (request) => { sent.push(request); return errorResponse(503, "identity_unavailable"); },
+    (id) => { checked.push(id); return errorResponse(404, "not_found"); });
+  click("resource-conversation-0");
+  await tick();
+  click("sc-select");
+  byKey("sm-content").value = "Une seule consigne.";
+  click("sm-send");
+  await tick();
+  t.mock.timers.tick(1_000);
+  assert.match(root.textContent, /Expiré/);
+  assert.match(root.textContent, /résultat de l’envoi épinglé reste inconnu/);
+  assert.equal(byKey("sm-send-retry"), undefined);
+  assert.deepEqual(calls.map(({ method }) => method), ["GET", "POST"]);
+  click("sm-unknown-refresh");
+  await tick();
+  assert.deepEqual(checked, [sent[0].operation_id]);
+  assert.match(root.textContent, /résultat de l’envoi épinglé reste inconnu/);
+  assert.deepEqual(calls.map(({ method }) => method), ["GET", "POST", "GET"]);
 });

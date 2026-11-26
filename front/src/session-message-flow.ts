@@ -31,6 +31,12 @@ export function messageContextLost(error: unknown): boolean {
   return error instanceof HumanApiError && error.status === 403 &&
     ["context_required", "context_invalid", "context_expired", "context_revoked"].includes(error.code);
 }
+export type MessageDestinationRefusal = "session_closed" | "binding_changed" | "binding_expired";
+export function messageDestinationRefusal(error: HumanApiError | null): MessageDestinationRefusal | null {
+  if (error?.status !== 409) return null;
+  const code = error.code;
+  return code === "session_closed" || code === "binding_changed" || code === "binding_expired" ? code : null;
+}
 export const MESSAGE_OUTCOME_UNKNOWN = "Le résultat du premier envoi reste inconnu : réessayer reprend la même opération, jamais un second envoi.";
 export const MESSAGE_PHASE_TEXT: Readonly<Record<Exclude<MessagePhase, "editing" | "sent">, string>> = {
   sending: "Envoi de la consigne au contrôle…",
@@ -74,14 +80,15 @@ export class SessionMessageJourney {
 
   async send(key: string, send: (operationId: string) => Promise<SessionMessageReceipt>): Promise<MessagePhase> {
     if (this.sending) return this.phase;
+    const reconciling = this.phase === "unknown" && this.#pending?.key === key;
     const id = this.operationIdFor(key);
     this.phase = "sending"; this.error = null;
     try {
       const receipt = await send(id);
       this.#pending = null; this.receipt = receipt; this.phase = "sent";
     } catch (error) {
-      if (error instanceof HumanSuperseded) { this.phase = this.receipt ? "sent" : "editing"; throw error; }
-      this.phase = messageFailure(error);
+      if (error instanceof HumanSuperseded) { this.phase = reconciling ? "unknown" : this.receipt ? "sent" : "editing"; throw error; }
+      this.phase = reconciling ? "unknown" : messageFailure(error);
       this.error = error instanceof HumanApiError ? error : null;
       if (this.phase !== "unknown") this.#pending = null;
     }
@@ -89,14 +96,14 @@ export class SessionMessageJourney {
   }
 
   /**
-   * Re-read the held receipt's delivery status (metadata only). Never resends. A lost or refused refresh keeps the
-   * last known receipt and records the error for display; the caller withdraws on a lost context.
+   * Read the receipt of the held operation (metadata only). A lost or refused read preserves its last known result.
    */
   async refresh(read: (operationId: string) => Promise<SessionMessageReceipt>): Promise<MessagePhase> {
-    if (this.sending || !this.receipt) return this.phase;
-    const id = this.receipt.operation_id;
+    if (this.sending) return this.phase;
+    const id = this.receipt?.operation_id ?? (this.phase === "unknown" ? this.operationId : null);
+    if (!id) return this.phase;
     try {
-      this.receipt = await read(id); this.error = null; this.phase = "sent";
+      this.receipt = await read(id); this.#pending = null; this.error = null; this.phase = "sent";
     } catch (error) {
       if (error instanceof HumanSuperseded) throw error;
       this.error = error instanceof HumanApiError ? error : null;
