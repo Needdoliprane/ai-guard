@@ -197,3 +197,37 @@ Lancer d’abord le profil mot de passe depuis le client natif. Vérifier son ar
 Le dernier contrôle positif doit repasser après chaque série. Une déconnexion générique, un timeout ou un échec de disponibilité ne valident aucun refus attendu. Conserver le profil, les versions serveur et TLS et les catégories de résultat. Les volumes QA restent disponibles après l’arrêt. [Vérification de la session TLS](https://dev.mysql.com/doc/refman/8.4/en/using-encrypted-connections.html)
 
 La [fixture gateway SQL-06](GATEWAY_FIXTURE.md) prépare les schémas neufs et les comptes dédiés aux tests applicatifs.
+
+## Publication MySQL owned sur cible neuve (QA)
+
+Utiliser le format de registre de tenants existant dans un fichier privé. Le
+profil MySQL sélectionné fournit le namespace et doit désigner un schéma dédié
+vide et un compte opérateur distinct du compte gateway. Écarter les autres
+écritures et l’administration du schéma pendant la publication. Les deux
+profils utilisent un fichier de mot de passe et vérifient via TLS le nom du
+serveur et sa chaîne de certificats à partir de l’AC configurée. En mTLS,
+référencer aussi le certificat et la clé du client.
+[Exigences du compte opérateur et de la cible](OWNED_PREPARATION.md#compte-opérateur-du-prévol)
+
+Obtenir l’UUID serveur attendu indépendamment, depuis une session
+d’administration de confiance sur le serveur visé (`SELECT @@GLOBAL.server_uuid`).
+Attribuer une fois les UUID de l’opération, de l’installation et de la source,
+puis les conserver avec le format choisi. Utiliser des UUID canoniques non nuls,
+en minuscules et avec tirets. L’exemple sélectionne le format 15. Pour le
+format 14, utiliser `--schema-version 14`.
+
+```sh
+agentsandbox prepare-mysql-owned \
+  --registry "${QA_MYSQL_OPERATOR_REGISTRY:?}" --tenant "${QA_MYSQL_TENANT:?}" \
+  --schema-version 15 --server-uuid "${QA_MYSQL_SERVER_UUID:?}" \
+  --operation-id "${QA_MYSQL_OPERATION_ID:?}" \
+  --installation-id "${QA_MYSQL_INSTALLATION_ID:?}" \
+  --source-id "${QA_MYSQL_SOURCE_ID:?}"
+```
+
+En cas de succès, la sortie standard contient un seul reçu JSON vérifié. Le
+rejeu sur une cible non vide est refusé, y compris après la perte du reçu.
+Conserver cette cible. La commande ne réalise aucune migration SQLite ou MySQL
+automatique. L’admission par le gateway et la restauration demandent des
+qualifications distinctes. La qualification du CLI reste en attente.
+[Preuves de publication existantes](../../../docs/engineering/VALIDATION.md#27-novembre-2026--publication-unique-mysql-owned-14-et-15)

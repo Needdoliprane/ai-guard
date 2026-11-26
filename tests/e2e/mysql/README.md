@@ -200,6 +200,37 @@ The last positive check must pass again after each series. A generic disconnect,
 
 The [gateway SQL-06 fixture](GATEWAY_FIXTURE.md) prepares fresh schemas and dedicated accounts for the application tests.
 
+## Fresh owned MySQL publication (QA)
+
+Use the existing tenant registry format in a private file. The selected MySQL
+profile supplies the namespace and must name a dedicated empty schema and an
+operator account separate from the gateway account. Keep other writers and
+schema administration off the target during publication. Both profiles use a
+password file and verify the server name and certificate chain against the
+configured CA over TLS. For mTLS, also reference the client certificate and key.
+[Operator account and target requirements](OWNED_PREPARATION.md#compte-opérateur-du-prévol)
+
+Obtain the expected server UUID independently from a trusted administrative
+session on the intended server (`SELECT @@GLOBAL.server_uuid`). Assign the
+operation, installation and source UUIDs once and retain them with the chosen
+format. Use canonical lowercase, hyphenated, non-nil UUIDs. The example selects
+format 15. Use `--schema-version 14` for format 14.
+
+```sh
+agentsandbox prepare-mysql-owned \
+  --registry "${QA_MYSQL_OPERATOR_REGISTRY:?}" --tenant "${QA_MYSQL_TENANT:?}" \
+  --schema-version 15 --server-uuid "${QA_MYSQL_SERVER_UUID:?}" \
+  --operation-id "${QA_MYSQL_OPERATION_ID:?}" \
+  --installation-id "${QA_MYSQL_INSTALLATION_ID:?}" \
+  --source-id "${QA_MYSQL_SOURCE_ID:?}"
+```
+
+On success, stdout contains one verified JSON receipt. A retry on a nonempty
+target is refused, including after a lost receipt. Preserve that target. The
+command performs no automatic SQLite or MySQL migration. Gateway admission
+and restoration require separate qualification. CLI qualification is pending.
+[Existing publication evidence](../../../docs/engineering/VALIDATION.md#27-novembre-2026--publication-unique-mysql-owned-14-et-15)
+
 ## What this preflight does not cover
 
 It proves that the server, accounts and certificates behave as the gateway tests expect. It does not prove ai-guard behaviour: the gateway startup with each profile, the refusal of a wrong password, CA, server name or client certificate with no business audit row, and the SQL-04 to SQL-06 application scenarios are separate verdicts recorded in `docs/engineering/`. An expired client certificate is not issued by the helpers above: issue one with a validity window in the past (for example with `openssl ca -startdate/-enddate`) in a private directory when that case is needed.
