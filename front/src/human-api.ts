@@ -9,6 +9,8 @@ import { ADMIN_PAGE_BYTES, adminUrls, grantChangeBody, membershipChangeBody, par
 import { OPERATION_FACTS, access, availabilityText } from "./access-model.ts";
 import { parseSessionLaunchReceipt, parseSessionPrepareReceipt, sessionLaunchBody, sessionLaunchUrls, sessionPrepareBody,
   type SessionLaunchReceipt, type SessionLaunchRequest, type SessionPrepareReceipt, type SessionPrepareRequest } from "./session-launch-model.ts";
+import { parseSessionMessageReceipt, sessionMessageBody, sessionMessageUrls,
+  type SessionMessageReceipt, type SessionMessageRequest } from "./session-message-model.ts";
 
 export class HumanSuperseded extends Error { constructor() { super("Lecture abandonnée après changement de contexte."); } }
 export class HumanApiError extends Error {
@@ -36,7 +38,10 @@ interface Handlers {
 }
 const codes = new Set(["authentication_required", "credential_invalid", "credential_expired", "identity_revoked", "context_required",
   "context_invalid", "context_expired", "context_revoked", "permission_denied", "not_found", "invalid_request", "invalid_cursor",
-  "capacity_exhausted", "stream_admission_unavailable", "audit_read_budget_exhausted", "identity_unavailable", "audit_unavailable", "migration_required", "conflict"]);
+  "capacity_exhausted", "stream_admission_unavailable", "audit_read_budget_exhausted", "identity_unavailable", "audit_unavailable", "migration_required", "conflict",
+  // Distinct SendSessionMessage control-plane refusals: unsupported channel, STOP, changed/expired binding, retained
+  // delivery uncertainty, and a masking refusal before enqueue. Each stays named, never collapsed into a generic refusal.
+  "channel_not_admitted", "session_closed", "binding_changed", "binding_expired", "delivery_unknown", "content_requires_redaction"]);
 const actions = new Set(["authenticate", "select_context", "review_permissions", "reduce_page", "retry", "contact_operator", "close_unused_streams", "reread"]);
 
 /** Separate trust boundary: a local human credential can never fall back to the viewer API. */
@@ -140,7 +145,9 @@ export class HumanApiClient {
       !/^\/api\/v1\/human\/admin\/(memberships|quota|usage|configuration|grants)(?:\?[^#]*)?$/.test(path) &&
       !(body !== undefined && /^\/api\/v1\/human\/admin\/memberships\/[0-9a-fA-F-]{36}$/.test(path)) &&
       !(body !== undefined && /^\/api\/v1\/human\/owned\/sessions\/(prepare|launch)$/.test(path)) &&
-      !(body === undefined && /^\/api\/v1\/human\/owned\/sessions\/preparations\/[0-9a-f-]{36}$/.test(path))) throw new HumanContractError();
+      !(body !== undefined && /^\/api\/v1\/human\/owned\/sessions\/messages$/.test(path)) &&
+      !(body === undefined && /^\/api\/v1\/human\/owned\/sessions\/preparations\/[0-9a-f-]{36}$/.test(path)) &&
+      !(body === undefined && /^\/api\/v1\/human\/owned\/sessions\/messages\/[0-9a-f-]{36}$/.test(path))) throw new HumanContractError();
     // The durable read budget bounds reads; a change is not a read and keeps its own refusals.
     if (this.#readBudgetStopped && body === undefined) {
       if (!this.#operatorReadAllowed || stream) throw new HumanApiError(429, "audit_read_budget_exhausted", "Lecture automatique suspendue : budget durable de lecture atteint. Contactez l’opérateur.", "contact_operator");
@@ -377,6 +384,27 @@ export class HumanApiClient {
     this.#served(snapshot, "session_launch_prepare");
     const body = await this.#json(await this.#request(sessionLaunchUrls.preparation(operationId), snapshot, signal), snapshot, ADMIN_PAGE_BYTES);
     return this.#finishRead(parseSessionPrepareReceipt(body.value, { operationId }), snapshot, signal);
+  }
+  /**
+   * Durably enqueue one short instruction to an existing session on the caller's own owned source. The control
+   * revalidates the distinct personal SendSessionMessage context, the session's owner ACL, the retained binding and the
+   * masking policy, and commits the mandatory audit before the receipt. The caller keeps `operation_id` across retries:
+   * an exact replay returns the retained result, divergent content under the same operation is a conflict. The body is
+   * tenant business data, never duplicated into the audit. queued/transmitted/acknowledged/unknown stay distinct.
+   */
+  async sessionMessageSend(request: SessionMessageRequest, signal?: AbortSignal): Promise<SessionMessageReceipt> {
+    const snapshot = this.#snapshot(true);
+    this.#served(snapshot, "session_message_send");
+    const text = sessionMessageBody(request);
+    const body = await this.#json(await this.#request(sessionMessageUrls.send(), snapshot, signal, false, text), snapshot, ADMIN_PAGE_BYTES);
+    return this.#finishRead(parseSessionMessageReceipt(body.value, { operationId: request.operation_id, sessionId: request.session_id }), snapshot, signal);
+  }
+  /** Read one retained message receipt (metadata and delivery status only, never the body); revocation closes the read. */
+  async sessionMessageReceipt(operationId: string, signal?: AbortSignal): Promise<SessionMessageReceipt> {
+    const snapshot = this.#snapshot(true);
+    this.#served(snapshot, "session_message_send");
+    const body = await this.#json(await this.#request(sessionMessageUrls.receipt(operationId), snapshot, signal), snapshot, ADMIN_PAGE_BYTES);
+    return this.#finishRead(parseSessionMessageReceipt(body.value, { operationId }), snapshot, signal);
   }
   async federationWorkers(selection: HumanFederationSelection = {}, signal?: AbortSignal) {
     const snapshot = this.#snapshot(true);

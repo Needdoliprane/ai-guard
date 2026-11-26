@@ -16,6 +16,8 @@ export interface SessionLaunchHost {
   /** A refusal whose reason could not be read: the host reads the identity again and withdraws what became forbidden. */
   onAccessDoubt: () => void;
   onReadStateChange: () => void;
+  /** A committed launch receipt: the host may derive the real conversation destination of the send-instruction journey. */
+  onLaunched?: (receipt: SessionLaunchReceipt) => void;
   now?: () => number;
 }
 const mono = (text: string) => el("span", "mono", text);
@@ -236,6 +238,8 @@ export class SessionLaunchView {
       if (error instanceof HumanSuperseded || this.#closed) return;
       if (launchContextLost(error)) { this.#host.onAccessDoubt(); return; }
     }
-    if (!this.#closed) this.#render();
+    if (this.#closed) return;
+    if (this.#journey.phase === "launched" && this.#journey.receipt) this.#host.onLaunched?.(this.#journey.receipt);
+    this.#render();
   }
 }

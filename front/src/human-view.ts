@@ -14,6 +14,9 @@ import { brokerAuthorityLabel, defaultFleetFilter, grantKey, landingDestination,
 import { GrantEditor, MembershipEditor } from "./delegation-views.ts";
 import { SessionLaunchView } from "./session-launch-view.ts";
 import { sessionLaunchAvailable } from "./session-launch-model.ts";
+import type { SessionLaunchReceipt } from "./session-launch-model.ts";
+import { SessionMessageView } from "./session-message-view.ts";
+import { messageDestination, sessionMessageAvailable } from "./session-message-model.ts";
 import { CAPABILITY_LABELS, DELEGATED_OUTCOME_UNKNOWN, DelegatedChangeRecovery, delegatedContextLost, delegatedReplayRefusal,
   delegationOffers } from "./delegation-model.ts";
 import type { Membership } from "./admin-model.ts";
@@ -107,6 +110,12 @@ export class HumanDashboard {
   #overviewPreferences: OverviewPreferences = defaultOverviewPreferences();
   /** The prepare→launch journey mounted for the selected context; withdrawn with it. */
   #sessionLaunch: SessionLaunchView | null = null;
+  /** The send-instruction journey mounted for the selected context; withdrawn with it. */
+  #sessionMessage: SessionMessageView | null = null;
+  /** The persistent container of the sessions destination, keeping both journeys across navigation within a context. */
+  #sessionsPage: HTMLElement | null = null;
+  /** The last real launch receipt of this context: the only provenance of a send destination. Purged with the context. */
+  #lastLaunch: SessionLaunchReceipt | null = null;
   /** A subject asked from the summary: opened once, by the destination that reads it, if it is in the loaded window. */
   #pendingSupervisionDetail: { kind: "worker"; id: string } | null = null;
   #pendingBroker: string | null = null;
@@ -402,7 +411,7 @@ export class HumanDashboard {
     this.#closeSupervision(); this.#supervisionPreferences = defaultSupervisionPreferences();
     this.#closeJournal(); this.#journalPreferences = defaultJournalPreferences();
     this.#closeOverview(); this.#overviewPreferences = defaultOverviewPreferences(); this.#closeAdmin();
-    this.#closeSessionLaunch();
+    this.#closeSessions();
     this.#pendingSupervisionDetail = null; this.#pendingBroker = null;
     this.#resume = null; this.#resumeOffer = null; this.#resumeAttempts = 0; clearTimeout(this.#resumeTimer);
     this.#resumeConfirmed = false; this.#resumeInterrupted = false; clearTimeout(this.#offerTimer);
@@ -496,18 +505,42 @@ export class HumanDashboard {
       canOpenSubject: (kind) => kind === "worker" ? this.#canWorkers() : this.#canBrokers() });
     this.#overview = view; view.start();
   }
-  /** The journey is offered only when the catalogue grants and serves the preparation mutation. */
+  /** The launch journey is offered only when the catalogue grants and serves the preparation mutation. */
   #canSessionLaunch() { return sessionLaunchAvailable(this.#context); }
-  #closeSessionLaunch() { const previous = this.#sessionLaunch; this.#sessionLaunch = null; previous?.close(); }
-  #openSessionLaunch() {
+  /** The send journey is offered only by the distinct SendSessionMessage mutation; read/admin/approve never imply it. */
+  #canSessionMessage() { return sessionMessageAvailable(this.#context); }
+  /** The sessions destination is offered when either journey is granted and served by this context. */
+  #canSessions() { return this.#canSessionLaunch() || this.#canSessionMessage(); }
+  #closeSessions() {
+    const launch = this.#sessionLaunch; this.#sessionLaunch = null; launch?.close();
+    const message = this.#sessionMessage; this.#sessionMessage = null; message?.close();
+    this.#sessionsPage = null; this.#lastLaunch = null;
+  }
+  #openSessions() {
     const context = this.#context;
-    this.#closeSessionLaunch();
-    if (!context || !this.#canSessionLaunch()) return;
-    const generation = this.#generation;
-    const view = new SessionLaunchView({ context, api: this.#api,
-      onAccessDoubt: () => { if (!this.#closed && generation === this.#generation && this.#sessionLaunch === view) void this.#loadIdentity(); },
-      onReadStateChange: () => this.#updateRefreshState() });
-    this.#sessionLaunch = view; view.start();
+    this.#closeSessions();
+    if (!context || !this.#canSessions()) return;
+    const page = el("div", "sessions-stack");
+    this.#sessionsPage = page;
+    if (this.#canSessionLaunch()) {
+      const view = new SessionLaunchView({ context, api: this.#api,
+        onAccessDoubt: () => { if (!this.#closed && this.#sessionLaunch === view) void this.#loadIdentity(); },
+        onReadStateChange: () => this.#updateRefreshState(),
+        onLaunched: (receipt) => { if (this.#closed || this.#sessionLaunch !== view) return; this.#lastLaunch = receipt; this.#mountSessionMessage(); } });
+      this.#sessionLaunch = view; page.append(view.element); view.start();
+    }
+    this.#mountSessionMessage();
+  }
+  /** Mount or retarget the send journey from the real retained launch receipt; never invent a session or an epoch. */
+  #mountSessionMessage() {
+    const context = this.#context; const page = this.#sessionsPage;
+    if (!context || !page || !this.#canSessionMessage()) return;
+    const destination = this.#lastLaunch ? messageDestination(this.#lastLaunch) : null;
+    if (this.#sessionMessage) { this.#sessionMessage.setDestination(destination); return; }
+    const view = new SessionMessageView({ context, api: this.#api,
+      onAccessDoubt: () => { if (!this.#closed && this.#sessionMessage === view) void this.#loadIdentity(); },
+      onReadStateChange: () => this.#updateRefreshState() }, destination);
+    this.#sessionMessage = view; page.append(view.element); view.start();
   }
   /** From a point of attention of the summary to the exact view of its subject, when this context offers it. */
   #openSubject(subject: { kind: "worker" | "broker"; id: string }) {
@@ -713,7 +746,9 @@ export class HumanDashboard {
     if (mode !== "journal" && this.#mode === "journal") this.#closeJournal();
     if (mode !== this.#mode) this.#closeEditor();
     if (mode !== "overview" && this.#mode === "overview") this.#closeOverview();
-    if (mode !== "sessions" && this.#mode === "sessions") this.#closeSessionLaunch();
+    // The sessions journeys stay mounted across navigation within the same context: an in-flight or unknown send keeps
+    // its stable operation identifier so a lost response is reconciled by replay, never by a second Submit. They are
+    // withdrawn only when the context is purged (#closeSessions).
     if (this.#admin && mode !== this.#admin.mode) this.#closeAdmin();
     if (mode !== "brokers") this.#pendingBroker = null;
     if (mode === "overview" && this.#overviewState()) {
@@ -740,12 +775,12 @@ export class HumanDashboard {
         this.#purgeBrokers(); this.#purgeWorkers(); this.#purgeFederation(); this.#mode = mode; this.#openSupervision();
       } else void this.#supervision.refresh();
       this.#streamStatus = "Supervision · lectures ponctuelles";
-    } else if (mode === "sessions" && this.#canSessionLaunch()) {
-      if (this.#mode !== mode || !this.#sessionLaunch) {
+    } else if (mode === "sessions" && this.#canSessions()) {
+      if (this.#mode !== mode || !this.#sessionsPage) {
         this.#stopViewReads(); this.#resources = readState(); this.#events = readState(); this.#selection = null;
-        this.#purgeBrokers(); this.#purgeWorkers(); this.#purgeFederation(); this.#mode = mode; this.#openSessionLaunch();
-      } else void this.#sessionLaunch.refresh();
-      this.#streamStatus = "Session · préparation puis lancement";
+        this.#purgeBrokers(); this.#purgeWorkers(); this.#purgeFederation(); this.#mode = mode; this.#openSessions();
+      } else { void this.#sessionLaunch?.refresh(); void this.#sessionMessage?.refresh(); }
+      this.#streamStatus = "Sessions · préparation, lancement et consigne";
     } else if (mode === "contexts") {
       const keepChange = this.#delegatedChange.phase === "unknown";
       this.#api.clearContext(); this.#purgeContext(keepChange); this.#mode = mode;
@@ -786,7 +821,7 @@ export class HumanDashboard {
     if (this.#mode === "supervision") { if (!automatic) void this.#supervision?.refresh(); return; }
     if (this.#mode === "journal") { if (!automatic) void this.#journal?.reload(); return; }
     if (this.#mode === "overview") { if (!automatic) void this.#overview?.refresh(); return; }
-    if (this.#mode === "sessions") { if (!automatic) void this.#sessionLaunch?.refresh(); return; }
+    if (this.#mode === "sessions") { if (!automatic) { void this.#sessionLaunch?.refresh(); void this.#sessionMessage?.refresh(); } return; }
     if (isAdminMode(this.#mode)) { if (!automatic) void this.#admin?.view.refresh(); return; }
     if (this.#mode === "federation" && this.#canFederation() && !this.#federationForbidden) void this.#loadFederation(undefined, automatic);
     else if (this.#mode === "workers" && this.#canWorkers() && !this.#workerForbidden) void this.#loadWorkers(undefined, undefined, automatic);
@@ -798,7 +833,7 @@ export class HumanDashboard {
     return this.#identityLoading || this.#delegatedChange.phase === "sending" ||
       this.#mode === "supervision" && this.#supervision?.reading === true ||
       this.#mode === "journal" && this.#journal?.reading === true || this.#mode === "overview" && this.#overview?.reading === true ||
-      this.#mode === "sessions" && this.#sessionLaunch?.reading === true ||
+      this.#mode === "sessions" && (this.#sessionLaunch?.reading === true || this.#sessionMessage?.reading === true) ||
       isAdminMode(this.#mode) && this.#admin?.view.reading === true;
   }
   #updateRefreshState() {
@@ -830,10 +865,10 @@ export class HumanDashboard {
     this.#notice.hidden = !this.#message;
     if (this.#notice.textContent !== this.#message) this.#notice.textContent = this.#message;
     const changeSending = this.#delegatedChange.phase === "sending";
-    const destinations: DashboardMode[] = ["contexts", ...(this.#overviewState() ? ["overview" as const] : []), ...ADMIN_MODES.filter((mode) => this.#adminState(mode)), ...(this.#canSupervise() ? ["supervision" as const] : []), ...(this.#canJournal() ? ["journal" as const] : []), ...(this.#canSessionLaunch() ? ["sessions" as const] : []), "resources", "events", ...(this.#canBrokers() ? ["brokers" as const] : []), ...(this.#canWorkers() ? ["workers" as const] : []), ...(this.#canFederation() ? ["federation" as const] : [])];
+    const destinations: DashboardMode[] = ["contexts", ...(this.#overviewState() ? ["overview" as const] : []), ...ADMIN_MODES.filter((mode) => this.#adminState(mode)), ...(this.#canSupervise() ? ["supervision" as const] : []), ...(this.#canJournal() ? ["journal" as const] : []), ...(this.#canSessions() ? ["sessions" as const] : []), "resources", "events", ...(this.#canBrokers() ? ["brokers" as const] : []), ...(this.#canWorkers() ? ["workers" as const] : []), ...(this.#canFederation() ? ["federation" as const] : [])];
     const nav = destinations.map((mode) => {
       const label = { contexts: "Contextes", overview: this.#context?.mode === "administration" ? "Vue 360°" : "Mon espace",
-        memberships: "Utilisateurs", usage: "Quotas et usage", configuration: "Configuration", supervision: "Supervision", journal: "Journal", sessions: "Nouvelle session", resources: "Ressources", events: "Événements", brokers: "Brokers", workers: "Workers", federation: "Fédération" }[mode];
+        memberships: "Utilisateurs", usage: "Quotas et usage", configuration: "Configuration", supervision: "Supervision", journal: "Journal", sessions: "Sessions", resources: "Ressources", events: "Événements", brokers: "Brokers", workers: "Workers", federation: "Fédération" }[mode];
       const node = action(label, `human-nav-${mode}`, () => this.#openView(mode),
         changeSending || mode === "resources" && !this.#canResources() || mode === "events" && (!this.#selection || !this.#canEvents()));
       node.className = "button human-tab"; if (mode === this.#mode) node.setAttribute("aria-current", "page"); return node;
@@ -858,7 +893,7 @@ export class HumanDashboard {
     if (this.#navigation.dataset.mode !== this.#mode) row.querySelector<HTMLElement>('[aria-current="page"]')?.scrollIntoView({ block: "nearest", inline: "nearest" });
     this.#navigation.dataset.mode = this.#mode; this.#markNavigation();
     const heading = el("h1", "", { contexts: "Choisir un contexte.", overview: this.#context?.mode === "administration" ? "Vue 360° du tenant." : "Mon espace.",
-      memberships: "Utilisateurs de l’organisation.", usage: "Quotas et usage du tenant.", configuration: "Configuration effective.", supervision: this.#context?.mode === "administration" ? "Supervision du tenant." : "Supervision de mon espace.", journal: "Journal des événements autorisés.", sessions: "Créer une session IA.", resources: "Ressources autorisées.", events: "Événements autorisés.", brokers: "Brokers enregistrés du tenant.", workers: "Workers enregistrés du tenant.", federation: "Workers et brokers du tenant." }[this.#mode]);
+      memberships: "Utilisateurs de l’organisation.", usage: "Quotas et usage du tenant.", configuration: "Configuration effective.", supervision: this.#context?.mode === "administration" ? "Supervision du tenant." : "Supervision de mon espace.", journal: "Journal des événements autorisés.", sessions: "Créer une session et envoyer une consigne.", resources: "Ressources autorisées.", events: "Événements autorisés.", brokers: "Brokers enregistrés du tenant.", workers: "Workers enregistrés du tenant.", federation: "Workers et brokers du tenant." }[this.#mode]);
     heading.tabIndex = -1;
     const sections = [el("div", "page-heading", el("p", "eyebrow", this.#identity?.authentication.method === "oidc_access_token" ?
       "COMPTE OIDC / CONSULTATION NOMINATIVE" : "COMPTE LOCAL / CONSULTATION NOMINATIVE"), heading,
@@ -872,7 +907,7 @@ export class HumanDashboard {
         this.#mode === "supervision" ? (this.#context?.mode === "administration" ?
         "Brokers, workers et ressources que ce contexte d’administration peut lire, réunis sur une page. Chaque valeur vient d’une lecture autorisée par le contrôle ; ce qui n’a pas été lu reste inconnu." :
         "Les ressources que vous possédez ou qui vous sont partagées, et ce que ce contexte personnel ne permet pas de lire. Chaque valeur vient d’une lecture autorisée par le contrôle.") : this.#mode === "federation" ? "Vue d’administration offerte par l’opération federation_read de ce contexte. Workers et brokers enregistrés restent visibles dans deux pages indépendantes du même tenant." : this.#mode === "workers" ? "Workers de tout le tenant · opération workers_read de ce contexte. États du contrôle et observations runtime restent distincts." : this.#mode === "brokers" ? "Infrastructure de tout le tenant · opération brokers_read de ce contexte. Les permissions et l’évaluation du registre proviennent du contrôle." :
-        this.#mode === "sessions" ? "Préparation retenue puis lancement de l’intention exacte, offerts par les opérations session_launch_prepare et session_launch de ce contexte. Le contrôle résout la cible et autorise chaque étape ; un lancement accepté n’est pas un worker en cours d’exécution." :
+        this.#mode === "sessions" ? "Préparation retenue puis lancement de l’intention exacte (session_launch_prepare, session_launch), et envoi d’une courte consigne à une session existante (session_message_send, droit distinct). Le contrôle résout la cible et autorise chaque étape ; un lancement accepté n’est pas un worker en cours d’exécution, et une consigne enregistrée, transmise ou acquittée n’est pas une consigne exécutée." :
         "Les permissions sont vérifiées par le serveur. Une ressource visible ne donne aucun droit implicite sur son contenu ou son export.")),
       this.#renderDelegatedRecovery() ?? "",
       ...(this.#api.readBudgetStopped ? [el("div", "control-error human-budget-stop", el("p", "", "Lecture automatique suspendue : budget durable de lecture atteint. Contactez l’opérateur ; changer de vue ou de contexte ne réinitialise pas ce budget."),
@@ -889,7 +924,7 @@ export class HumanDashboard {
         isAdminMode(this.#mode) ? (this.#admin ? "" : this.#renderUnavailable({ memberships: "Utilisateurs indisponibles pour ce contexte", usage: "Quotas et usage indisponibles pour ce contexte",
           configuration: "Configuration indisponible pour ce contexte" }[this.#mode], ADMIN_DESTINATIONS[this.#mode], `human-${this.#mode}-access`)) : this.#mode === "contexts" ? this.#renderContexts() : this.#mode === "resources" ? this.#renderResources() : this.#mode === "brokers" ? this.#renderBrokers() : this.#mode === "workers" ? this.#renderWorkers() : this.#mode === "federation" ? this.#renderFederation() : this.#renderEvents()];
     const live = this.#mode === "supervision" ? this.#supervision?.element : this.#mode === "journal" ? this.#journal?.element :
-      this.#mode === "overview" ? this.#overview?.element : this.#mode === "sessions" ? this.#sessionLaunch?.element : isAdminMode(this.#mode) ? this.#admin?.view.element : undefined;
+      this.#mode === "overview" ? this.#overview?.element : this.#mode === "sessions" ? this.#sessionsPage ?? undefined : isAdminMode(this.#mode) ? this.#admin?.view.element : undefined;
     if (live && live.parentElement === this.#page) {
       // The unified view keeps its own element across dashboard renders, so typed filters keep focus and caret.
       while (this.#page.firstChild && this.#page.firstChild !== live) this.#page.firstChild.remove();

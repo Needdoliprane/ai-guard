@@ -90,6 +90,9 @@
 .sl-conversation { display: grid; gap: 12px; border-top: 1px solid var(--line); padding-top: 16px; }
 .sl-conversation h4 { margin: 0; font-size: 15px; }
 .sl-warning { max-width: none; padding: 14px 16px; border: 1px solid var(--amber-border); border-radius: 4px; background: var(--amber-bg); color: var(--amber-text); font-size: 13px; }
+/* Sessions destination: the launch and send-instruction journeys stacked, each keeping the editorial .sl surfaces. */
+.sessions-stack { display: grid; gap: 28px; max-width: 860px; }
+.sm-textarea { font-family: Arial, Helvetica, sans-serif; font-size: 14px; line-height: 1.5; resize: vertical; min-height: 96px; }
 @media (max-width: 720px) {
   .sl-form, .sl-card { padding: 18px; }
   .sl-row { grid-template-columns: minmax(0, 1fr); gap: 4px; }
