@@ -1209,11 +1209,13 @@ mod tests {
                 .iter()
                 .position(|row| row.1 == "ai_guard_supervision_meta_protocol")
                 .unwrap();
+            // MySQL 8.4.13 CHECK_CLAUSE, after decoding the client batch output.
             let dictionary_clause =
-                "((length(`protocol`) = 21) and (`protocol` = _binary'broker_supervision_v1'))";
+                r"((length(`protocol`) = 21) and (`protocol` = _binary\'broker_supervision_v1\'))";
             constraints[protocol].4 = Some(dictionary_clause.into());
             assert!(constraints_match(&constraints, version));
             for changed in [
+                dictionary_clause.replace(r"\'", "'"),
                 dictionary_clause.replace("_binary", "_utf8mb4"),
                 dictionary_clause.replace("supervision_v1", "supervision_v2"),
                 dictionary_clause.replace(" and ", " or "),

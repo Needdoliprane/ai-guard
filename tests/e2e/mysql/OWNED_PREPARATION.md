@@ -222,7 +222,9 @@ pouvoir référencer les tables de la cible et garder `foreign_key_checks` et
   refus Legacy. Il reste à exécuter sur MySQL 8.4.
 - Sur les deux cibles jetables de cet oracle, relever les `CHECK_CLAUSE`
   du cycle de vie et de la supervision. Pour le protocole, le manifeste
-  attend le rendu `length` et l’introducteur `_binary'broker_supervision_v1'`.
+  attend le rendu `length` et `_binary\'broker_supervision_v1\'`. Sur
+  MySQL 8.4.13 au format 14, les deux antislashs sont présents dans la clause
+  du dictionnaire après décodage de la sortie batch.
   Rapprocher `STATISTICS` du manifeste, dont les trois index non uniques
   explicites du cycle de vie et les clés primaires et uniques de supervision.
   Vérifier l’absence d’index implicite supplémentaire et les sept liens

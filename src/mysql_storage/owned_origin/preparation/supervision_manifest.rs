@@ -75,11 +75,12 @@ pub(super) const CONSTRAINTS: [ExpectedConstraint<'static>; 15] = [
         "ai_guard_supervision_meta_genesis_seq",
         "(`genesis_seq` > 0)",
     ),
-    // MySQL's CHECK printer emits the binary introducer adjacent to the literal.
+    // MySQL 8.4.13 retains backslashes before the binary literal's quotes
+    // in the dictionary CHECK_CLAUSE.
     check(
         META,
         "ai_guard_supervision_meta_protocol",
-        "((length(`protocol`) = 21) and (`protocol` = _binary'broker_supervision_v1'))",
+        r"((length(`protocol`) = 21) and (`protocol` = _binary\'broker_supervision_v1\'))",
     ),
     check(
         META,
