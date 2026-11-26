@@ -1739,6 +1739,8 @@ mod tests {
             "prepare-mysql-owned",
             "--registry",
             "operator.json",
+            "--gateway-registry",
+            "gateway.json",
             "--tenant",
             "tenant-a",
             "--server-uuid",
@@ -1755,6 +1757,11 @@ mod tests {
                 .try_get_matches_from(base.into_iter().chain(["--schema-version", format]))
                 .unwrap();
             let args = parsed.subcommand_matches("prepare-mysql-owned").unwrap();
+            assert_eq!(
+                args.get_one::<PathBuf>("gateway_registry")
+                    .map(PathBuf::as_path),
+                Some(Path::new("gateway.json"))
+            );
             assert_eq!(args.get_one::<u16>("schema_version"), Some(&expected));
             for (name, value) in [
                 ("server_uuid", SERVER),

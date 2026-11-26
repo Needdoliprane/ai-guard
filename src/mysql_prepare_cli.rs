@@ -1,3 +1,4 @@
+use crate::gateway_config::{MysqlPreparationProfileRefusal, load_mysql_preparation_target};
 use agentsandbox::mysql_storage::{
     MysqlOwnedPreparationRefusal, MysqlOwnedPreparationRequest, MysqlProbeError,
     publish_owned_fresh_source,
@@ -15,6 +16,9 @@ pub(crate) struct PrepareMysqlOwnedArgs {
     /// Private tenant registry containing the dedicated MySQL operator profile.
     #[arg(long)]
     registry: PathBuf,
+    /// Private tenant registry supplied to this installation's gateway at startup.
+    #[arg(long)]
+    gateway_registry: PathBuf,
     /// Exact tenant whose MySQL database, account and namespace the registry selects.
     #[arg(long)]
     tenant: String,
@@ -53,10 +57,13 @@ fn parse_uuid(value: &str) -> std::result::Result<Uuid, &'static str> {
 }
 
 pub(crate) async fn run(args: PrepareMysqlOwnedArgs) -> Result<()> {
-    let target = crate::gateway_config::load_mysql_preparation_target(&args.registry, &args.tenant)
-        .map_err(|_| {
+    let target = load_mysql_preparation_target(&args.registry, &args.gateway_registry, &args.tenant)
+        .map_err(|error| {
+            if let Some(refusal) = error.downcast_ref::<MysqlPreparationProfileRefusal>() {
+                return (*refusal).into();
+            }
             anyhow!(
-                "Cannot load MySQL operator configuration; check the private registry, selected tenant and private authentication files"
+                "Cannot load MySQL publication configuration; check both private registries, the selected tenant and the operator authentication files"
             )
         })?;
     let receipt = publish_owned_fresh_source(

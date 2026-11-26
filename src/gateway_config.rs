@@ -4,7 +4,9 @@ use agentsandbox::control::kubernetes_session::{
     KubernetesSessionReservationPolicyV2,
 };
 #[cfg(feature = "mysql-storage")]
-use agentsandbox::diagnostics::gateway_files::MySqlAuthenticationFiles;
+use agentsandbox::diagnostics::gateway_files::{
+    MAX_REGISTRY_BYTES, MySqlAuthenticationFiles, MySqlStorageFiles, TenantRegistryFiles,
+};
 use agentsandbox::diagnostics::gateway_files::{
     SelectedTenantStorage, decode_tenant_registry, read_tenant_registry_file, storage_for_gateway,
 };
@@ -403,18 +405,73 @@ pub fn load(path: &Path) -> Result<Vec<ConfiguredTenant>> {
     load_registry_bytes(path, &bytes, crate::read_token)
 }
 
-/// Select the operator's MySQL profile without loading gateway tokens or
-/// opening any other tenant's credentials.
 #[cfg(feature = "mysql-storage")]
-pub(crate) fn load_mysql_preparation_target(path: &Path, tenant_id: &str) -> Result<MysqlTarget> {
-    use agentsandbox::{
-        control_fs::{PrivateFile, absolute_path},
-        diagnostics::gateway_files::MAX_REGISTRY_BYTES,
-        tenancy::validate_tenant_id,
-    };
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum MysqlPreparationProfileRefusal {
+    SharedUser,
+    TargetMismatch,
+}
 
-    let file = PrivateFile::open(&absolute_path(path)?, MAX_REGISTRY_BYTES)?;
-    let registry = decode_tenant_registry(file.bytes())?;
+#[cfg(feature = "mysql-storage")]
+impl std::fmt::Display for MysqlPreparationProfileRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::SharedUser => "MySQL publication requires different operator and gateway usernames",
+            Self::TargetMismatch => {
+                "MySQL operator and gateway profiles must select the same host, port, schema and namespace"
+            }
+        })
+    }
+}
+
+#[cfg(feature = "mysql-storage")]
+impl std::error::Error for MysqlPreparationProfileRefusal {}
+
+/// Compare the selected tenant in both private registry snapshots before
+/// opening any authentication material. Only the operator profile supplies it.
+#[cfg(feature = "mysql-storage")]
+pub(crate) fn load_mysql_preparation_target(
+    operator_path: &Path,
+    gateway_path: &Path,
+    tenant_id: &str,
+) -> Result<MysqlTarget> {
+    use agentsandbox::control_fs::{PrivateFile, absolute_path};
+
+    let operator_file = PrivateFile::open(&absolute_path(operator_path)?, MAX_REGISTRY_BYTES)?;
+    let gateway_file = PrivateFile::open(&absolute_path(gateway_path)?, MAX_REGISTRY_BYTES)?;
+    let operator_registry = decode_tenant_registry(operator_file.bytes())?;
+    let gateway_registry = decode_tenant_registry(gateway_file.bytes())?;
+    let operator = mysql_preparation_profile(&operator_registry, tenant_id)?;
+    let gateway = mysql_preparation_profile(&gateway_registry, tenant_id)?;
+    anyhow::ensure!(
+        operator.host == gateway.host
+            && operator.port == gateway.port
+            && operator.database == gateway.database
+            && operator.namespace == gateway.namespace,
+        MysqlPreparationProfileRefusal::TargetMismatch
+    );
+    anyhow::ensure!(
+        operator.username != gateway.username,
+        MysqlPreparationProfileRefusal::SharedUser
+    );
+
+    let directory = operator_file
+        .path()
+        .parent()
+        .context("operator registry has no parent")?;
+    let target = MysqlTarget::load(operator, &|path| absolute_path(&directory.join(path)))?;
+    operator_file.revalidate()?;
+    gateway_file.revalidate()?;
+    Ok(target)
+}
+
+#[cfg(feature = "mysql-storage")]
+fn mysql_preparation_profile<'a>(
+    registry: &'a TenantRegistryFiles,
+    tenant_id: &str,
+) -> Result<&'a MySqlStorageFiles> {
+    use agentsandbox::tenancy::validate_tenant_id;
+
     let mut seen = BTreeSet::new();
     let mut selected = None;
     for tenant in &registry.tenants {
@@ -429,12 +486,9 @@ pub(crate) fn load_mysql_preparation_target(path: &Path, tenant_id: &str) -> Res
         }
     }
     let Some(SelectedTenantStorage::MySql(profile)) = selected else {
-        anyhow::bail!("requested tenant must have a MySQL profile in the operator registry");
+        anyhow::bail!("requested tenant must have a MySQL profile in both registries");
     };
-    let directory = file.path().parent().context("registry has no parent")?;
-    let target = MysqlTarget::load(profile, &|path| absolute_path(&directory.join(path)))?;
-    file.revalidate()?;
-    Ok(target)
+    Ok(profile)
 }
 
 pub(crate) fn load_from_retained_registry(
@@ -979,6 +1033,106 @@ mod tests {
             "authentication":authentication
         }))
         .unwrap()
+    }
+
+    #[cfg(feature = "mysql-storage")]
+    fn mysql_preparation_storage(username: &str) -> serde_json::Value {
+        json!({
+            "backend":"mysql","host":"db.example.invalid","port":3306,"database":"audit_a",
+            "username":username,"namespace":"5657019d-5302-4ced-922f-406aa3d8ec5c",
+            "password_file":"sql-password","ca_file":"sql-ca.pem",
+            "authentication":{
+                "mode":"password_and_mtls",
+                "client_cert_file":"sql-client.pem","client_key_file":"sql-client.key"
+            }
+        })
+    }
+
+    #[cfg(feature = "mysql-storage")]
+    fn write_mysql_preparation_registry(path: &Path, storage: serde_json::Value) {
+        use std::os::unix::fs::OpenOptionsExt;
+
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)
+            .unwrap();
+        let registry = json!({
+            "version":1,
+            "tenants":[{
+                "tenant_id":"tenant-a","runner_token_file":"absent-runner",
+                "viewer_token_file":"absent-viewer","storage":storage
+            }]
+        });
+        serde_json::to_writer(file, &registry).unwrap();
+    }
+
+    #[cfg(feature = "mysql-storage")]
+    #[test]
+    fn mysql_owned_preparation_refuses_the_same_user_before_loading_material() {
+        let dir = tempfile::tempdir().unwrap();
+        let operator = dir.path().join("operator.json");
+        let gateway = dir.path().join("gateway.json");
+        write_mysql_preparation_registry(&operator, mysql_preparation_storage("shared_user"));
+        let mut gateway_storage = mysql_preparation_storage("shared_user");
+        gateway_storage["password_file"] = json!("different-password-reference");
+        write_mysql_preparation_registry(&gateway, gateway_storage);
+
+        let error = load_mysql_preparation_target(&operator, &gateway, "tenant-a").unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<MysqlPreparationProfileRefusal>(),
+            Some(&MysqlPreparationProfileRefusal::SharedUser)
+        );
+    }
+
+    #[cfg(feature = "mysql-storage")]
+    #[test]
+    fn mysql_owned_preparation_refuses_each_target_divergence_before_loading_material() {
+        let dir = tempfile::tempdir().unwrap();
+        let operator = dir.path().join("operator.json");
+        let gateway = dir.path().join("gateway.json");
+        write_mysql_preparation_registry(&operator, mysql_preparation_storage("operator_a"));
+        for (field, divergent) in [
+            ("host", json!("other.example.invalid")),
+            ("port", json!(3307)),
+            ("database", json!("audit_b")),
+            ("namespace", json!("6657019d-5302-4ced-922f-406aa3d8ec5c")),
+        ] {
+            let mut gateway_storage = mysql_preparation_storage("gateway_a");
+            gateway_storage[field] = divergent;
+            write_mysql_preparation_registry(&gateway, gateway_storage);
+
+            let error = load_mysql_preparation_target(&operator, &gateway, "tenant-a").unwrap_err();
+            assert_eq!(
+                error.downcast_ref::<MysqlPreparationProfileRefusal>(),
+                Some(&MysqlPreparationProfileRefusal::TargetMismatch),
+                "accepted a different {field}"
+            );
+        }
+    }
+
+    #[cfg(feature = "mysql-storage")]
+    #[test]
+    fn mysql_owned_preparation_loads_only_operator_material_for_matching_profiles() {
+        let operator_dir = tempfile::tempdir().unwrap();
+        let gateway_dir = tempfile::tempdir().unwrap();
+        let operator = operator_dir.path().join("operator.json");
+        let gateway = gateway_dir.path().join("gateway.json");
+        let _ = mysql_files(operator_dir.path(), true);
+        write_mysql_preparation_registry(&operator, mysql_preparation_storage("operator_a"));
+        write_mysql_preparation_registry(&gateway, mysql_preparation_storage("gateway_a"));
+
+        let loaded = load_mysql_preparation_target(&operator, &gateway, "tenant-a").unwrap();
+        assert_eq!(loaded.endpoint().username, "operator_a");
+        assert_eq!(loaded.endpoint().database, "audit_a");
+        assert_eq!(
+            loaded.namespace.to_string(),
+            "5657019d-5302-4ced-922f-406aa3d8ec5c"
+        );
+        assert_eq!(loaded.credentials().password, "pw-fixture");
+        assert!(loaded.credentials().client_identity.is_some());
     }
 
     #[cfg(feature = "mysql-storage")]
