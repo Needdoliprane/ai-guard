@@ -1,5 +1,25 @@
 # Validation courante
 
+## 27 novembre 2026 — vérifications Legacy et diagnostic fournisseur
+
+Sur `093c640e` (arbre `b56ae467`), Cargo publie le CLI et le binaire
+`runtime_authorization` dans une cible APFS distincte. La garde disque
+arrête ensuite Cargo avant la publication du libtest. Le CLI de la
+fixture Full3 garde le même inode et les mêmes octets.
+
+Trois sélecteurs exacts de `runtime_authorization` passent avec les
+artefacts épinglés. Ils couvrent le refus Legacy malgré l’approbation,
+le rejeu seulement avec l’empreinte exacte et le refus d’une décision
+sans acquittement d’audit durable. Le code de la fixture est repris
+dans `43123773`. Sur le même CLI, le diagnostic avant configuration
+fournisseur est vérifié avec les anciennes options puis avec
+`observe` et `bridge` explicites. Les deux refus laissent le registre
+des sessions vide. La fixture corrigée est reprise dans `20fbd7db`.
+Manifeste
+`3500d323fe4173f7f97cd16ea398ef009a321cc22cd62da9cec481d7aa7e7f35`.
+Le test d’intégration fournisseur Linux et le libtest du gel gardent
+leur propre statut.
+
 ## 26 novembre 2026 — fermeture du canal de conversation
 
 Sur le libtest de `3293e7de`, le témoin suspend l’envoi après le reçu
