@@ -79,6 +79,48 @@ struct ConversationSlot {
     fingerprint: String,
     retiring: AtomicBool,
     bound: Mutex<BoundConversation>,
+    predecessor: PendingPredecessor<ConversationSlot>,
+}
+
+/// Owns the one exact predecessor whose reap gates use of the current slot.
+/// The entry is cleared only after the caller confirms reap completed.
+struct PendingPredecessor<T> {
+    slot: Mutex<Option<Arc<T>>>,
+}
+
+impl<T> Default for PendingPredecessor<T> {
+    fn default() -> Self {
+        Self {
+            slot: Mutex::new(None),
+        }
+    }
+}
+
+impl<T> PendingPredecessor<T> {
+    fn install(&self, predecessor: Arc<T>) -> anyhow::Result<()> {
+        let mut slot = self.slot.lock().expect("conversation predecessor");
+        anyhow::ensure!(slot.is_none(), "previous conversation reap is pending");
+        *slot = Some(predecessor);
+        Ok(())
+    }
+
+    fn reap(&self, reap: impl FnOnce(&T) -> anyhow::Result<()>) -> anyhow::Result<()> {
+        let mut slot = self.slot.lock().expect("conversation predecessor");
+        let Some(predecessor) = slot.as_ref() else {
+            return Ok(());
+        };
+        reap(predecessor)?;
+        slot.take();
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn is_pending(&self) -> bool {
+        self.slot
+            .lock()
+            .expect("conversation predecessor")
+            .is_some()
+    }
 }
 
 impl ConversationSlot {
@@ -126,6 +168,8 @@ pub struct SessionConversationComposerV1<'a> {
     source: &'a OwnedSourceToken,
     read_deadline: Duration,
     sessions: Mutex<BTreeMap<String, Arc<ConversationSlot>>>,
+    /// Serializes bind/rebind/STOP transitions; dispatch never takes this lock.
+    binding_ops: Mutex<()>,
     #[cfg(test)]
     before_write: Mutex<Option<BeforeWritePause>>,
     #[cfg(test)]
@@ -133,6 +177,10 @@ pub struct SessionConversationComposerV1<'a> {
     #[cfg(test)]
     stop_slot_observer: Option<std::sync::mpsc::Sender<()>>,
 }
+
+#[cfg(test)]
+#[path = "conversation_reap_tests.rs"]
+mod reap_tests;
 
 impl<'a> SessionConversationComposerV1<'a> {
     /// Compose over one retained owned source. The read deadline bounds the
@@ -153,6 +201,7 @@ impl<'a> SessionConversationComposerV1<'a> {
             source,
             read_deadline,
             sessions: Mutex::new(BTreeMap::new()),
+            binding_ops: Mutex::new(()),
             #[cfg(test)]
             before_write: Mutex::new(None),
             #[cfg(test)]
@@ -257,6 +306,16 @@ impl<'a> SessionConversationComposerV1<'a> {
         }
     }
 
+    /// Complete the exact predecessor reap without holding the source epoch.
+    fn reap_predecessor(&self, slot: &ConversationSlot) -> anyhow::Result<()> {
+        slot.predecessor.reap(|previous| {
+            let mut bound = previous.bound.lock().expect("predecessor conversation");
+            bound.adapter.close_turn();
+            bound.channel.close_and_reap()?;
+            Ok(())
+        })
+    }
+
     /// Bind the exact resolved channel facts after the supervised admission,
     /// durably before the owned stdio channel is attached. A failed bind leaves
     /// no channel effect: the presented pipe is closed on drop. An explicit
@@ -274,6 +333,18 @@ impl<'a> SessionConversationComposerV1<'a> {
         stdio: StdioConversation,
     ) -> anyhow::Result<SessionConversationBindingV1> {
         canonical_uuid(session_id)?;
+        let _binding = self.binding_ops.lock().expect("conversation binding");
+        // A second rotation cannot replace the retained predecessor until its
+        // exact child has been reaped. Same-bind replay follows this path too.
+        if let Some(existing) = self
+            .sessions
+            .lock()
+            .expect("conversation registry")
+            .get(session_id)
+            .cloned()
+        {
+            self.reap_predecessor(&existing)?;
+        }
         let epoch = self.write_epoch()?;
         let access = HumanSourceAccess::write(&epoch, self.source)?;
         let previous = self
@@ -316,6 +387,8 @@ impl<'a> SessionConversationComposerV1<'a> {
                 existing.binding == binding,
                 SessionMessageFailureV1::BindingChanged
             );
+            drop(epoch);
+            self.reap_predecessor(&existing)?;
             return Ok(binding);
         }
         let fingerprint = binding.fingerprint()?;
@@ -327,22 +400,27 @@ impl<'a> SessionConversationComposerV1<'a> {
                 adapter: ConversationAdapterV1::new(),
                 channel: stdio,
             }),
+            predecessor: PendingPredecessor::default(),
         });
-        let replaced = self
-            .sessions
-            .lock()
-            .expect("conversation registry")
-            .insert(session_id.into(), slot);
+        let replaced = {
+            let mut sessions = self.sessions.lock().expect("conversation registry");
+            let replaced = sessions.get(session_id).cloned();
+            if let Some(previous) = &replaced {
+                slot.predecessor.install(Arc::clone(previous))?;
+            }
+            sessions.insert(session_id.into(), Arc::clone(&slot));
+            replaced
+        };
         if let Some(replaced) = &replaced {
             // Publish retirement under the same epoch as the durable rebind.
             replaced.retiring.store(true, Ordering::Release);
         }
         // A replaced dispatch can need an epoch while it still owns the slot.
         drop(epoch);
-        if let Some(replaced) = replaced {
-            let mut old = replaced.bound.lock().expect("replaced conversation");
-            old.adapter.close_turn();
-            old.channel.close();
+        if replaced.is_some() {
+            // A failed reap leaves the newly installed slot explicitly gated;
+            // replay/dispatch/STOP retain and retry this exact predecessor.
+            self.reap_predecessor(&slot)?;
         }
         Ok(binding)
     }
@@ -375,6 +453,9 @@ impl<'a> SessionConversationComposerV1<'a> {
             }
             .into());
         };
+        // A newly rebound channel has no emission authority while its exact
+        // predecessor is still owned but unreaped.
+        self.reap_predecessor(&slot)?;
         let mut guard = slot.bound.lock().expect("admitted conversation");
         let bound = &mut *guard;
         let mut receipts = Vec::new();
@@ -542,6 +623,7 @@ impl<'a> SessionConversationComposerV1<'a> {
         session_id: &str,
     ) -> anyhow::Result<SessionConversationBindingV1> {
         canonical_uuid(session_id)?;
+        let _binding = self.binding_ops.lock().expect("conversation binding");
         let epoch = self.write_epoch()?;
         let binding = self.store.close_session_conversation_scoped(
             &epoch,
@@ -570,9 +652,12 @@ impl<'a> SessionConversationComposerV1<'a> {
             if let Some(observer) = &self.stop_slot_observer {
                 let _ = observer.send(());
             }
+            let predecessor_result = self.reap_predecessor(&slot);
             let mut bound = slot.bound.lock().expect("admitted conversation");
             bound.adapter.close_turn();
-            bound.channel.close_and_reap()?;
+            let current_result = bound.channel.close_and_reap();
+            predecessor_result?;
+            current_result?;
             // A replay must find this slot until teardown has completed.
             let mut sessions = self.sessions.lock().expect("conversation registry");
             if sessions
