@@ -81,6 +81,212 @@ fn current_fixture() -> Fixture {
     fixture
 }
 
+#[tokio::test]
+async fn legacy_named_admission_requires_a_reference_and_preserves_manual_replay() {
+    use agentsandbox::{
+        broker_registry::{BrokerAuthorityV1, BrokerGrantMutationV1, BrokerRuntimeKindV1},
+        identity::{ResourceKindV1, ResourceRefV1},
+        workload::{WorkloadBindingIssueV1, WorkloadSubjectV1},
+    };
+    use sha2::{Digest, Sha256};
+
+    // Proposed V1 private target for the named rail. Its discriminator is
+    // the route, so the broker role can be checked before parsing the body.
+    const NAMED: &str = "/control/api/v1/brokers/session-admissions";
+    const PUBLIC: &str = "/api/v1/brokers/session-admissions";
+    const MANUAL: &str = "/control/api/v1/workers/supervised-reservations";
+    let fixture = current_fixture();
+    let directory = fixture._directory.path();
+    fixture
+        .a
+        .migrate_human_rights_v2(&directory.join("named-before-human-rights.sqlite"))
+        .unwrap();
+    let broker_proof = "fixture-g04-named-admission-broker".repeat(2);
+    let broker_id = Uuid::new_v4().to_string();
+    let incarnation_id = Uuid::new_v4().to_string();
+    let credential_id = Uuid::new_v4().to_string();
+    let authority_id = Uuid::new_v4().to_string();
+    fixture
+        .a
+        .issue_workload_binding(&WorkloadBindingIssueV1 {
+            version: 1,
+            operation_id: Uuid::new_v4().to_string(),
+            credential_id: credential_id.clone(),
+            expected_revision: 0,
+            subject: WorkloadSubjectV1::Broker {
+                broker_id: broker_id.clone(),
+                incarnation_id: incarnation_id.clone(),
+            },
+            sha256_digest: hex::encode(Sha256::digest(broker_proof.as_bytes())),
+            expires_at: "2100-01-01T00:00:00.000Z".into(),
+        })
+        .unwrap();
+    fixture
+        .a
+        .mutate_broker_grant(&BrokerGrantMutationV1 {
+            version: 1,
+            operation_id: Uuid::new_v4().to_string(),
+            broker_id: broker_id.clone(),
+            expected_revision: None,
+            credential_id,
+            incarnation_id,
+            authorities: vec![BrokerAuthorityV1 {
+                authority_id: authority_id.clone(),
+                runtime_kind: BrokerRuntimeKindV1::Docker,
+            }],
+            lease_seconds: 120,
+            not_after: "2100-01-01T00:00:00.000Z".into(),
+        })
+        .unwrap();
+    let identity = send(
+        &fixture.router,
+        Method::GET,
+        "/control/api/v1/brokers/identity",
+        Some(&broker_proof),
+        None,
+    )
+    .await;
+    assert_eq!(identity.status(), StatusCode::OK, "broker proof fixture");
+    let identity: Value = response_json(identity).await;
+    assert_eq!(identity["broker_id"], broker_id);
+    assert_eq!(identity["tenant_id"], "tenant-a");
+    assert_eq!(identity["schema_version"], 10);
+
+    let mut named = supervised(admission(&fixture.a));
+    named.intent_hash = HASH_A.into();
+    named.admission.launch.authority_id = authority_id;
+    named.validate().unwrap();
+    let resource = ResourceRefV1 {
+        kind: ResourceKindV1::Session,
+        resource_id: named.admission.launch.session_id.clone(),
+    };
+    let operation = named.admission.operation_id.clone();
+    // The fixture deliberately retains no Prepare record. This first oracle
+    // exercises missing-reference refusal on the explicitly named rail only.
+    let missing_reference = json!({ "version": 1, "request": named });
+    let manual = supervised(admission(&fixture.a));
+    let before_refusals = fixture.a.head().unwrap();
+    let private = json_request(
+        &fixture.router,
+        Method::POST,
+        NAMED,
+        Some(&broker_proof),
+        &missing_reference,
+    )
+    .await
+    .status();
+    let public = json_request(
+        &fixture.router,
+        Method::POST,
+        PUBLIC,
+        Some(&broker_proof),
+        &missing_reference,
+    )
+    .await
+    .status();
+    let (runner, polls) =
+        counted_post(&fixture.router, NAMED, Some(bearer(&fixture.runner_a))).await;
+    assert_eq!(fixture.a.head().unwrap(), before_refusals);
+    assert!(fixture.a.workers().unwrap().is_empty());
+
+    let acceptance = json_request(
+        &fixture.router,
+        Method::POST,
+        MANUAL,
+        Some(&fixture.runner_a),
+        &manual,
+    )
+    .await;
+    assert_eq!(acceptance.status(), StatusCode::CREATED, "manual canary");
+    let acceptance: AdmissionResultV1 = response_json(acceptance).await;
+    assert!(acceptance.accepted && !acceptance.replayed);
+    let worker_id = acceptance.worker.as_ref().unwrap().worker_id.clone();
+    let expected_head = fixture.a.head().unwrap();
+    let Fixture {
+        _directory: directory,
+        router,
+        a,
+        b,
+        v2,
+        runner_a,
+        viewer_a,
+        ..
+    } = fixture;
+    drop((router, a, b, v2));
+    let redactor = Redactor::new(vec![]);
+    let reopened = Arc::new(
+        Store::open_for_tenant(
+            &directory.path().join("a.sqlite"),
+            "tenant-a",
+            redactor.clone(),
+            10_000,
+        )
+        .unwrap(),
+    );
+    assert!(reopened.integrity().unwrap().valid);
+    let router = gateway_router(
+        GatewayState::for_tenants(
+            vec![TenantGateway {
+                tenant_id: "tenant-a".into(),
+                store: reopened.clone(),
+                runner_token: runner_a.clone(),
+                viewer_token: viewer_a,
+            }],
+            Policy::default(),
+            None,
+            redactor,
+        )
+        .unwrap(),
+    );
+    let replay = json_request(&router, Method::POST, MANUAL, Some(&runner_a), &manual).await;
+    assert_eq!(replay.status(), StatusCode::OK);
+    let replay: AdmissionResultV1 = response_json(replay).await;
+    assert!(replay.accepted && replay.replayed);
+    assert_eq!(replay.receipt, acceptance.receipt);
+    assert_eq!(replay.worker.unwrap().worker_id, worker_id);
+    let reopened_private = json_request(
+        &router,
+        Method::POST,
+        NAMED,
+        Some(&broker_proof),
+        &missing_reference,
+    )
+    .await
+    .status();
+    assert!(reopened.worker_operation(&operation).unwrap().is_none());
+    assert!(
+        reopened
+            .identity_resource_grant(&resource)
+            .unwrap()
+            .is_none()
+    );
+    let workers = reopened.workers().unwrap();
+    assert_eq!(workers.len(), 1);
+    assert_eq!(workers[0].worker_id, worker_id);
+    assert_eq!(workers[0].state, WorkerStateV1::Reserved);
+    assert_eq!(
+        reopened
+            .worker_quota(&agentsandbox::control::QuotaPolicyV1::default())
+            .unwrap()
+            .held_workers,
+        1
+    );
+    assert_eq!(reopened.head().unwrap(), expected_head);
+
+    assert_eq!(
+        private,
+        StatusCode::BAD_REQUEST,
+        "named V1 requires its reference"
+    );
+    assert_eq!(reopened_private, private);
+    assert_eq!(public, StatusCode::NOT_FOUND, "named V1 stays private");
+    assert!(matches!(
+        runner,
+        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
+    ));
+    assert_eq!(polls, 0, "runner is refused before the body");
+}
+
 fn rejection_code(payload: &Value) -> &'static str {
     match payload
         .get("code")
