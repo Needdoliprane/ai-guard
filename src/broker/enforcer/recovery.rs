@@ -1985,6 +1985,13 @@ impl EnforcerStopClient {
     pub(crate) fn connection_epoch(&self) -> Option<Uuid> {
         self.0.cache.lock().ok().and_then(|cache| cache.epoch)
     }
+    #[cfg(test)]
+    pub(crate) fn acknowledged_restore_epoch(&self, arm: &str) -> Option<Uuid> {
+        let cache = self.0.cache.lock().expect("private STOP cache");
+        let entry = cache.entries.get(arm)?;
+        let (epoch, revision) = entry.acknowledged?;
+        (revision == entry.revision).then_some(epoch)
+    }
     async fn open(&self) -> Result<StopConnection, OpenFailure> {
         let root = &self.0.root;
         root.revalidate()
