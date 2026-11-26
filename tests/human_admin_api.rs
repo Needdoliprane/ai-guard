@@ -675,3 +675,76 @@ async fn session_launch_route_is_served_and_refuses_without_owned_coverage() {
         invalid.body
     );
 }
+
+/// The SendSessionMessage route is served by the real gateway router and refuses
+/// without owned human-source coverage, never a silent 404. The legacy seed has
+/// no owned Store14/15 bundle, so the enqueue commits nothing here; the durable
+/// owned happy path (nominative owner ACL, audit before any byte, idempotence,
+/// binding revalidation, STOP/expiry, truthful delivery) is proven on the real
+/// owned Store fixture. The body is never echoed in a refusal.
+#[tokio::test]
+async fn session_message_route_is_served_and_refuses_without_owned_coverage() {
+    let stack = Stack::start().await;
+    let body = serde_json::json!({
+        "version": 1,
+        "operation_id": uuid::Uuid::new_v4().to_string(),
+        "session_id": uuid::Uuid::new_v4().to_string(),
+        "expected_input_epoch": 0,
+        "content": "synthetic instruction",
+    });
+    let reply = stack
+        .post(
+            "/api/v1/human/owned/sessions/messages",
+            Some("user_a1"),
+            None,
+            &body,
+        )
+        .await;
+    assert_eq!(
+        reply.status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "{}",
+        reply.body
+    );
+    assert_eq!(
+        reply.body["error"]["code"], "identity_unavailable",
+        "{}",
+        reply.body
+    );
+    assert!(
+        !String::from_utf8_lossy(&reply.raw).contains("synthetic instruction"),
+        "the instruction body is never echoed"
+    );
+    // An invalid body is refused before any owned effect, never a panic.
+    let invalid = stack
+        .post(
+            "/api/v1/human/owned/sessions/messages",
+            Some("user_a1"),
+            None,
+            &serde_json::json!({"version": 1}),
+        )
+        .await;
+    assert!(
+        invalid.status == StatusCode::SERVICE_UNAVAILABLE
+            || invalid.status == StatusCode::BAD_REQUEST,
+        "{}",
+        invalid.body
+    );
+    // The receipt read route is served too and refuses without owned coverage.
+    let read = stack
+        .get(
+            &format!(
+                "/api/v1/human/owned/sessions/messages/{}",
+                uuid::Uuid::new_v4()
+            ),
+            "user_a1",
+            None,
+        )
+        .await;
+    assert_eq!(
+        read.status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "{}",
+        read.body
+    );
+}

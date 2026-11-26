@@ -2248,7 +2248,10 @@ async fn dashboard_proxy(State(s): State<DashboardState>, request: Request) -> A
             && (owned_static_path
                 || versioned_human
                     && human_dashboard_event_detail(&canonical_path)
-                    && human::owned_event_detail_query(request.uri()));
+                    && human::owned_event_detail_query(request.uri())
+                || versioned_human
+                    && human_dashboard_message_receipt(&canonical_path)
+                    && request.uri().query().is_none());
         if !allowed {
             return Err(human_sources::unavailable());
         }
@@ -2446,10 +2449,19 @@ fn human_dashboard_path(path: &str) -> bool {
     ]
     .contains(&path)
         || human_dashboard_event_detail(path)
+        || human_dashboard_message_receipt(path)
 }
 
 fn human_dashboard_event_detail(path: &str) -> bool {
     path.strip_prefix("/api/human/events/")
+        .is_some_and(|id| uuid::Uuid::parse_str(id).is_ok_and(|parsed| parsed.to_string() == id))
+}
+
+/// One retained SendSessionMessage receipt read (metadata and delivery status
+/// only, never the body). The gateway revalidates the personal context and the
+/// session's owner ACL; the proxy relays the exact canonical UUID detail only.
+fn human_dashboard_message_receipt(path: &str) -> bool {
+    path.strip_prefix("/api/human/owned/sessions/messages/")
         .is_some_and(|id| uuid::Uuid::parse_str(id).is_ok_and(|parsed| parsed.to_string() == id))
 }
 

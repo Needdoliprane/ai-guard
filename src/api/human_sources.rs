@@ -416,6 +416,41 @@ impl OwnedHumanGateway {
         })
     }
 
+    /// Durably enqueue one short instruction on the proof's own retained source
+    /// under its write epoch. The enqueue changes no authorization revision, so
+    /// the discovery generation is unchanged. An exact replay returns the
+    /// retained result; divergent content under the same operation is a
+    /// conflict; revocation, STOP, expiry or a changed binding closes it.
+    pub(super) fn session_message_send(
+        &self,
+        index: usize,
+        store: &Store,
+        scope: &AuthorizedScopeV1,
+        request: &crate::control::session_control::SessionMessageRequestV1,
+    ) -> ApiResult<crate::control::session_control::SessionMessageReceiptV1> {
+        self.change_delegated_identity(
+            index,
+            human::session_message_failure,
+            |epoch, source, expected| {
+                store.modern_session_message_send(epoch, source, scope, request, expected)
+            },
+        )
+    }
+
+    /// Read one retained message receipt (metadata only) for a still-authorized
+    /// owner. Revocation of the identity, membership or context closes the read.
+    pub(super) fn session_message_receipt(
+        &self,
+        index: usize,
+        store: &Store,
+        scope: &AuthorizedScopeV1,
+        operation_id: &str,
+    ) -> ApiResult<crate::control::session_control::SessionMessageReceiptV1> {
+        self.read(index, store, |access| {
+            store.modern_session_message_receipt(access, scope, operation_id)
+        })
+    }
+
     /// Publish a committed delegated identity change on the proof's own retained
     /// source before releasing its write epoch. Replays keep the current generation.
     fn change_delegated_identity<R>(

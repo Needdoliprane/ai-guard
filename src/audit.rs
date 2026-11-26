@@ -206,6 +206,7 @@ mod review_authority_migration;
 mod review_binding;
 mod review_format14;
 mod review_startup;
+pub(crate) mod session_message;
 pub(crate) mod session_prepare;
 pub(crate) use kubernetes_admission::{
     ConfirmedKubernetesCreateResult, FreshKubernetesCreateClaimCommit,
@@ -487,6 +488,8 @@ fn schema_objects(
         .chain(retention::ledger::SCHEMA.iter().filter(move |_| retention))
         // The preparation tables exist exactly when their chain marker does.
         .chain(session_prepare::SCHEMA.iter().filter(move |_| prepare))
+        // The conversation/message tables share the same capability marker.
+        .chain(session_message::SCHEMA.iter().filter(move |_| prepare))
 }
 
 fn inherited_schema_objects(
@@ -671,6 +674,11 @@ fn validate_schema(db: &Connection, allow_legacy: bool) -> anyhow::Result<bool> 
         )
         .chain(
             session_prepare::AUTO_INDEX_COUNTS
+                .iter()
+                .filter(move |_| prepare),
+        )
+        .chain(
+            session_message::AUTO_INDEX_COUNTS
                 .iter()
                 .filter(move |_| prepare),
         )

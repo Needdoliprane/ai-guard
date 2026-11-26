@@ -2014,3 +2014,661 @@ fn owned_store14_session_launch_is_durable_idempotent_and_fenced() {
 fn owned_store15_session_launch_is_durable_idempotent_and_fenced() {
     assert_session_launch_contract(15);
 }
+
+// --- SendSessionMessage: durable enqueue, effect-point revalidation, truthful
+// delivery statuses, STOP priority, idempotence and mandatory audit.
+
+const MESSAGE_ENQUEUED_KIND: &str = "control.session_message.enqueued";
+
+fn message_request(
+    operation_id: Uuid,
+    session_id: Uuid,
+    expected_input_epoch: u64,
+    content: &str,
+) -> crate::control::session_control::SessionMessageRequestV1 {
+    crate::control::session_control::SessionMessageRequestV1 {
+        version: 1,
+        operation_id,
+        session_id,
+        expected_input_epoch,
+        content: content.into(),
+    }
+}
+
+fn send_message(
+    retained: &Retained,
+    scope: &crate::identity::AuthorizedScopeV1,
+    request: &crate::control::session_control::SessionMessageRequestV1,
+) -> anyhow::Result<crate::control::session_control::SessionMessageReceiptV1> {
+    let expected = generation(retained);
+    let epoch = retained.owner.try_write_epoch()?;
+    retained
+        .store
+        .modern_session_message_send(&epoch, &retained.source, scope, request, expected)
+        .map(|(receipt, _)| receipt)
+}
+
+fn message_failure(
+    error: &anyhow::Error,
+) -> Option<crate::audit::session_message::SessionMessageFailureV1> {
+    error
+        .downcast_ref::<crate::audit::session_message::SessionMessageFailureV1>()
+        .copied()
+}
+
+fn bind_command(
+    operation_id: Uuid,
+    session_id: &str,
+    expected_input_epoch: u64,
+) -> crate::control::session_control::BindSessionConversationV1 {
+    crate::control::session_control::BindSessionConversationV1 {
+        version: 1,
+        operation_id,
+        session_id: session_id.into(),
+        expected_input_epoch,
+        channel: crate::control::session_control::SessionConversationChannelV1 {
+            broker_id: "broker-1".into(),
+            broker_incarnation: "incarnation-1".into(),
+            worker_id: "worker-1".into(),
+            attempt_id: "attempt-1".into(),
+            runtime_instance: "runtime-1".into(),
+            provider: "codex".into(),
+            protocol: "codex-app-server-v2".into(),
+        },
+    }
+}
+
+fn bind_conversation(
+    retained: &Retained,
+    command: &crate::control::session_control::BindSessionConversationV1,
+) -> anyhow::Result<crate::control::session_control::SessionConversationBindingV1> {
+    let epoch = retained.owner.try_write_epoch()?;
+    retained
+        .store
+        .bind_session_conversation_scoped(&epoch, &retained.source, command)
+}
+
+fn close_conversation(
+    retained: &Retained,
+    operation_id: Uuid,
+    session_id: &str,
+) -> anyhow::Result<crate::control::session_control::SessionConversationBindingV1> {
+    let epoch = retained.owner.try_write_epoch()?;
+    retained.store.close_session_conversation_scoped(
+        &epoch,
+        &retained.source,
+        &crate::control::session_control::CloseSessionConversationV1 {
+            version: 1,
+            operation_id,
+            session_id: session_id.into(),
+        },
+    )
+}
+
+fn issue_emission(
+    retained: &Retained,
+    operation_id: Uuid,
+    expected_binding_fingerprint: &str,
+) -> anyhow::Result<crate::control::session_control::SessionMessageEmissionV1> {
+    let epoch = retained.owner.try_write_epoch()?;
+    retained.store.issue_session_message_emission_scoped(
+        &epoch,
+        &retained.source,
+        &crate::control::session_control::IssueSessionMessageEmissionV1 {
+            version: 1,
+            operation_id,
+            expected_binding_fingerprint: expected_binding_fingerprint.into(),
+        },
+    )
+}
+
+fn record_transmitted(
+    retained: &Retained,
+    operation_id: Uuid,
+) -> anyhow::Result<crate::control::session_control::SessionMessageReceiptV1> {
+    let epoch = retained.owner.try_write_epoch()?;
+    retained
+        .store
+        .record_session_message_transmitted_scoped(&epoch, &retained.source, operation_id)
+}
+
+fn record_acknowledged(
+    retained: &Retained,
+    operation_id: Uuid,
+    ack: &crate::control::session_control::SessionMessageAckV1,
+) -> anyhow::Result<crate::control::session_control::SessionMessageReceiptV1> {
+    let epoch = retained.owner.try_write_epoch()?;
+    retained.store.record_session_message_acknowledged_scoped(
+        &epoch,
+        &retained.source,
+        operation_id,
+        ack,
+    )
+}
+
+/// One launched session with its retained Prepared binding.
+fn launched_session(
+    retained: &Retained,
+    scope: &crate::identity::AuthorizedScopeV1,
+    principal: &crate::identity::PrincipalRefV1,
+    target_id: Uuid,
+    revision: u64,
+) -> crate::control::session_control::SessionLaunchReceiptV1 {
+    let epoch = retained.owner.try_write_epoch().unwrap();
+    retained
+        .store
+        .provision_session_launch_target_scoped(
+            &epoch,
+            &retained.source,
+            &target_command(Uuid::new_v4(), target_id, revision, revision - 1, principal),
+        )
+        .unwrap();
+    drop(epoch);
+    let preparation = prepare(
+        retained,
+        scope,
+        &prepare_request(Uuid::new_v4(), target_id, revision, FUTURE_DEADLINE),
+    )
+    .unwrap();
+    launch(
+        retained,
+        scope,
+        &launch_request(Uuid::new_v4(), target_id, revision, &preparation),
+    )
+    .unwrap()
+}
+
+/// The complete SendSessionMessage control-plane contract on one owned format.
+/// The conversation adapter's stdio behavior is proven separately with a
+/// fixture child; no provider, credential or network is involved here.
+fn assert_session_message_contract(format: u32) {
+    use crate::audit::session_message::SessionMessageFailureV1 as M;
+    use crate::control::session_control::SessionMessageStatusV1 as S;
+    use crate::identity::{ContextModeV1, HumanCapabilityV1, IdentityFailureV1 as F};
+    let adopted = adopted(format);
+    let (_plan, guard) = adopted.in_place(0);
+    install_all(&adopted, &guard, &format!("message-{format}"));
+    drop(guard);
+    let retained = adopted.retained(0, &format!("message-installed-{format}.json"), format);
+
+    let (principal, membership) = provision_membership(
+        &retained,
+        &[
+            HumanCapabilityV1::LaunchSession,
+            HumanCapabilityV1::SendSessionMessage,
+            HumanCapabilityV1::ReadTenantMetadata,
+        ],
+    )
+    .unwrap();
+    let scope = personal_scope(&retained, &principal, &membership, ContextModeV1::Personal);
+    let target_id = Uuid::new_v4();
+    let session = launched_session(&retained, &scope, &principal, target_id, 1);
+    let session_id = Uuid::parse_str(&session.session_id).unwrap();
+    let prepared_fingerprint = session.conversation.fingerprint().unwrap();
+
+    // Enqueue is durable, nominative and audited before any byte. The audit
+    // records metadata only: the body never enters the chain.
+    let body = "synthetic instruction: summarize the fixture report";
+    let operation = Uuid::new_v4();
+    let request = message_request(operation, session_id, 0, body);
+    let before = head(&retained.store);
+    let receipt = send_message(&retained, &scope, &request).unwrap();
+    assert!(!receipt.replayed);
+    assert_eq!(receipt.operation_id, operation);
+    assert_eq!(receipt.session_id, session_id);
+    assert_eq!(receipt.status, S::Queued);
+    assert!(receipt.ack.is_none());
+    assert_eq!(receipt.input_hash, request.input_hash().unwrap());
+    assert_eq!(receipt.content_hash, request.content_hash().unwrap());
+    assert_eq!(receipt.binding_fingerprint, prepared_fingerprint);
+    assert_eq!(receipt.input_epoch, 0);
+    assert_eq!(receipt.audit_seq, before.0 + 1);
+    assert_eq!(head(&retained.store).0, before.0 + 1);
+    {
+        let db = retained.store.db.lock().unwrap();
+        let (kind, payload): (String, String) = db
+            .query_row(
+                "SELECT kind,payload FROM events WHERE seq=?1",
+                [receipt.audit_seq],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(kind, MESSAGE_ENQUEUED_KIND);
+        assert!(
+            !payload.contains(body),
+            "the audit must not duplicate the body"
+        );
+        let event: Event = serde_json::from_str(&payload).unwrap();
+        assert_eq!(
+            event.session_id.as_deref(),
+            Some(session.session_id.as_str())
+        );
+        assert_eq!(event.id, receipt.message_id);
+        // The body is protected tenant business data in the tenant store.
+        let stored: String = db
+            .query_row(
+                "SELECT content FROM session_messages WHERE operation_id=?1",
+                [operation.to_string()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored, body);
+    }
+
+    // A lost response replays to the identical retained result, no second effect.
+    let again = send_message(&retained, &scope, &request).unwrap();
+    assert!(again.replayed);
+    assert_eq!(again.audit_seq, receipt.audit_seq);
+    assert_eq!(again.audit_hash, receipt.audit_hash);
+    assert_eq!(again.message_id, receipt.message_id);
+    assert_eq!(head(&retained.store).0, before.0 + 1);
+
+    // Divergent content under the same operation is a conflict.
+    let divergent = message_request(operation, session_id, 0, "a different instruction");
+    assert_eq!(
+        identity_failure(&send_message(&retained, &scope, &divergent).unwrap_err()),
+        Some(F::Conflict)
+    );
+    // A stale epoch pin never silently retargets the binding.
+    let stale_epoch = message_request(Uuid::new_v4(), session_id, 7, body);
+    assert_eq!(
+        message_failure(&send_message(&retained, &scope, &stale_epoch).unwrap_err()),
+        Some(M::BindingChanged)
+    );
+    assert_eq!(head(&retained.store).0, before.0 + 1);
+
+    // Emission requires the resolved channel: a Prepared binding is explicitly
+    // not admitted, never a silent fallback.
+    assert_eq!(
+        message_failure(&issue_emission(&retained, operation, &prepared_fingerprint).unwrap_err()),
+        Some(M::ChannelNotAdmitted)
+    );
+
+    // SendSessionMessage is distinct and nominative: another principal, an
+    // administration context, or LaunchSession alone never imply it.
+    let (other_principal, other_membership) =
+        provision_membership(&retained, &[HumanCapabilityV1::SendSessionMessage]).unwrap();
+    let other_scope = personal_scope(
+        &retained,
+        &other_principal,
+        &other_membership,
+        ContextModeV1::Personal,
+    );
+    let scope = personal_scope(&retained, &principal, &membership, ContextModeV1::Personal);
+    let stolen = message_request(Uuid::new_v4(), session_id, 0, body);
+    assert_eq!(
+        identity_failure(&send_message(&retained, &other_scope, &stolen).unwrap_err()),
+        Some(F::PermissionDenied)
+    );
+    let admin = personal_scope(
+        &retained,
+        &principal,
+        &membership,
+        ContextModeV1::Administration,
+    );
+    assert_eq!(
+        identity_failure(&send_message(&retained, &admin, &stolen).unwrap_err()),
+        Some(F::PermissionDenied)
+    );
+    let (launcher_principal, launcher_membership) =
+        provision_membership(&retained, &[HumanCapabilityV1::LaunchSession]).unwrap();
+    let launcher_scope = personal_scope(
+        &retained,
+        &launcher_principal,
+        &launcher_membership,
+        ContextModeV1::Personal,
+    );
+    assert_eq!(
+        identity_failure(&send_message(&retained, &launcher_scope, &stolen).unwrap_err()),
+        Some(F::PermissionDenied)
+    );
+    let scope = personal_scope(&retained, &principal, &membership, ContextModeV1::Personal);
+
+    // The trusted control binds the resolved channel explicitly; the epoch
+    // advances. The message pinned to the Prepared binding is never retargeted.
+    let bound = bind_conversation(
+        &retained,
+        &bind_command(Uuid::new_v4(), &session.session_id, 0),
+    )
+    .unwrap();
+    assert_eq!(
+        bound.status,
+        crate::control::session_control::SessionConversationStatusV1::Active
+    );
+    assert_eq!(bound.input_epoch, 1);
+    assert_eq!(bound.worker_id.as_deref(), Some("worker-1"));
+    assert_eq!(bound.protocol.as_deref(), Some("codex-app-server-v2"));
+    let active_fingerprint = bound.fingerprint().unwrap();
+    assert_ne!(active_fingerprint, prepared_fingerprint);
+    assert_eq!(
+        message_failure(&issue_emission(&retained, operation, &prepared_fingerprint).unwrap_err()),
+        Some(M::BindingChanged)
+    );
+    // Bind replay is idempotent and returns the retained binding.
+    let bind_op = Uuid::new_v4();
+    let session2 = launched_session(&retained, &scope, &principal, Uuid::new_v4(), 1);
+    let first =
+        bind_conversation(&retained, &bind_command(bind_op, &session2.session_id, 0)).unwrap();
+    let replayed_bind =
+        bind_conversation(&retained, &bind_command(bind_op, &session2.session_id, 0)).unwrap();
+    assert_eq!(first, replayed_bind);
+
+    // A fresh message pinned to the Active binding emits: the durable issue
+    // latch precedes the first byte; delivery stays unknown until the complete
+    // write is observed, then acknowledged only by the exact correlated ack.
+    let active_request = message_request(Uuid::new_v4(), session_id, 1, body);
+    let active_receipt = send_message(&retained, &scope, &active_request).unwrap();
+    assert_eq!(active_receipt.binding_fingerprint, active_fingerprint);
+    let before_issue = head(&retained.store);
+    let emission =
+        issue_emission(&retained, active_receipt.operation_id, &active_fingerprint).unwrap();
+    assert_eq!(emission.content, body);
+    assert_eq!(emission.session_id, session.session_id);
+    assert_eq!(emission.input_epoch, 1);
+    assert_eq!(head(&retained.store).0, before_issue.0 + 1);
+    let issued = send_message(&retained, &scope, &active_request).unwrap();
+    assert_eq!(issued.status, S::Unknown);
+    // A replayed issue never re-emits: delivery uncertainty is retained.
+    assert_eq!(
+        message_failure(
+            &issue_emission(&retained, active_receipt.operation_id, &active_fingerprint)
+                .unwrap_err()
+        ),
+        Some(M::EmissionAlreadyIssued)
+    );
+    let transmitted = record_transmitted(&retained, active_receipt.operation_id).unwrap();
+    assert_eq!(transmitted.status, S::Transmitted);
+    let transmitted_again = record_transmitted(&retained, active_receipt.operation_id).unwrap();
+    assert!(transmitted_again.replayed);
+    assert_eq!(transmitted_again.status, S::Transmitted);
+    let ack = crate::control::session_control::SessionMessageAckV1 {
+        rpc_id: 7,
+        turn_id: "turn-fixture-1".into(),
+    };
+    let acknowledged = record_acknowledged(&retained, active_receipt.operation_id, &ack).unwrap();
+    assert_eq!(acknowledged.status, S::Acknowledged);
+    assert_eq!(acknowledged.ack.as_ref(), Some(&ack));
+    let acknowledged_again =
+        record_acknowledged(&retained, active_receipt.operation_id, &ack).unwrap();
+    assert!(acknowledged_again.replayed);
+    // A divergent acknowledgement under the same operation is a conflict.
+    let divergent_ack = crate::control::session_control::SessionMessageAckV1 {
+        rpc_id: 7,
+        turn_id: "turn-other".into(),
+    };
+    assert_eq!(
+        identity_failure(
+            &record_acknowledged(&retained, active_receipt.operation_id, &divergent_ack)
+                .unwrap_err()
+        ),
+        Some(F::Conflict)
+    );
+    // Acknowledging a message that was never transmitted is refused.
+    let queued_only = message_request(Uuid::new_v4(), session_id, 1, "never transmitted");
+    let queued_receipt = send_message(&retained, &scope, &queued_only).unwrap();
+    assert!(record_acknowledged(&retained, queued_receipt.operation_id, &ack).is_err());
+
+    // STOP closes the right to emit first. The queued message is never emitted
+    // and a new enqueue is refused; the close replay is idempotent.
+    let stop_op = Uuid::new_v4();
+    let closed = close_conversation(&retained, stop_op, &session.session_id).unwrap();
+    assert_eq!(
+        closed.status,
+        crate::control::session_control::SessionConversationStatusV1::Closed
+    );
+    let closed_again = close_conversation(&retained, stop_op, &session.session_id).unwrap();
+    assert_eq!(closed, closed_again);
+    assert_eq!(
+        message_failure(
+            &issue_emission(&retained, queued_receipt.operation_id, &active_fingerprint)
+                .unwrap_err()
+        ),
+        Some(M::SessionClosed)
+    );
+    let after_stop = message_request(Uuid::new_v4(), session_id, 1, "after stop");
+    assert_eq!(
+        message_failure(&send_message(&retained, &scope, &after_stop).unwrap_err()),
+        Some(M::SessionClosed)
+    );
+
+    // The original deadline keeps priority: an expired binding refuses both
+    // enqueue and emission before any effect.
+    let session3 = launched_session(&retained, &scope, &principal, Uuid::new_v4(), 1);
+    let session3_id = Uuid::parse_str(&session3.session_id).unwrap();
+    let bound3 = bind_conversation(
+        &retained,
+        &bind_command(Uuid::new_v4(), &session3.session_id, 0),
+    )
+    .unwrap();
+    let expiring = message_request(Uuid::new_v4(), session3_id, 1, "before expiry");
+    let expiring_receipt = send_message(&retained, &scope, &expiring).unwrap();
+    {
+        let db = retained.store.db.lock().unwrap();
+        let mut binding = bound3.clone();
+        binding.expires_at = PAST_DEADLINE.into();
+        db.execute(
+            "UPDATE session_conversations SET binding_json=?1 WHERE session_id=?2",
+            rusqlite::params![
+                serde_json::to_string(&binding).unwrap(),
+                session3.session_id
+            ],
+        )
+        .unwrap();
+    }
+    let before_expired = head(&retained.store);
+    assert_eq!(
+        message_failure(
+            &issue_emission(
+                &retained,
+                expiring_receipt.operation_id,
+                &bound3.fingerprint().unwrap()
+            )
+            .unwrap_err()
+        ),
+        Some(M::BindingExpired)
+    );
+    assert_eq!(
+        message_failure(
+            &send_message(
+                &retained,
+                &scope,
+                &message_request(Uuid::new_v4(), session3_id, 1, "after expiry")
+            )
+            .unwrap_err()
+        ),
+        Some(M::BindingExpired)
+    );
+    assert_eq!(head(&retained.store), before_expired);
+
+    // An unavailable mandatory audit blocks the enqueue: nothing is retained.
+    let session4 = launched_session(&retained, &scope, &principal, Uuid::new_v4(), 1);
+    let session4_id = Uuid::parse_str(&session4.session_id).unwrap();
+    let blocked = message_request(Uuid::new_v4(), session4_id, 0, "blocked by audit");
+    let before_blocked = head(&retained.store);
+    let expected_before = generation(&retained);
+    let quota_before: i64 = {
+        let db = retained.store.db.lock().unwrap();
+        db.query_row("SELECT bytes FROM quota WHERE id=1", [], |r| r.get(0))
+            .unwrap()
+    };
+    {
+        let db = retained.store.db.lock().unwrap();
+        db.execute("UPDATE quota SET bytes=?1", [i64::MAX / 2])
+            .unwrap();
+    }
+    let epoch = retained.owner.try_write_epoch().unwrap();
+    assert!(
+        retained
+            .store
+            .modern_session_message_send(
+                &epoch,
+                &retained.source,
+                &scope,
+                &blocked,
+                expected_before
+            )
+            .is_err()
+    );
+    drop(epoch);
+    assert_eq!(head(&retained.store), before_blocked);
+    assert_eq!(table_count(&retained.store, "session_messages"), 4);
+    {
+        let db = retained.store.db.lock().unwrap();
+        db.execute("UPDATE quota SET bytes=?1", [quota_before])
+            .unwrap();
+    }
+    // The integrity fault latched the store; recovery is a reopen.
+    drop(retained);
+    let retained = adopted.retained(0, &format!("message-recovered-{format}.json"), format);
+    assert!(send_message(&retained, &scope, &blocked).is_ok());
+
+    // A reopened source replays the enqueue and serves the same receipt.
+    drop(retained);
+    let reopened = adopted.retained(0, &format!("message-reopened-{format}.json"), format);
+    let replayed = send_message(&reopened, &scope, &request).unwrap();
+    assert!(replayed.replayed);
+    assert_eq!(replayed.audit_hash, receipt.audit_hash);
+    assert_eq!(replayed.message_id, receipt.message_id);
+
+    // Revocation closes both a new enqueue and the replay.
+    revoke_membership(&reopened, &principal, &membership).unwrap();
+    let before_revoke = head(&reopened.store);
+    let refusal = send_message(&reopened, &scope, &request).unwrap_err();
+    assert!(
+        matches!(
+            identity_failure(&refusal),
+            Some(F::ContextRevoked) | Some(F::IdentityRevoked)
+        ),
+        "{refusal:#}"
+    );
+    assert_eq!(head(&reopened.store), before_revoke);
+}
+
+#[test]
+fn owned_store14_session_message_is_durable_idempotent_and_fenced() {
+    assert_session_message_contract(14);
+}
+
+#[test]
+fn owned_store15_session_message_is_durable_idempotent_and_fenced() {
+    assert_session_message_contract(15);
+}
+
+/// Retain an owned source with a caller-chosen redactor, to exercise the
+/// approved masking policy at the enqueue seam.
+fn retained_with_redactor(
+    adopted: &Adopted,
+    index: usize,
+    manifest: &str,
+    format: u32,
+    redactor: Redactor,
+) -> Retained {
+    let owner = adopted.base.owner(&adopted.anchors, manifest, format);
+    let source = owner.source_token(adopted.source_id(index)).unwrap();
+    let descriptor = &adopted.base.plan.target.sources[index];
+    let startup = Store::open_review_startup_for_tenant(
+        &descriptor.storage_binding.path(),
+        descriptor.tenant_id.as_deref().unwrap(),
+        redactor,
+        160,
+        &source,
+    )
+    .unwrap();
+    let epoch = owner.try_write_epoch().unwrap();
+    let revision = startup.current_incarnation_revision(&epoch).unwrap();
+    startup
+        .append_incarnation(&epoch, &source, Uuid::new_v4(), revision)
+        .unwrap();
+    let store = startup.retain(&epoch, &source).unwrap();
+    drop(epoch);
+    Retained {
+        store,
+        source,
+        owner,
+    }
+}
+
+/// The masking policy refuses an instruction it cannot preserve safely, before
+/// enqueue; the bounded unresolved queue refuses overflow without consuming the
+/// stop reserves. Both are proven on a real owned Store14 source.
+#[test]
+fn owned_store14_session_message_masking_and_capacity() {
+    use crate::audit::session_message::SessionMessageFailureV1 as M;
+    use crate::identity::{ContextModeV1, HumanCapabilityV1};
+    let adopted = adopted(14);
+    let (_plan, guard) = adopted.in_place(0);
+    install_all(&adopted, &guard, "message-mask-cap");
+    drop(guard);
+    let retained = retained_with_redactor(
+        &adopted,
+        0,
+        "message-mask-cap-installed.json",
+        14,
+        Redactor::new(vec!["synthetic-secret-value".into()]),
+    );
+    let (principal, membership) = provision_membership(
+        &retained,
+        &[
+            HumanCapabilityV1::LaunchSession,
+            HumanCapabilityV1::SendSessionMessage,
+        ],
+    )
+    .unwrap();
+    let scope = personal_scope(&retained, &principal, &membership, ContextModeV1::Personal);
+    let session = launched_session(&retained, &scope, &principal, Uuid::new_v4(), 1);
+    let session_id = Uuid::parse_str(&session.session_id).unwrap();
+
+    // An instruction containing a known secret is refused before enqueue: the
+    // masking policy cannot preserve its meaning safely, and it is never
+    // silently altered. Nothing is retained.
+    let before = head(&retained.store);
+    let secret = message_request(
+        Uuid::new_v4(),
+        session_id,
+        0,
+        "use synthetic-secret-value to authenticate",
+    );
+    assert_eq!(
+        message_failure(&send_message(&retained, &scope, &secret).unwrap_err()),
+        Some(M::ContentRequiresRedaction)
+    );
+    assert_eq!(head(&retained.store), before);
+    assert_eq!(table_count(&retained.store, "session_messages"), 0);
+    // A clean instruction is retained.
+    assert!(
+        send_message(
+            &retained,
+            &scope,
+            &message_request(Uuid::new_v4(), session_id, 0, "clean instruction")
+        )
+        .is_ok()
+    );
+
+    // The bounded unresolved per-session queue refuses overflow. The first
+    // clean message occupies one slot; fill the rest, then refuse the next.
+    for _ in 1..32 {
+        assert!(
+            send_message(
+                &retained,
+                &scope,
+                &message_request(Uuid::new_v4(), session_id, 0, "queued instruction")
+            )
+            .is_ok()
+        );
+    }
+    assert_eq!(table_count(&retained.store, "session_messages"), 32);
+    let before_overflow = head(&retained.store);
+    assert_eq!(
+        message_failure(
+            &send_message(
+                &retained,
+                &scope,
+                &message_request(Uuid::new_v4(), session_id, 0, "overflow")
+            )
+            .unwrap_err()
+        ),
+        Some(M::CapacityExhausted)
+    );
+    assert_eq!(head(&retained.store), before_overflow);
+    assert_eq!(table_count(&retained.store, "session_messages"), 32);
+}

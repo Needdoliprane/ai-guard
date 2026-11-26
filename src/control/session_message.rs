@@ -1,0 +1,383 @@
+//! Bidirectional conversation adapter for SendSessionMessage, over the
+//! documented Codex app-server JSON-RPC stdio protocol (`turn/start` request,
+//! typed response carrying the turn id, correlated `turn/completed`
+//! notification). See `docs/engineering/evidence/2026-11-25/provider-conversation.fr.md`.
+//!
+//! This module is the correlation and framing layer only. It never opens a
+//! network socket, never enables Bridge, never loosens a preset and never falls
+//! back to a TTY or a substituted command: it writes one complete framed turn
+//! to the exact owned stdio channel and reconciles the exact correlated
+//! response. The durable control plane (enqueue, emission issue, transmission,
+//! acknowledgement) lives in `audit::session_message`; this adapter decides
+//! whether an observed frame is a valid acknowledgement of the exact issued
+//! instruction. Real Codex/Claude CLI reception is a separate qualification
+//! (NOT_RUN here): the behavior below is proven against a controlled stdio
+//! fixture child, not a provider.
+//!
+//! Truthful delivery: a complete write is `transmitted`; only an exact
+//! correlated typed response is `acknowledged`; a discordant id, a divergent
+//! provenance or a duplicate never advances the state. After a possible
+//! emission with no reconcilable response, delivery stays unknown and is never
+//! automatically resent.
+
+use super::{bounded, content_hash, invalid};
+use serde_json::Value;
+
+/// Upper bound of one framed conversation line (request or response). A frame
+/// beyond this bound is refused, never partially written or read.
+pub const MAX_FRAME_BYTES: usize = 64 * 1024;
+
+/// The exact `turn/start` request the control writes for one instruction. The
+/// control correlates it locally by `rpc_id`; the operation identity and the
+/// content fingerprint never leave the trusted control toward the provider.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TurnRequestV1 {
+    pub rpc_id: u64,
+    pub thread_id: String,
+    pub text: String,
+}
+
+impl TurnRequestV1 {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        bounded(&self.thread_id, 128)?;
+        invalid(
+            !self.text.is_empty()
+                && self.text.len() <= super::session_control::SESSION_MESSAGE_MAX_CONTENT_BYTES,
+        )?;
+        Ok(())
+    }
+
+    /// The complete JSON-RPC frame, newline-terminated by the transport.
+    pub fn frame(&self) -> anyhow::Result<String> {
+        self.validate()?;
+        let value = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": self.rpc_id,
+            "method": "turn/start",
+            "params": {
+                "threadId": self.thread_id,
+                "input": [{"type": "text", "text": self.text}],
+            },
+        });
+        let frame = serde_json::to_string(&value)?;
+        invalid(frame.len() <= MAX_FRAME_BYTES)?;
+        Ok(frame)
+    }
+}
+
+/// What one observed response frame means for the exact issued turn.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AckObservationV1 {
+    /// The typed response to the exact issued RPC, carrying the provider turn
+    /// id. This is the only observation that may record an acknowledgement.
+    Acknowledged { turn_id: String },
+    /// A response whose RPC id does not match the issued request: it can never
+    /// acknowledge this instruction.
+    DiscordantId,
+    /// The provider refused the turn (typed JSON-RPC error).
+    Rejected,
+    /// A well-formed response that carries no usable turn id.
+    Malformed,
+    /// Not a response to a pending request (notification or unrelated frame).
+    NotAResponse,
+}
+
+/// What one observed `turn/completed` notification means for the acknowledged
+/// turn. The turn result is a distinct fact from the input acknowledgement.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum OutcomeObservationV1 {
+    /// The notification correlates to the exact acknowledged turn.
+    Completed { turn_id: String, status: String },
+    /// A notification for a different turn: divergent provenance, ignored.
+    DivergentProvenance,
+    /// Not a turn/completed notification.
+    NotAnOutcome,
+}
+
+/// Parse one observed response frame against the exact issued RPC id. Pure:
+/// the caller decides durably whether to record the acknowledgement.
+pub fn observe_response(frame: &Value, issued_rpc_id: u64) -> AckObservationV1 {
+    if frame.get("jsonrpc").and_then(Value::as_str) != Some("2.0") {
+        return AckObservationV1::NotAResponse;
+    }
+    let Some(id) = frame.get("id").and_then(Value::as_u64) else {
+        return AckObservationV1::NotAResponse;
+    };
+    if id != issued_rpc_id {
+        return AckObservationV1::DiscordantId;
+    }
+    if frame.get("error").is_some() {
+        return AckObservationV1::Rejected;
+    }
+    let turn_id = frame
+        .get("result")
+        .and_then(|result| result.get("turn"))
+        .and_then(|turn| turn.get("id"))
+        .and_then(Value::as_str);
+    match turn_id {
+        Some(turn_id) if !turn_id.is_empty() && turn_id.len() <= 128 => {
+            AckObservationV1::Acknowledged {
+                turn_id: turn_id.to_string(),
+            }
+        }
+        _ => AckObservationV1::Malformed,
+    }
+}
+
+/// Parse one observed notification against the exact acknowledged turn id.
+pub fn observe_outcome(frame: &Value, acknowledged_turn_id: &str) -> OutcomeObservationV1 {
+    if frame.get("method").and_then(Value::as_str) != Some("turn/completed") {
+        return OutcomeObservationV1::NotAnOutcome;
+    }
+    let turn = frame.get("params").and_then(|params| params.get("turn"));
+    let turn_id = turn.and_then(|turn| turn.get("id")).and_then(Value::as_str);
+    match turn_id {
+        Some(turn_id) if turn_id == acknowledged_turn_id => OutcomeObservationV1::Completed {
+            turn_id: turn_id.to_string(),
+            status: turn
+                .and_then(|turn| turn.get("status"))
+                .and_then(Value::as_str)
+                .unwrap_or("unknown")
+                .to_string(),
+        },
+        _ => OutcomeObservationV1::DivergentProvenance,
+    }
+}
+
+/// The correlation state of one in-flight conversation turn. At most one turn
+/// is in flight: a second instruction before the first turn's outcome is
+/// refused, never interleaved. The content fingerprint binds the exact text.
+#[derive(Clone, Debug)]
+pub struct ConversationTurnStateV1 {
+    pub operation_id: uuid::Uuid,
+    pub rpc_id: u64,
+    pub thread_id: String,
+    pub content_hash: String,
+    /// Set only by an exact correlated typed response.
+    pub acknowledged_turn_id: Option<String>,
+    /// Set only by a correlated turn/completed notification.
+    pub completed: bool,
+}
+
+/// Drives one conversation channel: issues a single in-flight turn, then
+/// reconciles responses and outcomes. It holds no durable state itself; the
+/// trusted control records each durable fact through `audit::session_message`.
+#[derive(Default)]
+pub struct ConversationAdapterV1 {
+    next_rpc_id: u64,
+    pending: Option<ConversationTurnStateV1>,
+}
+
+/// Why a new turn cannot be issued now.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TurnRefusalV1 {
+    /// A previous turn is still in flight (one turn at a time).
+    TurnInFlight,
+}
+impl std::fmt::Display for TurnRefusalV1 {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "conversation turn refused: {self:?}")
+    }
+}
+impl std::error::Error for TurnRefusalV1 {}
+
+impl ConversationAdapterV1 {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn pending(&self) -> Option<&ConversationTurnStateV1> {
+        self.pending.as_ref()
+    }
+
+    /// Issue one turn. Refuses while another turn is in flight. Returns the
+    /// exact frame to write; the caller writes it completely, then records the
+    /// transmission durably.
+    pub fn issue_turn(
+        &mut self,
+        operation_id: uuid::Uuid,
+        thread_id: &str,
+        text: &str,
+    ) -> anyhow::Result<TurnRequestV1> {
+        anyhow::ensure!(self.pending.is_none(), TurnRefusalV1::TurnInFlight);
+        let content_hash = content_hash("ai-guard:session-message-content:v1", &text)?;
+        self.next_rpc_id = self
+            .next_rpc_id
+            .checked_add(1)
+            .ok_or(super::ControlFailure::InvalidRequest)?;
+        let request = TurnRequestV1 {
+            rpc_id: self.next_rpc_id,
+            thread_id: thread_id.to_string(),
+            text: text.to_string(),
+        };
+        request.validate()?;
+        self.pending = Some(ConversationTurnStateV1 {
+            operation_id,
+            rpc_id: request.rpc_id,
+            thread_id: request.thread_id.clone(),
+            content_hash,
+            acknowledged_turn_id: None,
+            completed: false,
+        });
+        Ok(request)
+    }
+
+    /// Reconcile one observed response frame. Only an exact correlated typed
+    /// response sets the acknowledged turn id; a duplicate after the ack is
+    /// ignored (returns `None`), never a second acknowledgement.
+    pub fn reconcile_response(&mut self, frame: &Value) -> Option<AckObservationV1> {
+        let pending = self.pending.as_mut()?;
+        let observation = observe_response(frame, pending.rpc_id);
+        if let AckObservationV1::Acknowledged { turn_id } = &observation {
+            if pending.acknowledged_turn_id.is_some() {
+                // Duplicate acknowledgement of the same turn: no new fact.
+                return None;
+            }
+            pending.acknowledged_turn_id = Some(turn_id.clone());
+        }
+        Some(observation)
+    }
+
+    /// Reconcile one observed notification. Only the exact acknowledged turn's
+    /// completion closes the turn; a duplicate completion is ignored.
+    pub fn reconcile_outcome(&mut self, frame: &Value) -> Option<OutcomeObservationV1> {
+        let pending = self.pending.as_mut()?;
+        let turn_id = pending.acknowledged_turn_id.as_deref()?;
+        let observation = observe_outcome(frame, turn_id);
+        if let OutcomeObservationV1::Completed { .. } = &observation {
+            if pending.completed {
+                return None;
+            }
+            pending.completed = true;
+        }
+        Some(observation)
+    }
+
+    /// Close the current turn after its outcome (or an explicit stop), freeing
+    /// the channel for the next instruction. Returns the closed turn state.
+    pub fn close_turn(&mut self) -> Option<ConversationTurnStateV1> {
+        self.pending.take()
+    }
+}
+
+/// A complete framed write to the exact owned stdio channel, or a read of one
+/// bounded response line with a deadline. The transport never interprets the
+/// instruction as a shell command and never opens a network socket: it is a
+/// pipe to the provider client process the trusted broker already owns.
+pub struct StdioConversation {
+    child: std::process::Child,
+    stdin: Option<std::process::ChildStdin>,
+    lines: std::sync::mpsc::Receiver<std::io::Result<String>>,
+}
+
+impl StdioConversation {
+    /// Spawn the provider client by program and separate arguments (no shell),
+    /// with piped stdin/stdout. A background thread reads bounded lines so the
+    /// caller can apply a deadline without blocking forever.
+    pub fn spawn(program: &std::ffi::OsStr, args: &[std::ffi::OsString]) -> std::io::Result<Self> {
+        Self::spawn_with_env(program, args, &[])
+    }
+
+    /// Spawn with explicit child environment entries, so a controlled fixture
+    /// peer can be configured per channel without mutating the parent process.
+    pub fn spawn_with_env(
+        program: &std::ffi::OsStr,
+        args: &[std::ffi::OsString],
+        env: &[(std::ffi::OsString, std::ffi::OsString)],
+    ) -> std::io::Result<Self> {
+        let mut command = std::process::Command::new(program);
+        command
+            .args(args)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null());
+        for (key, value) in env {
+            command.env(key, value);
+        }
+        let mut child = command.spawn()?;
+        let stdin = child.stdin.take();
+        let stdout = child.stdout.take().expect("piped stdout");
+        let (sender, lines) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            use std::io::{BufRead, Read};
+            let mut reader = std::io::BufReader::new(stdout);
+            loop {
+                let mut line = String::new();
+                // Bound the read so a malicious or broken peer cannot exhaust
+                // memory with an unterminated frame.
+                let mut limited = (&mut reader).take(MAX_FRAME_BYTES as u64 + 1);
+                match limited.read_line(&mut line) {
+                    Ok(0) => {
+                        let _ = sender.send(Err(std::io::Error::new(
+                            std::io::ErrorKind::UnexpectedEof,
+                            "conversation channel closed",
+                        )));
+                        break;
+                    }
+                    Ok(_) => {
+                        if line.len() > MAX_FRAME_BYTES {
+                            let _ = sender.send(Err(std::io::Error::new(
+                                std::io::ErrorKind::InvalidData,
+                                "conversation frame exceeds its bound",
+                            )));
+                            break;
+                        }
+                        if sender.send(Ok(line)).is_err() {
+                            break;
+                        }
+                    }
+                    Err(error) => {
+                        let _ = sender.send(Err(error));
+                        break;
+                    }
+                }
+            }
+        });
+        Ok(Self {
+            child,
+            stdin,
+            lines,
+        })
+    }
+
+    /// Write one complete frame, newline-terminated, and flush. A partial or
+    /// failed write leaves delivery unknown; the caller never resends blindly.
+    pub fn write_frame(&mut self, frame: &str) -> std::io::Result<()> {
+        use std::io::Write;
+        invalid(frame.len() <= MAX_FRAME_BYTES).map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "frame too large")
+        })?;
+        let stdin = self
+            .stdin
+            .as_mut()
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::BrokenPipe, "stdin closed"))?;
+        stdin.write_all(frame.as_bytes())?;
+        stdin.write_all(b"\n")?;
+        stdin.flush()
+    }
+
+    /// Read the next non-empty line within the deadline. Harness noise lines
+    /// that are not JSON objects are skipped by the caller, not here.
+    pub fn read_line(&mut self, deadline: std::time::Duration) -> std::io::Result<String> {
+        self.lines.recv_timeout(deadline).map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::TimedOut, "conversation read timed out")
+        })?
+    }
+
+    /// Close the write side and reap the child. Used by STOP and by teardown.
+    pub fn close(&mut self) {
+        self.stdin = None;
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+impl Drop for StdioConversation {
+    fn drop(&mut self) {
+        self.close();
+    }
+}
+
+#[cfg(test)]
+#[path = "session_message_tests.rs"]
+mod tests;

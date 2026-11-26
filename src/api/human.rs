@@ -254,6 +254,86 @@ pub(super) fn invalid_session_launch_request() -> (StatusCode, Json<Value>) {
     )
 }
 
+/// Failures of one SendSessionMessage enqueue. The closed control-plane states
+/// are named distinctly (unsupported channel, STOP, changed binding, expiry,
+/// already-issued delivery, masking refusal, bounded queue); a divergent intent
+/// under one operation is a conflict. The body is never echoed in an error.
+pub(super) fn session_message_failure(error: anyhow::Error) -> (StatusCode, Json<Value>) {
+    use crate::audit::session_message::SessionMessageFailureV1 as M;
+    if let Some(reason) = error.downcast_ref::<M>() {
+        let (status, code, message, retry) = match reason {
+            M::ChannelNotAdmitted => (
+                StatusCode::CONFLICT,
+                "channel_not_admitted",
+                "The session has no resolved conversation channel; input is unsupported until the trusted control binds one.",
+                "retry",
+            ),
+            M::SessionClosed => (
+                StatusCode::CONFLICT,
+                "session_closed",
+                "The session conversation is closed; a message never reopens it.",
+                "reread",
+            ),
+            M::BindingChanged => (
+                StatusCode::CONFLICT,
+                "binding_changed",
+                "The conversation binding changed since it was read. Re-read it before sending again.",
+                "reread",
+            ),
+            M::BindingExpired => (
+                StatusCode::CONFLICT,
+                "binding_expired",
+                "The session's original deadline passed; it keeps priority over new input.",
+                "reread",
+            ),
+            M::EmissionAlreadyIssued => (
+                StatusCode::CONFLICT,
+                "delivery_unknown",
+                "An emission was already issued for this operation; delivery uncertainty is retained, never resent.",
+                "reread",
+            ),
+            M::ContentRequiresRedaction => (
+                StatusCode::BAD_REQUEST,
+                "content_requires_redaction",
+                "The instruction cannot be masked safely without changing its meaning; it is refused before enqueue.",
+                "retry",
+            ),
+            M::CapacityExhausted => (
+                StatusCode::TOO_MANY_REQUESTS,
+                "capacity_exhausted",
+                "The bounded unresolved message queue for this session or principal is full.",
+                "retry",
+            ),
+        };
+        return failure(status, code, message, retry);
+    }
+    match error.downcast_ref::<IdentityFailureV1>() {
+        Some(IdentityFailureV1::Conflict) => failure(
+            StatusCode::CONFLICT,
+            "conflict",
+            "The instruction differs from the one already retained under this operation. Re-read it before deciding again.",
+            "reread",
+        ),
+        Some(IdentityFailureV1::PermissionDenied) => failure(
+            StatusCode::FORBIDDEN,
+            "permission_denied",
+            "This context does not permit sending a message to this session.",
+            "review_permissions",
+        ),
+        Some(IdentityFailureV1::InvalidRequest) => invalid_session_message_request(),
+        _ => store_failure(error),
+    }
+}
+
+pub(super) fn invalid_session_message_request() -> (StatusCode, Json<Value>) {
+    failure(
+        StatusCode::BAD_REQUEST,
+        "invalid_request",
+        "Check the session message fields, then try again.",
+        "retry",
+    )
+}
+
 fn context_failure(code: &str) -> (StatusCode, Json<Value>) {
     failure(
         StatusCode::FORBIDDEN,
@@ -1183,6 +1263,94 @@ pub(super) async fn session_preparation(
     .await
 }
 
+/// Upper bound of one short-instruction body. It names the session, the pinned
+/// input epoch, the operation id and the instruction; it carries no argv, host
+/// path, credential or provider choice. The body is tenant business data.
+const SESSION_MESSAGE_BODY_MAX_BYTES: usize = 16_384;
+
+async fn session_message_body(
+    request: Request,
+) -> ApiResult<crate::control::session_control::SessionMessageRequestV1> {
+    let (_, request) =
+        delegated_change_body::<crate::control::session_control::SessionMessageRequestV1>(
+            request,
+            SESSION_MESSAGE_BODY_MAX_BYTES,
+            invalid_session_message_request,
+        )
+        .await?;
+    request
+        .validate()
+        .map_err(|_| invalid_session_message_request())?;
+    Ok(request)
+}
+
+/// `POST /api/v1/human/owned/sessions/messages`: durably enqueue one short
+/// instruction to an existing session on the caller's own owned source. The
+/// personal SendSessionMessage context and the session's owner ACL are
+/// revalidated inside the transaction; the mandatory audit receipt and the
+/// message row commit together before the receipt is returned. The body is
+/// never duplicated into the audit. An exact replay returns the retained result
+/// to a still-authorized caller; divergent content is a conflict; STOP, expiry,
+/// a changed binding or revocation closes it. Emission on the resolved channel
+/// remains the trusted control's separate effect.
+pub(super) async fn session_message_send(
+    State(state): State<GatewayState>,
+    request: Request,
+) -> ApiResult<Json<crate::control::session_control::SessionMessageReceiptV1>> {
+    if state.owned_human.is_none() {
+        return Err(super::human_sources::unavailable());
+    }
+    let (mut parts, body) = request.into_parts();
+    let proof = VerifiedHuman::from_request_parts(&mut parts, &state).await?;
+    let headers = parts.headers.clone();
+    let message = session_message_body(Request::from_parts(parts, body)).await?;
+    let selected = headers.clone();
+    run_human(&state, &proof, Some(&headers), move |state, proof| {
+        let (_, tenant, scope) = selected_context(&state, &proof, &selected)?;
+        let store = tenant.store.sqlite_api()?;
+        let owned = state
+            .owned_human
+            .as_ref()
+            .ok_or_else(super::human_sources::unavailable)?;
+        let HumanProofSource::Local(source) = proof.source else {
+            return Err(super::human_sources::unavailable());
+        };
+        let receipt = owned.session_message_send(source, store, &scope, &message)?;
+        Ok(Json(receipt))
+    })
+    .await
+}
+
+/// `GET /api/v1/human/owned/sessions/messages/{operation_id}`: read one retained
+/// message receipt (metadata and delivery status only, never the body) for a
+/// still-authorized owner. Revocation closes the read.
+pub(super) async fn session_message_receipt(
+    proof: VerifiedHuman,
+    State(state): State<GatewayState>,
+    headers: HeaderMap,
+    path: Result<Path<String>, axum::extract::rejection::PathRejection>,
+) -> ApiResult<Json<crate::control::session_control::SessionMessageReceiptV1>> {
+    if state.owned_human.is_none() {
+        return Err(super::human_sources::unavailable());
+    }
+    let Path(operation_id) = path.map_err(|_| invalid_session_message_request())?;
+    let selected = headers.clone();
+    run_human(&state, &proof, Some(&headers), move |state, proof| {
+        let (_, tenant, scope) = selected_context(&state, &proof, &selected)?;
+        let store = tenant.store.sqlite_api()?;
+        let owned = state
+            .owned_human
+            .as_ref()
+            .ok_or_else(super::human_sources::unavailable)?;
+        let HumanProofSource::Local(source) = proof.source else {
+            return Err(super::human_sources::unavailable());
+        };
+        let receipt = owned.session_message_receipt(source, store, &scope, &operation_id)?;
+        Ok(Json(receipt))
+    })
+    .await
+}
+
 pub(super) fn routes() -> Router<GatewayState> {
     Router::new()
         .route("/human/identity", get(identity))
@@ -1201,6 +1369,16 @@ pub(super) fn routes() -> Router<GatewayState> {
         .route(
             "/human/owned/sessions/preparations/{operation_id}",
             get(session_preparation),
+        )
+        .route(
+            "/human/owned/sessions/messages",
+            post(session_message_send).layer(axum::extract::DefaultBodyLimit::max(
+                SESSION_MESSAGE_BODY_MAX_BYTES,
+            )),
+        )
+        .route(
+            "/human/owned/sessions/messages/{operation_id}",
+            get(session_message_receipt),
         )
         .route("/human/brokers", get(brokers::brokers))
         .route("/human/owned/brokers", get(brokers_owned::brokers))

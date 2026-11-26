@@ -146,9 +146,10 @@ pub(crate) fn validate_capability(db: &Connection, version: i64) -> anyhow::Resu
         && table_present(db, TARGET_OPERATIONS_TABLE)?
         && table_present(db, PREPARATIONS_TABLE)?
         && table_present(db, LAUNCHES_TABLE)?;
-    if present || tables {
+    let message_tables = super::session_message::tables_present(db)?;
+    if present || tables || message_tables {
         anyhow::ensure!(
-            format_admits(version) && present && tables,
+            format_admits(version) && present && tables && message_tables,
             "session prepare capability requires its marker and tables on Store14/15"
         );
         genesis(db)?;
@@ -318,6 +319,8 @@ pub(crate) fn install_schema(tx: &Transaction<'_>) -> anyhow::Result<()> {
     for (_, _, sql) in SCHEMA {
         tx.execute_batch(sql)?;
     }
+    // The conversation/message tables share this capability marker.
+    super::session_message::install_schema(tx)?;
     Ok(())
 }
 
@@ -785,6 +788,18 @@ impl Store {
                 serde_json::to_string(&receipt)?,
             ],
         )?;
+        // Retain the conversation binding as the current channel anchor the
+        // SendSessionMessage effect point revalidates. It starts `prepared`;
+        // the trusted control binds the resolved channel explicitly later.
+        tx.execute(
+            "INSERT INTO session_conversations(session_id,binding_json,event_seq,event_hash) VALUES(?1,?2,?3,?4)",
+            params![
+                session_id,
+                serde_json::to_string(&receipt.conversation)?,
+                stored.seq,
+                stored.hash,
+            ],
+        )?;
         // The additive first-binding grant keeps the authorization revision after
         // the human rights marker; reconcile the discovery generation exactly.
         let next = expected.after_delegated_change(
@@ -966,7 +981,7 @@ fn target_receipt(
 
 /// A UUIDv8 bound to the operation, distinct per record family so one operation
 /// cannot collide across the preparation and its target provisioning.
-fn bound_event_id(domain: &[u8], operation_id: Uuid) -> String {
+pub(crate) fn bound_event_id(domain: &[u8], operation_id: Uuid) -> String {
     use sha2::{Digest, Sha256};
     let digest = Sha256::new()
         .chain_update(domain)

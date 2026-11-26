@@ -321,6 +321,14 @@ pub(super) fn validate(db: &Connection) -> anyhow::Result<()> {
             super::session_prepare::validate_replay_event(db, &stored)?;
             continue;
         }
+        if stored.event.kind.starts_with("control.session_message.") {
+            anyhow::ensure!(
+                super::session_prepare::format_admits(version),
+                "session message requires schema14 or schema15"
+            );
+            super::session_message::validate_replay_event(db, &stored)?;
+            continue;
+        }
         // Dispatch only the exact modern families. Their complete typed
         // histories and inherited projections are checked below as well.
         if matches!(

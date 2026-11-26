@@ -179,12 +179,245 @@ pub struct SessionConversationBindingV1 {
 }
 
 /// Closed lifecycle of a retained conversation binding. Launch retains the
-/// binding in `prepared`; the supervised broker admission lot advances it.
+/// binding in `prepared`; the trusted control binds the resolved channel facts
+/// (`active`) and STOP closes the right to emit (`closed`). A closed binding
+/// never reopens silently: a restart binds a new epoch explicitly.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionConversationStatusV1 {
     /// Binding retained at launch; no worker has been admitted yet.
     Prepared,
+    /// The trusted control resolved the exact broker/worker/runtime channel.
+    Active,
+    /// STOP (or an explicit close) removed the right to emit. Priority over
+    /// any queued message; a message never reopens it.
+    Closed,
+}
+
+impl SessionConversationBindingV1 {
+    /// Canonical fingerprint of the exact retained binding. A message pins the
+    /// fingerprint it was enqueued against; the emission point refuses any
+    /// divergence instead of silently retargeting the channel.
+    pub fn fingerprint(&self) -> anyhow::Result<String> {
+        content_hash("ai-guard:session-conversation:v1", self)
+    }
+}
+
+/// The exact resolved channel facts the trusted control binds after the
+/// supervised admission. Every field is mandatory: an unknown fact is never
+/// fabricated, and a partial channel is not bindable.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionConversationChannelV1 {
+    pub broker_id: String,
+    pub broker_incarnation: String,
+    pub worker_id: String,
+    pub attempt_id: String,
+    pub runtime_instance: String,
+    pub provider: String,
+    pub protocol: String,
+}
+
+impl SessionConversationChannelV1 {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        for value in [
+            &self.broker_id,
+            &self.broker_incarnation,
+            &self.worker_id,
+            &self.attempt_id,
+            &self.runtime_instance,
+            &self.provider,
+            &self.protocol,
+        ] {
+            bounded(value, 128)?;
+            invalid(!value.is_empty())?;
+        }
+        Ok(())
+    }
+}
+
+/// Trusted-control binding of the resolved conversation channel. Offline and
+/// epoch-checked: the expected input epoch must equal the retained one, and
+/// the binding advances the epoch explicitly. No HTTP route binds a channel.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BindSessionConversationV1 {
+    pub version: u32,
+    pub operation_id: Uuid,
+    pub session_id: String,
+    pub expected_input_epoch: u64,
+    pub channel: SessionConversationChannelV1,
+}
+
+impl BindSessionConversationV1 {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        invalid(self.version == 1 && !self.operation_id.is_nil())?;
+        canonical_uuid(&self.session_id)?;
+        self.channel.validate()
+    }
+
+    pub fn input_hash(&self) -> anyhow::Result<String> {
+        content_hash("ai-guard:session-conversation-bind:v1", self)
+    }
+}
+
+/// Trusted-control close of the conversation (STOP priority). It closes the
+/// right to emit before the worker stop follows the broker's guard; it never
+/// restarts, retargets or reopens anything.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CloseSessionConversationV1 {
+    pub version: u32,
+    pub operation_id: Uuid,
+    pub session_id: String,
+}
+
+impl CloseSessionConversationV1 {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        invalid(self.version == 1 && !self.operation_id.is_nil())?;
+        canonical_uuid(&self.session_id)?;
+        Ok(())
+    }
+
+    pub fn input_hash(&self) -> anyhow::Result<String> {
+        content_hash("ai-guard:session-conversation-close:v1", self)
+    }
+}
+
+/// Upper bound of one short instruction body, in bytes. The body is protected
+/// tenant business data: it is persisted in the tenant store, never duplicated
+/// into the audit chain, URLs, argv, logs or errors.
+pub const SESSION_MESSAGE_MAX_CONTENT_BYTES: usize = 8_192;
+
+/// The exact intent of one SendSessionMessage operation. It names the session,
+/// the input epoch the caller pins its binding to, and the short instruction.
+/// The canonical fingerprint covers the content; only the fingerprint and the
+/// content hash reach the audit, never the body.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionMessageRequestV1 {
+    pub version: u32,
+    pub operation_id: Uuid,
+    pub session_id: Uuid,
+    /// The retained binding epoch the caller read. A restart advances the
+    /// epoch, so a stale pin is refused instead of silently retargeted.
+    pub expected_input_epoch: u64,
+    pub content: String,
+}
+
+impl SessionMessageRequestV1 {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        invalid(self.version == 1 && !self.operation_id.is_nil() && !self.session_id.is_nil())?;
+        // A short plain-text instruction: no NUL or C0 control bytes that a
+        // terminal or a framed protocol could reinterpret. Newline and tab
+        // are the only admitted control characters, so the generic `bounded`
+        // helper (which rejects every control character) does not apply.
+        invalid(
+            !self.content.is_empty()
+                && self.content.len() <= SESSION_MESSAGE_MAX_CONTENT_BYTES
+                && self
+                    .content
+                    .chars()
+                    .all(|c| !c.is_control() || c == '\n' || c == '\t'),
+        )?;
+        Ok(())
+    }
+
+    /// Canonical fingerprint of the exact intent (including the content),
+    /// stable across replays. The audit retains this hash, not the body.
+    pub fn input_hash(&self) -> anyhow::Result<String> {
+        content_hash("ai-guard:session-message:v1", self)
+    }
+
+    /// Content-only fingerprint used to correlate the exact sent text.
+    pub fn content_hash(&self) -> anyhow::Result<String> {
+        content_hash("ai-guard:session-message-content:v1", &self.content)
+    }
+}
+
+/// Truthful delivery status of one retained message. `queued` means durably
+/// recorded; `transmitted` means a complete frame was written to the exact
+/// owned channel; `acknowledged` requires an exact correlated official
+/// protocol response; `unknown` means an emission was issued but no
+/// reconcilable observation closed it — it is never silently resent. None of
+/// these states means the instruction was executed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionMessageStatusV1 {
+    Queued,
+    Transmitted,
+    Acknowledged,
+    Unknown,
+}
+
+/// The exact correlated protocol acknowledgement of one transmitted message.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionMessageAckV1 {
+    /// The JSON-RPC request identifier of the exact emitted frame.
+    pub rpc_id: u64,
+    /// The provider turn identifier returned by the typed response.
+    pub turn_id: String,
+}
+
+/// Trusted-control emission issue of one queued message. It names the message
+/// operation and the exact binding fingerprint the emitter read; the store
+/// revalidates that fingerprint against the retained binding at the effect
+/// point. Issuing is the durable latch before the first frame byte: after it,
+/// delivery is unknown until a complete write is observed, and no automatic
+/// resend is ever permitted.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IssueSessionMessageEmissionV1 {
+    pub version: u32,
+    pub operation_id: Uuid,
+    pub expected_binding_fingerprint: String,
+}
+
+impl IssueSessionMessageEmissionV1 {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        invalid(self.version == 1 && !self.operation_id.is_nil())?;
+        bounded(&self.expected_binding_fingerprint, 128)?;
+        Ok(())
+    }
+}
+
+/// The durable receipt of one SendSessionMessage operation. It carries
+/// metadata and receipts only — never the instruction body.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionMessageReceiptV1 {
+    pub version: u32,
+    pub operation_id: Uuid,
+    /// The enqueue's own audit event identifier.
+    pub message_id: String,
+    pub session_id: Uuid,
+    pub input_hash: String,
+    pub content_hash: String,
+    /// The binding fingerprint pinned at enqueue; the emission point
+    /// revalidates it against the current retained binding.
+    pub binding_fingerprint: String,
+    pub input_epoch: u64,
+    pub status: SessionMessageStatusV1,
+    pub ack: Option<SessionMessageAckV1>,
+    pub audit_seq: i64,
+    pub audit_hash: String,
+    /// True when this call returned an already retained result.
+    pub replayed: bool,
+}
+
+/// The private handoff of one issued emission to the trusted conversation
+/// adapter. It carries the exact retained body to the trusted control only —
+/// never to the audit chain, the frontend, argv, URLs or logs. The adapter
+/// writes it as one complete framed turn on the bound channel.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionMessageEmissionV1 {
+    pub version: u32,
+    pub operation_id: Uuid,
+    pub session_id: String,
+    pub input_epoch: u64,
+    pub binding_fingerprint: String,
+    pub content_hash: String,
+    pub content: String,
 }
 
 /// The durable receipt of one committed launch. It links the launch operation,

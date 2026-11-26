@@ -323,7 +323,11 @@ const fn served(operation: HumanOperationV1, owned_profile: bool) -> bool {
     ) || (owned_profile
         && matches!(
             operation,
-            O::MembershipsManage | O::GrantsManage | O::SessionLaunchPrepare | O::SessionLaunch
+            O::MembershipsManage
+                | O::GrantsManage
+                | O::SessionLaunchPrepare
+                | O::SessionLaunch
+                | O::SessionMessageSend
         ))
 }
 
