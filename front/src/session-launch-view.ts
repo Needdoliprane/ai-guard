@@ -161,8 +161,11 @@ export class SessionLaunchView {
   }
   #launchCard(receipt: SessionLaunchReceipt) {
     const binding = receipt.conversation;
+    const title = el("h3", "", "Lancement accepté");
+    title.tabIndex = -1;
+    title.dataset.focusKey = "sl-launch-receipt";
     return el("div", "panel sl-card",
-      el("div", "sl-card-head", el("h3", "", "Lancement accepté"), receipt.replayed ? badge("Rejeu exact", "blue") : badge("Durable", "teal")),
+      el("div", "sl-card-head", title, receipt.replayed ? badge("Rejeu exact", "blue") : badge("Durable", "teal")),
       el("p", "control-warning sl-warning", "Lancement accepté ≠ worker en cours d’exécution. Ce reçu prouve l’autorité de lancement durable et le grant nominatif ; l’admission supervisée du broker et le démarrage observé par le runtime restent des faits distincts, non observés ici."),
       el("div", "sl-rows",
         row("Session", mono(receipt.session_id)),
@@ -235,6 +238,7 @@ export class SessionLaunchView {
     const offers = sessionLaunchOffers(this.#host.context);
     if (this.#closed || this.#journey.sending || !preparation || !offers.launch) return;
     if (!this.#journey.launchUnknown && (this.#journey.phase !== "prepared" || preparationExpired(preparation, this.#now()))) return;
+    const restoreFocus = this.#result.contains(document.activeElement);
     const key = JSON.stringify([preparation.operation_id, preparation.input_hash]);
     try {
       const outcome = this.#journey.launch(key, (operationId) => this.#host.api.sessionLaunch(
@@ -250,5 +254,9 @@ export class SessionLaunchView {
     if (this.#closed) return;
     if (this.#journey.phase === "launched" && this.#journey.receipt) this.#host.onLaunched?.(this.#journey.receipt);
     this.#render();
+    if (restoreFocus && this.element.isConnected && document.activeElement === document.body) {
+      const next = this.#journey.phase === "launched" ? "sl-launch-receipt" : this.#journey.launchUnknown ? "sl-launch-retry" : null;
+      if (next) this.#result.querySelector<HTMLElement>(`[data-focus-key="${next}"]`)?.focus();
+    }
   }
 }
