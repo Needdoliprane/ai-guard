@@ -1511,6 +1511,92 @@ fn composition_stop_interrupts_pending_provider_read() {
 }
 
 #[test]
+fn composition_stop_cancels_pending_ack_while_the_epoch_is_busy() {
+    use std::sync::mpsc;
+
+    let harness = Harness::new();
+    harness.install_markers();
+    let retained = harness.retained("composition-stop-pending-ack.json");
+    let (principal, membership) = provision_membership(&retained).unwrap();
+    let scope = personal_scope(&retained, &principal, &membership);
+    let session = launched_session(&retained, &scope, &principal);
+    let session_id = session.session_id.as_str();
+    let operation = Uuid::new_v4();
+    let mut composer = SessionConversationComposerV1::new(
+        &retained.store,
+        &retained.owner,
+        &retained.source,
+        Duration::from_secs(12),
+    )
+    .unwrap();
+    let (ack_ready, wait_for_ack) = mpsc::channel();
+    let (resume_ack, wait_for_resume) = mpsc::channel();
+    composer.set_before_ack_for_test(move || {
+        ack_ready.send(()).unwrap();
+        wait_for_resume.recv().unwrap();
+    });
+    let (stop_has_slot, wait_for_stop_slot) = mpsc::channel();
+    composer.observe_stop_slot_for_test(stop_has_slot);
+    composer
+        .admit_channel(
+            Uuid::new_v4(),
+            session_id,
+            0,
+            channel_facts("attempt-1"),
+            spawn_fixture("normal"),
+        )
+        .unwrap();
+    send_message(
+        &retained,
+        &scope,
+        operation,
+        Uuid::parse_str(session_id).unwrap(),
+        1,
+        "synthetic instruction",
+    )
+    .unwrap();
+
+    std::thread::scope(|threads| {
+        let resume_ack = resume_ack;
+        let dispatch = threads.spawn(|| composer.dispatch(session_id));
+        wait_for_ack
+            .recv_timeout(Duration::from_secs(5))
+            .expect("fixture did not produce a correlated ACK");
+        let (stop_finished, wait_for_stop) = mpsc::channel();
+        let composer = &composer;
+        let stop = threads.spawn(move || {
+            stop_finished
+                .send(composer.stop(Uuid::new_v4(), session_id))
+                .unwrap();
+        });
+        wait_for_stop_slot
+            .recv_timeout(Duration::from_secs(5))
+            .expect("STOP did not reach the channel after its commit");
+        assert_eq!(kind_count(&retained.store, CONVERSATION_CLOSED_KIND), 1);
+
+        // STOP released the write epoch but still waits for dispatch's slot.
+        // A third owner keeps that epoch busy while dispatch resumes.
+        let competing_epoch = retained.owner.try_write_epoch().unwrap();
+        resume_ack.send(()).unwrap();
+        let stopped_while_busy = wait_for_stop.recv_timeout(Duration::from_secs(3));
+        drop(competing_epoch);
+
+        let closed = stopped_while_busy
+            .expect("STOP waited for the pending ACK to acquire the epoch")
+            .unwrap();
+        assert_eq!(closed.status, SessionConversationStatusV1::Closed);
+        let receipts = dispatch.join().unwrap().unwrap();
+        assert_eq!(receipts.len(), 1);
+        assert_eq!(receipts[0].operation_id, operation);
+        assert_eq!(receipts[0].status, SessionMessageStatusV1::Transmitted);
+        assert!(receipts[0].ack.is_none());
+        stop.join().unwrap();
+    });
+    assert_eq!(message_status(&retained.store, operation), "transmitted");
+    assert_eq!(kind_count(&retained.store, ACKNOWLEDGED_KIND), 0);
+}
+
+#[test]
 fn composition_stop_between_write_chunks() {
     let length = crate::control::session_control::SESSION_MESSAGE_MAX_CONTENT_BYTES;
     let received =

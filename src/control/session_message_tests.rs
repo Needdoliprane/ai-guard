@@ -314,6 +314,12 @@ fn stdio_cut_after_possible_emission_keeps_delivery_unknown() {
         }
     };
     assert_eq!(closed.kind(), std::io::ErrorKind::UnexpectedEof);
+    // The reader already delivered EOF and disconnected. A later read is
+    // still terminal, independently of its wait budget.
+    assert_eq!(
+        child.read_line(deadline).unwrap_err().kind(),
+        std::io::ErrorKind::UnexpectedEof
+    );
     assert!(adapter.pending().unwrap().acknowledged_turn_id.is_none());
     child.close();
 }

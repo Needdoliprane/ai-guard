@@ -121,6 +121,8 @@ pub struct SessionConversationComposerV1<'a> {
     #[cfg(test)]
     before_write: Mutex<Option<BeforeWritePause>>,
     #[cfg(test)]
+    before_ack: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    #[cfg(test)]
     stop_slot_observer: Option<std::sync::mpsc::Sender<()>>,
 }
 
@@ -145,6 +147,8 @@ impl<'a> SessionConversationComposerV1<'a> {
             sessions: Mutex::new(BTreeMap::new()),
             #[cfg(test)]
             before_write: Mutex::new(None),
+            #[cfg(test)]
+            before_ack: Mutex::new(None),
             #[cfg(test)]
             stop_slot_observer: None,
         })
@@ -173,6 +177,11 @@ impl<'a> SessionConversationComposerV1<'a> {
             drop(pending);
             (pause.run)(written);
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_before_ack_for_test(&mut self, pause: impl FnOnce() + Send + 'static) {
+        *self.before_ack.get_mut().unwrap() = Some(Box::new(pause));
     }
 
     #[cfg(test)]
@@ -434,6 +443,13 @@ impl<'a> SessionConversationComposerV1<'a> {
                                 rpc_id: request.rpc_id,
                                 turn_id,
                             };
+                            #[cfg(test)]
+                            {
+                                let pause = self.before_ack.lock().unwrap().take();
+                                if let Some(pause) = pause {
+                                    pause();
+                                }
+                            }
                             let epoch = self.write_epoch()?;
                             receipt = self.store.record_session_message_acknowledged_scoped(
                                 &epoch,
