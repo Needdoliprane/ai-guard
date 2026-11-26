@@ -104,6 +104,30 @@ impl std::fmt::Debug for MysqlTarget {
 
 #[cfg(feature = "mysql-storage")]
 impl MysqlTarget {
+    pub(crate) fn endpoint(&self) -> agentsandbox::mysql_storage::MysqlEndpoint<'_> {
+        agentsandbox::mysql_storage::MysqlEndpoint {
+            host: &self.host,
+            port: self.port,
+            database: &self.database,
+            username: &self.username,
+        }
+    }
+
+    pub(crate) fn credentials(&self) -> agentsandbox::mysql_storage::MysqlCredentials<'_> {
+        use agentsandbox::mysql_storage::{MysqlClientIdentity, MysqlCredentials};
+        MysqlCredentials {
+            password: &self.password,
+            ca_pem: &self.ca_pem,
+            client_identity: self
+                .client_identity
+                .as_ref()
+                .map(|(cert, key)| MysqlClientIdentity {
+                    certificate_chain_pem: cert,
+                    private_key_pem: key,
+                }),
+        }
+    }
+
     fn load(
         profile: &agentsandbox::diagnostics::gateway_files::MySqlStorageFiles,
         resolve: &dyn Fn(PathBuf) -> Result<PathBuf>,
@@ -377,6 +401,40 @@ pub fn migrate_authentication(
 pub fn load(path: &Path) -> Result<Vec<ConfiguredTenant>> {
     let bytes = read_tenant_registry_file(path)?;
     load_registry_bytes(path, &bytes, crate::read_token)
+}
+
+/// Select the operator's MySQL profile without loading gateway tokens or
+/// opening any other tenant's credentials.
+#[cfg(feature = "mysql-storage")]
+pub(crate) fn load_mysql_preparation_target(path: &Path, tenant_id: &str) -> Result<MysqlTarget> {
+    use agentsandbox::{
+        control_fs::{PrivateFile, absolute_path},
+        diagnostics::gateway_files::MAX_REGISTRY_BYTES,
+        tenancy::validate_tenant_id,
+    };
+
+    let file = PrivateFile::open(&absolute_path(path)?, MAX_REGISTRY_BYTES)?;
+    let registry = decode_tenant_registry(file.bytes())?;
+    let mut seen = BTreeSet::new();
+    let mut selected = None;
+    for tenant in &registry.tenants {
+        validate_tenant_id(&tenant.tenant_id)?;
+        anyhow::ensure!(
+            seen.insert(tenant.tenant_id.as_str()),
+            "duplicate tenant identity in the registry"
+        );
+        let storage = storage_for_gateway(tenant.data.as_deref(), tenant.storage.as_ref())?;
+        if tenant.tenant_id == tenant_id {
+            selected = Some(storage);
+        }
+    }
+    let Some(SelectedTenantStorage::MySql(profile)) = selected else {
+        anyhow::bail!("requested tenant must have a MySQL profile in the operator registry");
+    };
+    let directory = file.path().parent().context("registry has no parent")?;
+    let target = MysqlTarget::load(profile, &|path| absolute_path(&directory.join(path)))?;
+    file.revalidate()?;
+    Ok(target)
 }
 
 pub(crate) fn load_from_retained_registry(

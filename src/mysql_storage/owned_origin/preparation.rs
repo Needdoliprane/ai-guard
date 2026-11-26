@@ -1,4 +1,4 @@
-//! Read-only operator preflight for a fresh owned MySQL schema.
+//! Operator preflight and publication for a fresh owned MySQL schema.
 
 use super::{
     OwnedAuditLock, decode_row, driver_error,
@@ -95,14 +95,7 @@ pub async fn preflight_owned_preparation(
 /// head observed after COMMIT under the physical lock; it grants no runtime
 /// admission until the gateway opens the configured target independently.
 #[derive(Serialize)]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "owned publication receipt pending gateway open wiring"
-    )
-)]
-pub(crate) struct MysqlOwnedPreparationReceipt {
+pub struct MysqlOwnedPreparationReceipt {
     pub verification_mode: &'static str,
     pub target_schema_version: u16,
     pub head_seq: i64,
@@ -111,16 +104,53 @@ pub(crate) struct MysqlOwnedPreparationReceipt {
     pub tls_version: String,
 }
 
+/// The identity of one explicit publication against a configured operator target.
+pub struct MysqlOwnedPreparationRequest<'a> {
+    pub tenant_id: &'a str,
+    pub namespace_id: Uuid,
+    pub schema_version: u16,
+    pub server_uuid: Uuid,
+    pub operation_id: Uuid,
+    pub installation_id: Uuid,
+    pub source_id: Uuid,
+}
+
+/// Publish an owned format on a dedicated empty schema. Resolve the endpoint,
+/// tenant and namespace from trusted operator configuration before calling.
+pub async fn publish_owned_fresh_source(
+    endpoint: MysqlEndpoint<'_>,
+    credentials: MysqlCredentials<'_>,
+    request: MysqlOwnedPreparationRequest<'_>,
+) -> Result<MysqlOwnedPreparationReceipt> {
+    let anchor = FreshAnchorRequestV1 {
+        operation_id: request.operation_id,
+        schema_version: request.schema_version,
+        tenant_id: request.tenant_id.into(),
+        namespace_id: request.namespace_id,
+        installation_id: request.installation_id,
+        source_id: request.source_id,
+        server_uuid: request.server_uuid,
+        schema: endpoint.database.into(),
+    };
+    let configured = ConfiguredTenantNamespace {
+        tenant_id: request.tenant_id,
+        namespace_id: request.namespace_id,
+    };
+    prepare_owned_fresh_source(
+        endpoint,
+        credentials,
+        request.server_uuid,
+        request.schema_version,
+        &anchor,
+        configured,
+        &Redactor::new(Vec::new()),
+    )
+    .await
+}
+
 /// Install the selected owned format on a verified empty target and publish the
 /// genesis, the fresh creation anchor and the singleton in one durable
 /// transaction, then re-verify the published prefix under the same lock.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "owned publication entry pending gateway open wiring"
-    )
-)]
 pub(crate) async fn prepare_owned_fresh_source(
     endpoint: MysqlEndpoint<'_>,
     credentials: MysqlCredentials<'_>,
@@ -169,13 +199,6 @@ enum EmptyTargetOperation<'a> {
         configured: ConfiguredTenantNamespace<'a>,
         redactor: &'a Redactor,
     },
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "owned publication step pending gateway open wiring"
-        )
-    )]
     PublishFreshSource {
         request: &'a FreshAnchorRequestV1,
         configured: ConfiguredTenantNamespace<'a>,

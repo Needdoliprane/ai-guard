@@ -18,7 +18,8 @@ mod worker;
 mod workload;
 
 pub use owned_origin::{
-    MysqlOwnedPreparationPreflight, MysqlOwnedPreparationRefusal, preflight_owned_preparation,
+    MysqlOwnedPreparationPreflight, MysqlOwnedPreparationReceipt, MysqlOwnedPreparationRefusal,
+    MysqlOwnedPreparationRequest, preflight_owned_preparation, publish_owned_fresh_source,
 };
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(8);
