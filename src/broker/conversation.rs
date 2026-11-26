@@ -220,6 +220,9 @@ impl<'a> SessionConversationComposerV1<'a> {
     /// no channel effect: the presented pipe is closed on drop. An explicit
     /// rebind (restart) advances the epoch durably and only then tears down the
     /// replaced attempt; a pinned message is never silently retargeted.
+    /// An exact replay preserves a matching local slot. After a process
+    /// restart the old pipe and correlation state cannot be reconstructed
+    /// from the receipt; a new bind must advance the current epoch.
     pub fn admit_channel(
         &self,
         operation_id: Uuid,
@@ -230,6 +233,10 @@ impl<'a> SessionConversationComposerV1<'a> {
     ) -> anyhow::Result<SessionConversationBindingV1> {
         canonical_uuid(session_id)?;
         let epoch = self.write_epoch()?;
+        let access = HumanSourceAccess::write(&epoch, self.source)?;
+        let previous = self
+            .store
+            .session_conversation_binding_read(&access, session_id)?;
         let binding = self.store.bind_session_conversation_scoped(
             &epoch,
             self.source,
@@ -241,6 +248,41 @@ impl<'a> SessionConversationComposerV1<'a> {
                 channel,
             },
         )?;
+        let current = self
+            .store
+            .session_conversation_binding_read(&access, session_id)?;
+        anyhow::ensure!(
+            current.status != SessionConversationStatusV1::Closed,
+            SessionMessageFailureV1::SessionClosed
+        );
+        anyhow::ensure!(
+            current.status == SessionConversationStatusV1::Active && current == binding,
+            SessionMessageFailureV1::BindingChanged
+        );
+        // A fresh bind advances the epoch. Only a replay leaves it unchanged.
+        if previous == binding {
+            let existing = self
+                .sessions
+                .lock()
+                .expect("conversation registry")
+                .get(session_id)
+                .cloned()
+                .ok_or(SessionMessageFailureV1::ChannelNotAdmitted)?;
+            // Dispatch may hold this slot while acquiring the same write epoch.
+            let existing = existing.try_lock().map_err(|error| match error {
+                std::sync::TryLockError::WouldBlock => {
+                    anyhow::Error::from(HumanAuthorityFailure::GateBusy)
+                }
+                std::sync::TryLockError::Poisoned(_) => {
+                    anyhow::anyhow!("conversation slot poisoned")
+                }
+            })?;
+            anyhow::ensure!(
+                existing.binding == binding,
+                SessionMessageFailureV1::BindingChanged
+            );
+            return Ok(binding);
+        }
         let fingerprint = binding.fingerprint()?;
         let slot = Arc::new(ConversationSlot {
             retiring: AtomicBool::new(false),
