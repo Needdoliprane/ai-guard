@@ -2592,6 +2592,118 @@ fn owned_store15_session_message_is_durable_idempotent_and_fenced() {
     assert_session_message_contract(15);
 }
 
+fn assert_session_message_ack_fenced(
+    format: u32,
+    change_binding: impl FnOnce(
+        &Retained,
+        &str,
+    ) -> crate::audit::session_message::SessionMessageFailureV1,
+) {
+    use crate::control::session_control::{SessionMessageAckV1, SessionMessageStatusV1};
+    use crate::identity::{ContextModeV1, HumanCapabilityV1};
+
+    let adopted = adopted(format);
+    let (_plan, guard) = adopted.in_place(0);
+    install_all(&adopted, &guard, "message-ack-fence");
+    drop(guard);
+    let retained = adopted.retained(0, "message-ack-fence.json", format);
+    let (principal, membership) = provision_membership(
+        &retained,
+        &[
+            HumanCapabilityV1::LaunchSession,
+            HumanCapabilityV1::SendSessionMessage,
+        ],
+    )
+    .unwrap();
+    let scope = personal_scope(&retained, &principal, &membership, ContextModeV1::Personal);
+    let session = launched_session(&retained, &scope, &principal, Uuid::new_v4(), 1);
+    let session_id = Uuid::parse_str(&session.session_id).unwrap();
+    let bound = bind_conversation(
+        &retained,
+        &bind_command(Uuid::new_v4(), &session.session_id, 0),
+    )
+    .unwrap();
+    let fingerprint = bound.fingerprint().unwrap();
+    let transmit = |content| {
+        let operation_id = Uuid::new_v4();
+        let request = message_request(operation_id, session_id, bound.input_epoch, content);
+        send_message(&retained, &scope, &request).unwrap();
+        issue_emission(&retained, operation_id, &fingerprint).unwrap();
+        let receipt = record_transmitted(&retained, operation_id).unwrap();
+        assert_eq!(receipt.status, SessionMessageStatusV1::Transmitted);
+        assert!(receipt.ack.is_none());
+        receipt
+    };
+
+    let canary = transmit("acknowledge on the active binding");
+    let ack = SessionMessageAckV1 {
+        rpc_id: 1,
+        turn_id: "turn-before-binding-change".into(),
+    };
+    let before_ack = head(&retained.store);
+    let acknowledged = record_acknowledged(&retained, canary.operation_id, &ack).unwrap();
+    assert_eq!(acknowledged.status, SessionMessageStatusV1::Acknowledged);
+    assert_eq!(acknowledged.ack.as_ref(), Some(&ack));
+    assert!(!acknowledged.replayed);
+    assert_eq!(head(&retained.store).0, before_ack.0 + 1);
+
+    let pending = transmit("leave the acknowledgement pending");
+    // Change the binding directly through the Store. No local slot or
+    // retirement notification participates in this ordering.
+    let expected_refusal = change_binding(&retained, &session.session_id);
+    let fenced_head = head(&retained.store);
+    let late_ack = SessionMessageAckV1 {
+        rpc_id: 2,
+        turn_id: "turn-after-binding-change".into(),
+    };
+    let refusal = record_acknowledged(&retained, pending.operation_id, &late_ack).unwrap_err();
+    assert_eq!(message_failure(&refusal), Some(expected_refusal));
+    assert_eq!(head(&retained.store), fenced_head);
+
+    let mut expected_replay = acknowledged;
+    expected_replay.replayed = true;
+    let replay = record_acknowledged(&retained, canary.operation_id, &ack).unwrap();
+    assert_eq!(replay, expected_replay);
+    assert_eq!(head(&retained.store), fenced_head);
+
+    let epoch = retained.owner.try_read_epoch().unwrap();
+    let access = HumanSourceAccess::read(&epoch, &retained.source).unwrap();
+    let receipt = retained
+        .store
+        .modern_session_message_receipt(&access, &scope, &pending.operation_id.to_string())
+        .unwrap();
+    let mut expected_receipt = pending;
+    expected_receipt.replayed = true;
+    assert_eq!(receipt, expected_receipt);
+}
+
+#[test]
+fn owned_store14_session_message_ack_is_fenced_by_stop() {
+    use crate::control::session_control::SessionConversationStatusV1;
+
+    assert_session_message_ack_fenced(14, |retained, session_id| {
+        let closed = close_conversation(retained, Uuid::new_v4(), session_id).unwrap();
+        assert_eq!(closed.status, SessionConversationStatusV1::Closed);
+        assert_eq!(closed.input_epoch, 1);
+        crate::audit::session_message::SessionMessageFailureV1::SessionClosed
+    });
+}
+
+#[test]
+fn owned_store15_session_message_ack_is_fenced_by_rebind() {
+    use crate::control::session_control::SessionConversationStatusV1;
+
+    assert_session_message_ack_fenced(15, |retained, session_id| {
+        let mut command = bind_command(Uuid::new_v4(), session_id, 1);
+        command.channel.attempt_id = "attempt-2".into();
+        command.channel.runtime_instance = "runtime-2".into();
+        let rebound = bind_conversation(retained, &command).unwrap();
+        assert_eq!(rebound.status, SessionConversationStatusV1::Active);
+        assert_eq!(rebound.input_epoch, 2);
+        crate::audit::session_message::SessionMessageFailureV1::BindingChanged
+    });
+}
+
 /// Retain an owned source with a caller-chosen redactor, to exercise the
 /// approved masking policy at the enqueue seam.
 fn retained_with_redactor(
