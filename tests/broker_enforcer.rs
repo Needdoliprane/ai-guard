@@ -10,7 +10,7 @@ use agentsandbox::{
 use serde_json::Value;
 use std::{
     fs, io,
-    io::{Read, Write},
+    io::Write,
     os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
     process::{ExitStatus, Stdio},
@@ -399,55 +399,51 @@ fn bounded_root_inventory(root: &Path) -> Vec<String> {
 
 #[tokio::test]
 async fn real_enforcer_child_health_stop_recovery_and_idle_shutdown() {
-    let root = tempfile::Builder::new()
+    let parent = tempfile::Builder::new()
         .prefix("ef-")
         .permissions(fs::Permissions::from_mode(0o700))
         .tempdir_in(PRIVATE_TMP)
         .unwrap();
-    fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    fs::set_permissions(parent.path(), fs::Permissions::from_mode(0o700)).unwrap();
     // Keep the private root if an assertion or process transition fails so its
     // endpoint/lease state remains available for diagnosis. Remove it on PASS.
-    let root_path = root.keep();
-    let root_handle = Directory::open_existing(&root_path).unwrap();
-    // Seed the exact private authentication record expected by the real child.
-    // It is generated from the OS CSPRNG and never logged or hashed.
-    let mut auth = [0_u8; 32];
-    fs::File::open("/dev/urandom")
-        .unwrap()
-        .read_exact(&mut auth)
-        .unwrap();
-    let mut auth_file = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(root_path.join("auth"))
-        .unwrap();
-    auth_file.write_all(&auth).unwrap();
-    auth_file.sync_all().unwrap();
-    drop(auth_file);
-    fs::File::open(&root_path).unwrap().sync_all().unwrap();
-    auth.fill(0);
-
+    let parent_path = parent.keep().canonicalize().unwrap();
     let executable = PathBuf::from(env!("CARGO_BIN_EXE_agentsandbox"))
         .canonicalize()
         .unwrap();
     assert!(executable.is_absolute());
 
+    // An admission-ready real child is the genuine fresh Legacy factory: the
+    // existing-Legacy transport joins an already initialized role and stays
+    // recovery-pending (it never bootstraps a missing lock into fresh admission
+    // and never clears recovery_incomplete), so require_admission_ready can only
+    // succeed against a fresh factory child. The child exclusively creates its
+    // own private role namespace, empty V1 owner lock and CSPRNG auth record.
+    let root_path = parent_path.join("enforcer");
     let mut child = Command::new(&executable)
         .arg("__broker-enforcer")
         .arg("--root")
-        .arg(&root_path)
+        .arg(&parent_path)
         .arg("--max-slots")
         .arg("8")
+        .arg("--legacy-fresh")
+        .arg("--role-name")
+        .arg("enforcer")
         .env_clear()
         .current_dir("/")
-        .stdin(Stdio::null())
+        .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .kill_on_drop(true)
         .spawn()
         .unwrap();
     let pid: libc::pid_t = child.id().unwrap().try_into().unwrap();
+    let mut launch_pipe = child.stdin.take().unwrap();
+    launch_pipe
+        .write_all(uuid::Uuid::new_v4().as_bytes())
+        .await
+        .unwrap();
+    drop(launch_pipe);
 
     let published = wait_for_announcement(&root_path, Duration::from_secs(20))
         .await
@@ -456,6 +452,7 @@ async fn real_enforcer_child_health_stop_recovery_and_idle_shutdown() {
     let announcement_before = announcement_names(&root_path).unwrap();
     assert_eq!(announcement_before.len(), 1);
 
+    let root_handle = Directory::open_existing(&root_path).unwrap();
     let client = EnforcerClient::connect_or_spawn(&root_handle, &executable, 8)
         .await
         .unwrap();
@@ -509,7 +506,9 @@ async fn real_enforcer_child_health_stop_recovery_and_idle_shutdown() {
         .await
         .expect("shutdown_if_idle must terminate the owned child within the bound");
     assert!(exit.success());
-    fs::remove_dir_all(&root_path).unwrap();
+    // The fresh Legacy factory never rewrites its empty V1 owner lease.
+    assert!(private_regular_file(&root_path.join(".owner.lock"), 0).unwrap());
+    fs::remove_dir_all(&parent_path).unwrap();
 }
 
 #[tokio::test]
