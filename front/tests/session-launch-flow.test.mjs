@@ -70,15 +70,20 @@ test("le lancement exige une préparation retenue et commit l’intention exacte
   assert.equal(journey.preparation.operation_id, uuid, "la préparation consommée reste nommée");
 });
 
-test("un lancement inconnu conserve son identifiant ; un conflit le libère", async () => {
+test("un refus au rejeu laisse le premier lancement inconnu et conserve son identifiant", async () => {
   const journey = new SessionLaunchJourney(counter());
   await journey.prepare("intent-a", async (id) => prepareReceipt(id));
   const sent = [];
   await journey.launch("prep-key", async (id) => { sent.push(id); throw apiError(503, "identity_unavailable"); });
   assert.equal(journey.phase, "unknown"); assert.equal(journey.launchOperationId, sent[0]);
-  await journey.launch("prep-key", async (id) => { assert.equal(id, sent[0], "rejeu de la même opération"); throw apiError(409, "conflict"); });
-  assert.equal(journey.phase, "conflict"); assert.equal(journey.launchOperationId, null);
-  assert.equal(journey.error.code, "conflict");
+  await journey.launch("prep-key", async (id) => { assert.equal(id, sent[0], "rejeu de la même opération"); throw apiError(403); });
+  assert.equal(journey.phase, "unknown"); assert.equal(journey.launchOperationId, sent[0]);
+  assert.equal(journey.error.code, "permission_denied");
+  await journey.launch("different-key", async () => assert.fail("aucun lancement divergent"));
+  journey.reset();
+  assert.equal(journey.phase, "unknown");
+  await journey.launch("prep-key", async (id) => { assert.equal(id, sent[0]); return launchReceipt(id); });
+  assert.equal(journey.phase, "launched");
 });
 
 test("recommencer retire la préparation et le lancement sans toucher un envoi en vol", async () => {

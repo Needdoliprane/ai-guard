@@ -375,8 +375,14 @@ export class HumanApiClient {
     const snapshot = this.#snapshot(true);
     this.#served(snapshot, "session_launch");
     const text = sessionLaunchBody(request);
-    const body = await this.#json(await this.#request(sessionLaunchUrls.launch(), snapshot, signal, false, text), snapshot, ADMIN_PAGE_BYTES);
-    return this.#finishRead(parseSessionLaunchReceipt(body.value, { operationId: request.operation_id, launchTargetId: request.launch_target_id }), snapshot, signal);
+    const response = await this.#request(sessionLaunchUrls.launch(), snapshot, signal, false, text);
+    try {
+      const body = await this.#json(response, snapshot, ADMIN_PAGE_BYTES);
+      return this.#finishRead(parseSessionLaunchReceipt(body.value, { operationId: request.operation_id, launchTargetId: request.launch_target_id }), snapshot, signal);
+    } catch (error) {
+      if (!(error instanceof HumanContractError)) throw error;
+      throw new HumanApiError(502, "launch_receipt_unavailable", "Le reçu de lancement ne peut pas être vérifié.", "retry");
+    }
   }
   /** Read one retained preparation receipt for a still-authorized caller; revocation closes the read. */
   async sessionPreparation(operationId: string, signal?: AbortSignal): Promise<SessionPrepareReceipt> {

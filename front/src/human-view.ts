@@ -518,8 +518,7 @@ export class HumanDashboard {
   }
   #openSessions() {
     const context = this.#context;
-    this.#closeSessions();
-    if (!context || !this.#canSessions()) return;
+    if (this.#sessionsPage || !context || !this.#canSessions()) return;
     const page = el("div", "sessions-stack");
     this.#sessionsPage = page;
     if (this.#canSessionLaunch()) {

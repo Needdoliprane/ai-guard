@@ -102,3 +102,12 @@ test("un contexte qui n’offre pas la préparation n’émet aucune requête de
     assert.equal(posts, 0, "une opération non servie ne substitue aucune route");
   } finally { client.close(); }
 });
+
+test("un reçu de lancement 2xx illisible laisse le résultat inconnu", async () => {
+  const client = make(async (path) => isIdentity(path) ? Response.json(launchIdentity()) : Response.json({ version: 1 }));
+  try {
+    await ready(client);
+    await assert.rejects(client.sessionLaunch(launchRequest), (error) =>
+      error instanceof HumanApiError && error.status === 502 && error.code === "launch_receipt_unavailable");
+  } finally { client.close(); }
+});

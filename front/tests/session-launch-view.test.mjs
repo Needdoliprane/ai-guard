@@ -91,6 +91,52 @@ test("une référence invalide est refusée localement avant toute requête", as
   } finally { view.close(); }
 });
 
+test("une réponse de lancement perdue se réconcilie en rejouant exactement le même lancement", async (t) => {
+  installNodes(t);
+  const prepared = [];
+  const launched = [];
+  let now = Date.now();
+  const api = {
+    sessionPrepare: async (request) => {
+      prepared.push(request);
+      return { ...prepareReceipt(request.operation_id), expires_at: new Date(now + 60_000).toISOString() };
+    },
+    sessionLaunch: async (request) => {
+      launched.push(request);
+      if (launched.length === 1) {
+        now += 120_000;
+        throw new HumanApiError(503, "identity_unavailable", "réponse perdue", "retry");
+      }
+      return { ...launchReceipt(request.operation_id), replayed: true };
+    },
+  };
+  const view = new SessionLaunchView({
+    context: launchContext(), api, now: () => now,
+    onAccessDoubt: () => assert.fail("pas de doute d’accès"), onReadStateChange: () => {},
+  });
+  try {
+    view.start();
+    fill(view, secondUuid, "7");
+    byKey(view, "sl-prepare").click();
+    await tick();
+    byKey(view, "sl-launch").click();
+    await tick();
+
+    const retry = byKey(view, "sl-launch-retry");
+    assert.ok(retry && !retry.disabled, "le reçu retenu reste récupérable après expiration");
+    assert.ok(byKey(view, "sl-prepare").disabled);
+    assert.ok(byKey(view, "sl-reset").disabled);
+    retry.click();
+    await tick();
+
+    assert.equal(prepared.length, 1);
+    assert.equal(launched.length, 2);
+    assert.deepEqual(launched[1], launched[0]);
+    assert.ok(hasText(view, "Lancement accepté"));
+    assert.ok(hasText(view, "Rejeu exact"));
+  } finally { view.close(); }
+});
+
 test("un refus de permission, un conflit et un résultat inconnu restent trois états distincts", async (t) => {
   installNodes(t);
   for (const [status, code, expected] of [[403, "permission_denied", "Refusé par le contrôle"], [409, "conflict", "Conflit"], [503, "identity_unavailable", "inconnu"]]) {

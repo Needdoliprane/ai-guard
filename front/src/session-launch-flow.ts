@@ -60,6 +60,7 @@ export class SessionLaunchJourney {
 
   get prepareOperationId(): string | null { return this.#preparePending?.id ?? null; }
   get launchOperationId(): string | null { return this.#launchPending?.id ?? null; }
+  get launchUnknown(): boolean { return this.phase === "unknown" && this.#launchPending !== null; }
   get sending(): boolean { return this.phase === "preparing" || this.phase === "launching"; }
 
   /** The identifier the next prepare of this exact intent carries; a new intent gets a new identifier. */
@@ -69,7 +70,7 @@ export class SessionLaunchJourney {
   }
   /** Reset to editing, withdrawing any held preparation and launch. The person names a target again. */
   reset() {
-    if (this.sending) return;
+    if (this.sending || this.launchUnknown) return;
     this.phase = "editing"; this.preparation = null; this.receipt = null; this.error = null;
     this.#preparePending = null; this.#launchPending = null;
   }
@@ -81,7 +82,7 @@ export class SessionLaunchJourney {
   }
 
   async prepare(key: string, send: (operationId: string) => Promise<SessionPrepareReceipt>): Promise<LaunchPhase> {
-    if (this.sending) return this.phase;
+    if (this.sending || this.launchUnknown) return this.phase;
     const id = this.operationIdFor(key);
     this.phase = "preparing"; this.error = null;
     try {
@@ -100,6 +101,8 @@ export class SessionLaunchJourney {
   /** Launch the exact held preparation. The caller builds the body from `preparation`; the key binds the idempotency. */
   async launch(key: string, send: (operationId: string) => Promise<SessionLaunchReceipt>): Promise<LaunchPhase> {
     if (this.sending || !this.preparation) return this.phase;
+    const reconciling = this.launchUnknown;
+    if (reconciling && this.#launchPending?.key !== key) return this.phase;
     if (!this.#launchPending || this.#launchPending.key !== key) this.#launchPending = { key, id: this.#newId() };
     const id = this.#launchPending.id;
     this.phase = "launching"; this.error = null;
@@ -107,8 +110,9 @@ export class SessionLaunchJourney {
       const receipt = await send(id);
       this.#launchPending = null; this.receipt = receipt; this.phase = "launched";
     } catch (error) {
-      if (error instanceof HumanSuperseded) { this.phase = "prepared"; throw error; }
-      this.phase = launchFailure(error);
+      if (error instanceof HumanSuperseded) { this.phase = reconciling ? "unknown" : "prepared"; throw error; }
+      // The control can refuse the replay before reading the retained receipt.
+      this.phase = reconciling ? "unknown" : launchFailure(error);
       this.error = error instanceof HumanApiError ? error : null;
       if (this.phase !== "unknown") this.#launchPending = null;
     }

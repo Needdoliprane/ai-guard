@@ -64,7 +64,7 @@ export class SessionLaunchView {
   refresh() { this.#render(); return Promise.resolve(); }
   close() {
     this.#closed = true; this.#abort.abort(); clearTimeout(this.#expiryTimer);
-    this.#intent = null; this.#journey.reset(); this.element.replaceChildren();
+    this.#intent = null; this.#journey = new SessionLaunchJourney(); this.element.replaceChildren();
   }
   #now() { return this.#host.now?.() ?? Date.now(); }
   #say(text: string | null) { if (text && this.#said !== text) { this.#said = text; this.#announce.textContent = text; } }
@@ -78,12 +78,15 @@ export class SessionLaunchView {
     const offers = sessionLaunchOffers(this.#host.context);
     const sending = this.#journey.sending;
     const prepared = this.#journey.phase === "prepared" || this.#journey.phase === "launched";
-    const launchKey = this.#journey.phase === "unknown" && this.#intent ? "sl-prepare-retry" : "sl-prepare";
-    const prepareLabel = this.#journey.phase === "unknown" && this.#intent ? "Réessayer la même préparation" : "Préparer le lancement";
+    const launchUnknown = this.#journey.launchUnknown;
+    const retryPrepare = !launchUnknown && this.#journey.phase === "unknown" && this.#intent !== null;
+    const prepareLabel = retryPrepare ? "Réessayer la même préparation" : "Préparer le lancement";
     const prepare = button(prepareLabel, "button button-primary", () => { void this.#prepare(); });
-    prepare.dataset.focusKey = launchKey; prepare.disabled = sending || !offers.prepare || prepared;
+    prepare.dataset.focusKey = retryPrepare ? "sl-prepare-retry" : "sl-prepare";
+    prepare.disabled = sending || !offers.prepare || prepared || launchUnknown;
     const reset = button("Recommencer", "button button-secondary", () => this.#reset());
-    reset.dataset.focusKey = "sl-reset"; reset.disabled = sending || (this.#journey.phase === "editing" && !this.#intent);
+    reset.dataset.focusKey = "sl-reset";
+    reset.disabled = sending || launchUnknown || (this.#journey.phase === "editing" && !this.#intent);
     const fields: (HTMLElement | null)[] = [
       el("h2", "", "Nouvelle session IA"),
       el("p", "muted", "Le contrôle résout la cible, le fournisseur, le mode d’authentification et les ressources. Le navigateur ne fournit qu’une référence opaque publiée par le contrôle : ni chemin hôte, ni argv, ni image, ni credential."),
@@ -133,9 +136,11 @@ export class SessionLaunchView {
     const offers = sessionLaunchOffers(this.#host.context);
     const expired = preparationExpired(receipt, this.#now());
     const sending = this.#journey.phase === "launching";
+    const retryLaunch = this.#journey.launchUnknown;
     this.#scheduleExpiry(receipt);
-    const launch = button("Lancer la session", "button button-primary", () => { void this.#launch(); });
-    launch.dataset.focusKey = "sl-launch"; launch.disabled = sending || expired || !offers.launch || this.#journey.phase === "unknown";
+    const launch = button(retryLaunch ? "Réessayer le même lancement" : "Lancer la session", "button button-primary", () => { void this.#launch(); });
+    launch.dataset.focusKey = retryLaunch ? "sl-launch-retry" : "sl-launch";
+    launch.disabled = sending || !offers.launch || (!retryLaunch && (expired || this.#journey.phase === "unknown"));
     const card = el("div", "panel sl-card",
       el("div", "sl-card-head", el("h3", "", "Préparation retenue"), receipt.replayed ? badge("Rejeu exact", "blue") : badge("Durable", "teal"),
         expired ? badge("Expirée", "amber") : null),
@@ -148,7 +153,9 @@ export class SessionLaunchView {
         row("Expire le", formatDate(receipt.expires_at, true)),
         row("Audit durable", `séquence ${receipt.audit_seq} · ${shortHash(receipt.audit_hash)}`)),
       !offers.launch ? el("p", "control-error", "Ce contexte n’offre pas le lancement de session : la préparation est retenue mais aucun lancement n’est émis. Faites vérifier vos droits.") : null,
-      expired ? el("p", "control-error", "La préparation a expiré : elle ne peut plus être lancée. Recommencez une préparation.") : null,
+      expired ? el("p", "control-error", retryLaunch
+        ? "La préparation a expiré. Réessayez le même lancement pour retrouver son résultat auprès du contrôle."
+        : "La préparation a expiré : elle ne peut plus être lancée. Recommencez une préparation.") : null,
       el("div", "sl-actions", launch));
     return card;
   }
@@ -193,14 +200,14 @@ export class SessionLaunchView {
     this.#expiryTimer = setTimeout(() => { if (!this.#closed) this.#render(); }, Math.min(remaining, 2147483647) + 25);
   }
   #reset() {
-    if (this.#journey.sending) return;
+    if (this.#journey.sending || this.#journey.launchUnknown) return;
     this.#journey.reset(); this.#intent = null; this.#problem = null;
     this.#abort = new AbortController(); clearTimeout(this.#expiryTimer);
     this.#render();
   }
   async #prepare() {
     const offers = sessionLaunchOffers(this.#host.context);
-    if (this.#closed || this.#journey.sending || !offers.prepare) return;
+    if (this.#closed || this.#journey.sending || this.#journey.launchUnknown || !offers.prepare) return;
     // A retry after an unknown outcome replays the identical intent; a fresh prepare builds a new deadline.
     if (this.#journey.phase !== "unknown" || !this.#intent) {
       const target = this.#targetInput.value.trim();
@@ -226,14 +233,16 @@ export class SessionLaunchView {
   async #launch() {
     const preparation = this.#journey.preparation;
     const offers = sessionLaunchOffers(this.#host.context);
-    if (this.#closed || this.#journey.sending || !preparation || !offers.launch || preparationExpired(preparation, this.#now())) return;
+    if (this.#closed || this.#journey.sending || !preparation || !offers.launch) return;
+    if (!this.#journey.launchUnknown && (this.#journey.phase !== "prepared" || preparationExpired(preparation, this.#now()))) return;
     const key = JSON.stringify([preparation.operation_id, preparation.input_hash]);
-    this.#render();
     try {
-      await this.#journey.launch(key, (operationId) => this.#host.api.sessionLaunch(
+      const outcome = this.#journey.launch(key, (operationId) => this.#host.api.sessionLaunch(
         { version: 1, operation_id: operationId, launch_target_id: preparation.launch_target_id,
           expected_target_revision: preparation.target_revision, preparation_operation_id: preparation.operation_id,
           preparation_input_hash: preparation.input_hash }, this.#abort.signal));
+      this.#render();
+      await outcome;
     } catch (error) {
       if (error instanceof HumanSuperseded || this.#closed) return;
       if (launchContextLost(error)) { this.#host.onAccessDoubt(); return; }
