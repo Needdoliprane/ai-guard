@@ -1707,12 +1707,8 @@ fn assert_session_launch_contract(format: u32) {
     drop(epoch);
 
     // Retain one preparation, then commit it as a real launch.
-    let preparation = prepare(
-        &retained,
-        &scope,
-        &prepare_request(Uuid::new_v4(), target_id, 1, FUTURE_DEADLINE),
-    )
-    .unwrap();
+    let prepare_intent = prepare_request(Uuid::new_v4(), target_id, 1, FUTURE_DEADLINE);
+    let preparation = prepare(&retained, &scope, &prepare_intent).unwrap();
     let resources_before = table_count(&retained.store, "identity_resources");
     let before = head(&retained.store);
     let operation = Uuid::new_v4();
@@ -1905,6 +1901,48 @@ fn assert_session_launch_contract(format: u32) {
     // Provisioning the other principal advanced the authorization revision; the
     // initiator's scope must be reacquired at the current revision.
     let scope = personal_scope(&retained, &principal, &membership, ContextModeV1::Personal);
+
+    // Another personal launcher in the same tenant and organization does not
+    // inherit the initiator's access to either retained receipt.
+    let before_receipt_access = head(&retained.store);
+    {
+        let epoch = retained.owner.try_read_epoch().unwrap();
+        let access = HumanSourceAccess::read(&epoch, &retained.source).unwrap();
+        let result = retained.store.modern_session_preparation(
+            &access,
+            &other_scope,
+            &preparation.operation_id.to_string(),
+        );
+        assert_eq!(
+            identity_failure(&result.unwrap_err()),
+            Some(F::PermissionDenied)
+        );
+    }
+    assert_eq!(
+        identity_failure(&prepare(&retained, &other_scope, &prepare_intent).unwrap_err()),
+        Some(F::PermissionDenied)
+    );
+    assert_eq!(
+        identity_failure(&launch(&retained, &other_scope, &request).unwrap_err()),
+        Some(F::PermissionDenied)
+    );
+
+    // The initiator can still reconcile both original receipts after the target
+    // advances and the authorization revision changes.
+    let mut expected_preparation = preparation.clone();
+    expected_preparation.replayed = true;
+    assert_eq!(
+        prepare(&retained, &scope, &prepare_intent).unwrap(),
+        expected_preparation
+    );
+    let mut expected_launch = receipt.clone();
+    expected_launch.replayed = true;
+    assert_eq!(
+        launch(&retained, &scope, &request).unwrap(),
+        expected_launch
+    );
+    assert_eq!(head(&retained.store), before_receipt_access);
+
     let current_preparation = prepare(
         &retained,
         &scope,
