@@ -1,5 +1,29 @@
 # Validation courante
 
+## 26 novembre 2026 — parcours session du dashboard owned
+
+Le candidat `16dd21b9` intègre le proxy de préparation, lancement et
+envoi de consigne, et les contrôles nominatifs de lecture et de rejeu des
+reçus. Un libtest macOS ARM64 exécuté avec les sources des correctifs
+`5f5284e8` et `d4da33aa` passe six sélecteurs exacts. Deux couvrent le
+proxy et ses refus sur routes voisines. Quatre couvrent la préparation
+et le lancement durables sur SQLite Store14/15, dont le refus d’un
+rejeu depuis une autre identité. Empreinte du journal
+`b97dd2e660b80089e862547953d3057924ae7c7c76146ffeac8ca9c94568437d`.
+
+Le front avec `bd5cf625` passe 418 tests (8 ignorés) et le build
+TypeScript/Vite. Chromium 148 avec gateway de fixture confirme le même
+identifiant et le même corps au rejeu après réponse perdue, la purge au
+changement de périmètre, les deux thèmes et la reprise au clavier.
+Manifeste du build et du clavier
+`287c5fcbd3f0565cecb5ef7e39bb0461202ba1990ab147c3b1991fd49815f6b6`.
+Le composeur de consigne a une recette Store et stdio contrôlé. Le
+raccord à l’admission broker supervisée, la lecture de la liaison d’une
+session ouverte hors du contexte de lancement et le dialogue fournisseur
+depuis le dashboard restent à qualifier.
+[Guides de session FR](../setup/session-control/README.fr.md) et
+[EN](../setup/session-control/README.md).
+
 ## 26 novembre 2026 — contraintes MySQL owned 14 et 15 sous TLS
 
 Le diagnostic reproduit la divergence en format 14 au rang 23 sur 94.

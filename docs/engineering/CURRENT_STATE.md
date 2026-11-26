@@ -1,4 +1,18 @@
-# Synthèse courante — 25 novembre 2026
+# Synthèse courante — 26 novembre 2026
+
+Le candidat `16dd21b9` intègre la préparation et le lancement depuis le
+dashboard owned, le relais d’envoi de consigne et la reprise après
+perte de réponse. Les six sélecteurs backend ciblés et le parcours
+Chromium avec gateway de fixture passent. Le raccord de la consigne
+au broker supervisé et le dialogue fournisseur restent ouverts.
+[Preuve du parcours dashboard](VALIDATION.md#26-novembre-2026--parcours-session-du-dashboard-owned).
+
+Sur `8e16237b`, MySQL 8.4.13 confirme sous TLS les 94 et 120 contraintes
+des deux formats owned. La préparation Rust sous verrou, la publication,
+l’admission et le profil mTLS gardent leur propre qualification.
+[Résultats MySQL](VALIDATION.md#26-novembre-2026--contraintes-mysql-owned-14-et-15-sous-tls).
+
+## Relevé du 25 novembre 2026
 
 Le candidat local intègre la projection d’audit Claude Code, ses
 régressions de compaction, les témoins Jev sur loopback et la recette
@@ -70,7 +84,7 @@ Le commun Native17 R5 `a3e9ca09…` passe check toutes cibles et build libtest, 
 
 La faute tardive Managed jusqu’au finalizer Store/quota est désormais couverte logiciellement par les quatre CLI/Gateway/SQLite inclus dans les douze PASS du 17 novembre. Le vrai TTY interactif, les moteurs réels et les garanties d’abandon/reprise froide restent ouverts ; les unités Managed et PTY ne les qualifient pas. Les résultats Native17 privés restent séparés ; heartbeat/self ne remplace pas le checkpoint **Full**, son installation/profil, la reprise ou la supersession.
 
-La cible V1 conserve les parcours complets, le contrôle réseau Rust, l’audit, l’arrêt/reprise, la restauration, les quatre parcours Codex CLI et Claude Code, Docker/Podman/Kubernetes et TLS. Pour G10, la recette A1/A2 chez A et B1 chez B et les 100 réservations durables chez A sont attestées sur `48f81d20`. La capacité physique à 100 reste une cible de dimensionnement. [Mandat](../../AGENTS.md), [contrat d’architecture](ARCHITECTURE_CONTRACT.md), [identité et configuration](../sso.md), [gates](PRODUCTION_READINESS.md), [CI G10](https://github.com/Needdoliprane/ai-guard/actions/runs/45344259411).
+La cible V1 conserve les parcours complets, le contrôle réseau Rust, l’audit, l’arrêt/reprise, la restauration, les quatre parcours Codex CLI et Claude Code, Docker/Podman/Kubernetes et TLS. Pour G10, la recette moteur A1/A2 chez A et B1 chez B et les 100 réservations durables chez A sans lancement sont attestées sur `48f81d20`. [Mandat](../../AGENTS.md), [contrat d’architecture](ARCHITECTURE_CONTRACT.md), [identité et configuration](../sso.md), [gates](PRODUCTION_READINESS.md), [CI G10](https://github.com/Needdoliprane/ai-guard/actions/runs/45344259411).
 
 ## Priorités de qualification
 
