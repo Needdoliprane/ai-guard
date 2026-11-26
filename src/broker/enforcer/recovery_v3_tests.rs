@@ -481,9 +481,33 @@ async fn real_client2_and_client3_share_stop_dispatch_without_changing_views2() 
         assert_eq!(slot.registration_hash(), hash);
     }
     let wire2 = serde_json::to_value(status2).unwrap();
-    assert_eq!(wire2.as_object().unwrap().len(), 8);
-    assert!(wire2.get("retirement_count").is_none());
-    assert!(wire2.get("root_binding").is_none());
+    let wire2 = wire2.as_object().unwrap();
+    let v2_fields = [
+        "epoch",
+        "slot_count",
+        "max_slots",
+        "max_recovery_stop_owners",
+        "recovery_attempt_owners",
+        "owned_active",
+        "recovery_fenced",
+        "recovery_incomplete",
+        "recovery_attempts",
+        "recovery_attempt_failures",
+        "recovery_attempt_in_flight",
+        "retained_native_causes",
+        "omitted_settled_causes",
+        "cause_omissions_exact",
+        "native_io_uncollected",
+        "progress",
+        "transport_healthy",
+        "clock_healthy",
+        "admission_available",
+        "ledger_state",
+    ];
+    assert_eq!(wire2.len(), v2_fields.len());
+    for field in v2_fields {
+        assert!(wire2.contains_key(field), "missing V2 status field {field}");
+    }
     assert_eq!(status3.known_stop_slot_count(), 1);
     assert_eq!(status3.retirement_count(), None);
 }

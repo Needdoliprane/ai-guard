@@ -28,6 +28,31 @@ const PRIVATE_TMP: &str = "/private/tmp";
 #[cfg(target_os = "linux")]
 const PRIVATE_TMP: &str = "/tmp";
 
+tokio::task_local! {
+    static HELD_REGISTER_REPLY: (String, Arc<tokio::sync::Notify>);
+}
+
+pub(super) async fn hold_register_reply(request: &Request, response: &Response) {
+    if let (
+        Request::Register {
+            observe_only: true, ..
+        },
+        Response::Registered {
+            value,
+            replayed: true,
+        },
+    ) = (request, response)
+        && HELD_REGISTER_REPLY
+            .try_with(|(arm, seen)| {
+                assert_eq!(&value.arm_id, arm);
+                seen.notify_one();
+            })
+            .is_ok()
+    {
+        std::future::pending::<()>().await;
+    }
+}
+
 struct FailureEvidence(Option<tempfile::TempDir>);
 impl Drop for FailureEvidence {
     fn drop(&mut self) {
@@ -248,24 +273,35 @@ async fn retained_cancel_real_ipc_retries_without_seeding_or_targeting_later_slo
     let old = unavailable_registration(&base, "old");
     let later = unavailable_registration(&base, "later");
     for (registration, generation) in [(&old, 7), (&later, 0)] {
-        // Recover both through the real STOP-only path. The unavailable
-        // runtime prevents a Ready acknowledgement but preserves each slot.
-        assert!(matches!(
-            client
-                .0
-                .request(
-                    Request::Register {
-                        registration: Box::new(registration.clone()),
-                        generation,
-                        observe_only: true,
-                    },
-                    IO_TIMEOUT,
-                )
-                .await,
-            Ok(Response::Error {
-                code: EnforcerError::NotReady
-            })
-        ));
+        // ObserveOnly acknowledges the installed native context before the
+        // actor can reopen the unavailable runtime.
+        let reply = client
+            .0
+            .request(
+                Request::Register {
+                    registration: Box::new(registration.clone()),
+                    generation,
+                    observe_only: true,
+                },
+                IO_TIMEOUT,
+            )
+            .await
+            .expect("authenticated ObserveOnly exchange failed");
+        let Response::Registered {
+            value,
+            replayed: false,
+        } = reply
+        else {
+            panic!(
+                "expected first STOP registration acknowledgement: {:?}",
+                response_error(reply)
+            );
+        };
+        assert_eq!(value.arm_id, registration.arm.operation_id);
+        assert_eq!(value.registration_hash, registration.digest().unwrap());
+        assert_eq!(value.generation, generation);
+        assert!(value.prepared_once);
+        assert_ne!(value.phase, SlotPhaseV1::Ready);
         let reserved = client
             .slot_status(&registration.arm.operation_id)
             .await
@@ -280,17 +316,20 @@ async fn retained_cancel_real_ipc_retries_without_seeding_or_targeting_later_slo
     let (later_local, _) = client
         .retain_registration(later.clone(), generation.clone(), false, false)
         .unwrap();
-    // The real server waits 100ms for this deliberately unavailable actor.
-    // Interrupt the caller before its Register acknowledgement: retained intent
-    // must already exist, and another exact call must still deliver Cancel.
-    assert!(
-        tokio::time::timeout(
-            Duration::from_millis(1),
+    // Drop the call after the authenticated peer acknowledged the replay,
+    // while the caller still has not handled that reply or sent Cancel.
+    {
+        let seen = Arc::new(tokio::sync::Notify::new());
+        let interrupted = HELD_REGISTER_REPLY.scope(
+            (old.arm.operation_id.clone(), Arc::clone(&seen)),
             client.cancel_retained(old.clone(), generation.clone()),
-        )
-        .await
-        .is_err()
-    );
+        );
+        tokio::select! {
+            _ = seen.notified() => {}
+            result = interrupted => panic!("Cancel completed before the replay reply was held: {result:?}"),
+            _ = tokio::time::sleep(IO_TIMEOUT) => panic!("authenticated replay reply was not held"),
+        }
+    }
     let old_local = Arc::clone(
         client
             .0
@@ -302,6 +341,7 @@ async fn retained_cancel_real_ipc_retries_without_seeding_or_targeting_later_slo
     );
     assert!(old_local.cancel_durable.load(Ordering::SeqCst));
     assert!(old_local.retained_cancel.load(Ordering::SeqCst));
+    assert!(!old_local.acknowledged.load(Ordering::SeqCst));
     assert!(*old_local.stop.borrow());
     assert!(old_local.status.lock().unwrap().0.prepared_once);
     assert_eq!(generation.current(), 1);
