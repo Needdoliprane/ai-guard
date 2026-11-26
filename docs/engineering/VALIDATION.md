@@ -28,6 +28,22 @@ le délai de lecture. Le correctif conversation reste sur son gel de
 validation. Le fournisseur et le raccord broker de production gardent
 leurs preuves propres.
 
+Sur `3b515be2`, les deux sélecteurs reproduisent l’attente d’un ACK
+derrière un epoch et la seconde lecture d’un canal déjà déconnecté.
+Le gel corrigé `3d4b3e22` passe 17 tests de conversation et 12 tests
+stdio. Dans le candidat, `fbe39505` reprend le delta EOF et son test
+avec une empreinte de patch identique. Manifeste RED
+`8fcfed3d183882ba9a6582dc8d1899492d99aa31047d750ec2ac4d4e68423d05`
+et manifeste GREEN
+`3c7387b55772228e50f8bf500bfefd74d15813b7a190811896392d16d7b68bfb`.
+
+La revue garde ouvert l’ordre après un COMMIT durable dont la validation
+finale renvoie `EpochExpired`. Le Store doit encore refuser un nouvel
+ACK pour une liaison fermée ou remplacée dans ce cas. Le rebind doit
+également conserver l’ancien canal tant que sa fermeture physique
+reste à confirmer. Ces deux cas maintiennent le composeur sur son gel
+de validation.
+
 ## 27 novembre 2026 — canal de conversation dans Chromium
 
 Le front de `bf64c76e` passe les six vérifications dans Chromium
