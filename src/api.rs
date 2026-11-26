@@ -2253,9 +2253,10 @@ async fn dashboard_proxy(State(s): State<DashboardState>, request: Request) -> A
         .map(|suffix| format!("/api/{suffix}"))
         .unwrap_or_else(|| path.to_owned());
     let versioned_human = path.starts_with("/api/v1/human/");
-    let session_preparation_read =
-        versioned_human && human_dashboard_session_preparation(&canonical_path);
-    if session_preparation_read && !s.owned_sources {
+    let owned_session_read = versioned_human
+        && (human_dashboard_session_preparation(&canonical_path)
+            || human_dashboard_session_conversation(&canonical_path));
+    if owned_session_read && !s.owned_sources {
         return Err(human_sources::unavailable());
     }
     // These are the only POSTs admitted here. Check the target before
@@ -2307,7 +2308,7 @@ async fn dashboard_proxy(State(s): State<DashboardState>, request: Request) -> A
                 || versioned_human
                     && human_dashboard_message_receipt(&canonical_path)
                     && request.uri().query().is_none()
-                || session_preparation_read && request.uri().query().is_none());
+                || owned_session_read && request.uri().query().is_none());
         if !allowed {
             return Err(human_sources::unavailable());
         }
@@ -2534,6 +2535,7 @@ fn human_dashboard_path(path: &str) -> bool {
         || human_dashboard_event_detail(path)
         || human_dashboard_message_receipt(path)
         || human_dashboard_session_preparation(path)
+        || human_dashboard_session_conversation(path)
 }
 
 fn human_dashboard_event_detail(path: &str) -> bool {
@@ -2555,6 +2557,12 @@ fn human_dashboard_message_receipt(path: &str) -> bool {
 fn human_dashboard_session_preparation(path: &str) -> bool {
     path.strip_prefix("/api/human/owned/sessions/preparations/")
         .is_some_and(|id| uuid::Uuid::parse_str(id).is_ok_and(|parsed| parsed.to_string() == id))
+}
+
+fn human_dashboard_session_conversation(path: &str) -> bool {
+    path.strip_prefix("/api/human/owned/sessions/")
+        .and_then(|tail| tail.strip_suffix("/conversation"))
+        .is_some_and(|id| crate::control::session_control::canonical_uuid(id).is_ok())
 }
 
 async fn verify_dashboard_human(state: &DashboardState, token: &str) -> ApiResult<()> {

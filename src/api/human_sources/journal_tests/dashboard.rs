@@ -1057,6 +1057,56 @@ async fn owned_dashboard_session_preparation_get_relays_the_exact_canonical_uuid
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn owned_dashboard_session_conversation_relays_the_canonical_read_only() {
+    const PATH: &str =
+        "/api/v1/human/owned/sessions/915e4e07-26a2-4d71-a45f-3b602a8dcf93/conversation";
+    let (server, dashboard, calls, unexpected, front, address) = owned_read_proxy(PATH, None).await;
+    let legacy = dashboard_router_with_human_mode(
+        &format!("http://{address}"),
+        None,
+        front.path().to_owned(),
+        None,
+        false,
+    )
+    .unwrap();
+    for (router, target, status) in [
+        (&dashboard, PATH.to_owned(), StatusCode::FORBIDDEN),
+        (&legacy, PATH.to_owned(), StatusCode::SERVICE_UNAVAILABLE),
+        (
+            &dashboard,
+            format!("{PATH}?context=another"),
+            StatusCode::SERVICE_UNAVAILABLE,
+        ),
+        (
+            &dashboard,
+            PATH.replace("915e4e07", "915E4E07"),
+            StatusCode::SERVICE_UNAVAILABLE,
+        ),
+        (
+            &dashboard,
+            PATH.replace("/api/v1/", "/api/"),
+            StatusCode::SERVICE_UNAVAILABLE,
+        ),
+    ] {
+        let response = (*router)
+            .clone()
+            .oneshot(
+                axum::http::Request::get(target.as_str())
+                    .header("authorization", format!("Bearer {OWNED_PROXY_BEARER}"))
+                    .header("x-aiguard-context", OWNED_PROXY_CONTEXT)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), status, "{target}");
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(unexpected.load(Ordering::SeqCst), 0);
+    server.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn owned_dashboard_brokers_keeps_head_mutations_legacy_and_neighbor_routes_closed() {
     let (server, dashboard, calls, unexpected, _front, _) =
         owned_read_proxy("/api/v1/human/owned/brokers", Some("limit=25")).await;

@@ -451,6 +451,18 @@ impl OwnedHumanGateway {
         })
     }
 
+    pub(super) fn session_conversation(
+        &self,
+        index: usize,
+        store: &Store,
+        scope: &AuthorizedScopeV1,
+        session_id: &str,
+    ) -> ApiResult<crate::control::session_control::SessionConversationViewV1> {
+        self.read(index, store, |access| {
+            store.modern_session_conversation(access, scope, session_id)
+        })
+    }
+
     /// Publish a committed delegated identity change on the proof's own retained
     /// source before releasing its write epoch. Replays keep the current generation.
     fn change_delegated_identity<R>(
@@ -765,6 +777,8 @@ mod owned_policy_tests;
 pub(super) mod tests;
 
 const HUMAN_EVENT_DETAIL_PATH: &str = "/api/v1/human/events/{id}";
+const HUMAN_SESSION_CONVERSATION_PATH: &str =
+    "/api/v1/human/owned/sessions/{session_id}/conversation";
 pub(super) const HUMAN_GRANT_CHANGE_PATH: &str = "/api/v1/human/admin/grants";
 pub(super) const HUMAN_OWNED_GRANT_CHANGE_PATH: &str = "/api/v1/human/owned/admin/grants";
 pub(super) const HUMAN_MEMBERSHIP_CHANGE_PATH: &str =
@@ -884,6 +898,7 @@ const REGISTERED_ROUTES: &[(&str, &[&str])] = &[
     (HUMAN_OWNED_GRANT_CHANGE_PATH, &["POST"]),
     (HUMAN_OWNED_MEMBERSHIP_CHANGE_PATH, &["POST"]),
     ("/api/v1/human/owned/brokers", &["GET", "HEAD"]),
+    (HUMAN_SESSION_CONVERSATION_PATH, &["GET", "HEAD"]),
     ("/api/v1/human/resources", &["GET", "HEAD"]),
     ("/api/v1/human/stream", &["GET", "HEAD"]),
     ("/api/v1/human/summary", &["GET", "HEAD"]),
@@ -994,7 +1009,11 @@ pub(super) async fn route_gate(
         || super::control_transport::owned_policy_request(&request)
         || super::control_transport::owned_policy_inspection_request(&request)
         || request.method() == "GET"
-            && (OWNED_HUMAN_GET_PATHS.contains(&path) || template == Some(HUMAN_EVENT_DETAIL_PATH))
+            && (OWNED_HUMAN_GET_PATHS.contains(&path)
+                || matches!(
+                    template,
+                    Some(HUMAN_EVENT_DETAIL_PATH | HUMAN_SESSION_CONVERSATION_PATH)
+                ))
         || request.method() == "GET"
             && !owned.oidc_selected()
             && ["/auth/oidc/status", "/auth/oidc/cli-profile"].contains(&path);

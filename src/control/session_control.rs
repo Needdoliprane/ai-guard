@@ -194,6 +194,21 @@ pub enum SessionConversationStatusV1 {
     Closed,
 }
 
+/// Conversation destination visible to the authorized session owner.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionConversationViewV1 {
+    pub version: u32,
+    pub tenant_id: String,
+    pub source_id: String,
+    pub session_id: String,
+    pub input_epoch: u64,
+    pub provider: Option<String>,
+    pub protocol: Option<String>,
+    pub expires_at: String,
+    pub status: SessionConversationStatusV1,
+}
+
 impl SessionConversationBindingV1 {
     /// Canonical fingerprint of the exact retained binding. A message pins the
     /// fingerprint it was enqueued against; the emission point refuses any

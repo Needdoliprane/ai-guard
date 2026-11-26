@@ -1351,6 +1351,48 @@ pub(super) async fn session_message_receipt(
     .await
 }
 
+/// Read the current destination for the still-authorized owner of a session.
+async fn session_conversation(
+    proof: VerifiedHuman,
+    State(state): State<GatewayState>,
+    headers: HeaderMap,
+    axum::extract::OriginalUri(uri): axum::extract::OriginalUri,
+    path: Result<Path<String>, axum::extract::rejection::PathRejection>,
+) -> ApiResult<Json<crate::control::session_control::SessionConversationViewV1>> {
+    if state.owned_human.is_none() {
+        return Err(super::human_sources::unavailable());
+    }
+    let Path(session_id) = path.map_err(|_| invalid_request())?;
+    if uri.query().is_some()
+        || uri
+            .path()
+            .strip_suffix("/conversation")
+            .and_then(|prefix| prefix.rsplit('/').next())
+            != Some(session_id.as_str())
+    {
+        return Err(invalid_request());
+    }
+    let selected = headers.clone();
+    run_human(&state, &proof, Some(&headers), move |state, proof| {
+        let (_, tenant, scope) = selected_context(&state, &proof, &selected)?;
+        let store = tenant.store.sqlite_api()?;
+        let owned = state
+            .owned_human
+            .as_ref()
+            .ok_or_else(super::human_sources::unavailable)?;
+        let HumanProofSource::Local(source) = proof.source else {
+            return Err(super::human_sources::unavailable());
+        };
+        Ok(Json(owned.session_conversation(
+            source,
+            store,
+            &scope,
+            &session_id,
+        )?))
+    })
+    .await
+}
+
 pub(super) fn routes() -> Router<GatewayState> {
     Router::new()
         .route("/human/identity", get(identity))
@@ -1379,6 +1421,10 @@ pub(super) fn routes() -> Router<GatewayState> {
         .route(
             "/human/owned/sessions/messages/{operation_id}",
             get(session_message_receipt),
+        )
+        .route(
+            "/human/owned/sessions/{session_id}/conversation",
+            get(session_conversation),
         )
         .route("/human/brokers", get(brokers::brokers))
         .route("/human/owned/brokers", get(brokers_owned::brokers))

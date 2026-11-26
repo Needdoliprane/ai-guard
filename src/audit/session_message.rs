@@ -13,9 +13,9 @@
 use super::*;
 use crate::control::session_control::{
     BindSessionConversationV1, CloseSessionConversationV1, IssueSessionMessageEmissionV1,
-    SessionConversationBindingV1, SessionConversationStatusV1, SessionMessageAckV1,
-    SessionMessageEmissionV1, SessionMessageReceiptV1, SessionMessageRequestV1,
-    SessionMessageStatusV1,
+    SessionConversationBindingV1, SessionConversationStatusV1, SessionConversationViewV1,
+    SessionMessageAckV1, SessionMessageEmissionV1, SessionMessageReceiptV1,
+    SessionMessageRequestV1, SessionMessageStatusV1,
 };
 use crate::identity::{
     AuthorizedScopeV1, ContextModeV1, HumanCapabilityV1, IdentityFailureV1, MembershipV1,
@@ -663,6 +663,80 @@ impl Store {
             let mut receipt: SessionMessageReceiptV1 = serde_json::from_str(&row.receipt_json)?;
             receipt.replayed = true;
             Ok(receipt)
+        })
+    }
+
+    /// Read the current destination using the same authority as enqueue. The
+    /// projection must match the latest durable launch, bind or close event.
+    pub(crate) fn modern_session_conversation(
+        &self,
+        access: &HumanSourceAccess<'_>,
+        scope: &AuthorizedScopeV1,
+        session_id: &str,
+    ) -> anyhow::Result<SessionConversationViewV1> {
+        crate::control::session_control::canonical_uuid(session_id)
+            .map_err(|_| failure(IdentityFailureV1::InvalidRequest))?;
+        self.with_modern_read(access, |tx| {
+            let current = authorize_send(tx, scope, &self.tenant_id)?;
+            require_session_owner(tx, &current, session_id)?;
+            let (json, seq, hash): (String, i64, String) = tx
+                .query_row(
+                    "SELECT binding_json,event_seq,event_hash FROM session_conversations WHERE session_id=?1",
+                    [session_id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .optional()?
+                .ok_or(failure(IdentityFailureV1::NotFound))?;
+            let event = tx.query_row(
+                "SELECT seq,received_at,prev_hash,hash,payload FROM events \
+                 WHERE kind IN (?1,?2,?3) AND seq>=?4 AND json_extract(payload,'$.session_id')=?5 \
+                 ORDER BY seq DESC LIMIT 1",
+                params![
+                    super::session_prepare::LAUNCHED_KIND,
+                    CONVERSATION_BOUND_KIND,
+                    CONVERSATION_CLOSED_KIND,
+                    seq,
+                    session_id,
+                ],
+                row_event,
+            )?;
+            anyhow::ensure!(
+                event.seq == seq && event.hash == hash,
+                "session conversation projection event mismatch"
+            );
+            let key = if event.event.kind == super::session_prepare::LAUNCHED_KIND {
+                super::session_prepare::validate_replay_event(tx, &event)?;
+                "conversation"
+            } else {
+                validate_replay_event(tx, &event)?;
+                "binding"
+            };
+            let binding: SessionConversationBindingV1 = serde_json::from_str(&json)?;
+            let audited: SessionConversationBindingV1 =
+                serde_json::from_value(event.event.data[key].clone())?;
+            let namespace: String = tx.query_row(
+                "SELECT namespace_uuid FROM control_meta WHERE singleton=1",
+                [],
+                |row| row.get(0),
+            )?;
+            anyhow::ensure!(
+                binding == audited
+                    && binding.session_id == session_id
+                    && binding.tenant_id == self.tenant_id
+                    && binding.source_id == namespace,
+                "session conversation projection payload mismatch"
+            );
+            Ok(SessionConversationViewV1 {
+                version: binding.version,
+                tenant_id: binding.tenant_id,
+                source_id: binding.source_id,
+                session_id: binding.session_id,
+                input_epoch: binding.input_epoch,
+                provider: binding.provider,
+                protocol: binding.protocol,
+                expires_at: binding.expires_at,
+                status: binding.status,
+            })
         })
     }
 

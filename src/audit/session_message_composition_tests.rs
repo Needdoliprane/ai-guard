@@ -625,6 +625,91 @@ fn message_status(store: &Store, operation_id: Uuid) -> String {
     .unwrap()
 }
 
+#[test]
+fn conversation_destination_read_requires_the_owner_and_tracks_the_audited_state() {
+    let harness = Harness::new();
+    harness.install_markers();
+    let retained = harness.retained("composition-destination-read.json");
+    let (owner, membership) = provision_membership(&retained).unwrap();
+    let (other, other_membership) = provision_membership(&retained).unwrap();
+    let scope = personal_scope(&retained, &owner, &membership);
+    let session = launched_session(&retained, &scope, &owner);
+    let scope = personal_scope(&retained, &owner, &membership);
+    let other_scope = personal_scope(&retained, &other, &other_membership);
+    let read = |scope: &AuthorizedScopeV1| {
+        let epoch = retained.owner.try_read_epoch()?;
+        let access = HumanSourceAccess::read(&epoch, &retained.source)?;
+        retained
+            .store
+            .modern_session_conversation(&access, scope, &session.session_id)
+    };
+    let prepared = read(&scope).unwrap();
+    assert_eq!(prepared.session_id, session.session_id);
+    assert_eq!(prepared.source_id, session.conversation.source_id);
+    assert_eq!(prepared.status, SessionConversationStatusV1::Prepared);
+    assert_eq!(prepared.input_epoch, 0);
+    assert_eq!(
+        read(&other_scope)
+            .unwrap_err()
+            .downcast_ref::<IdentityFailureV1>(),
+        Some(&IdentityFailureV1::PermissionDenied)
+    );
+
+    let composer = SessionConversationComposerV1::new(
+        &retained.store,
+        &retained.owner,
+        &retained.source,
+        Duration::from_secs(10),
+    )
+    .unwrap();
+    composer
+        .admit_channel(
+            Uuid::new_v4(),
+            &session.session_id,
+            0,
+            channel_facts("destination-read"),
+            spawn_fixture("normal"),
+        )
+        .unwrap();
+    let active = read(&scope).unwrap();
+    assert_eq!(active.status, SessionConversationStatusV1::Active);
+    assert_eq!(active.input_epoch, 1);
+    assert_eq!(active.provider.as_deref(), Some("codex"));
+    let json = serde_json::to_value(active).unwrap();
+    assert!(json.get("runtime_instance").is_none());
+    assert!(json.get("worker_id").is_none());
+    let previous: (String, i64, String) = retained
+        .store
+        .db
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT binding_json,event_seq,event_hash FROM session_conversations WHERE session_id=?1",
+            [&session.session_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+
+    composer.stop(Uuid::new_v4(), &session.session_id).unwrap();
+    let closed = read(&scope).unwrap();
+    assert_eq!(closed.status, SessionConversationStatusV1::Closed);
+    assert_eq!(closed.input_epoch, 1);
+    retained
+        .store
+        .db
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE session_conversations SET binding_json=?1,event_seq=?2,event_hash=?3 WHERE session_id=?4",
+            params![previous.0, previous.1, previous.2, session.session_id],
+        )
+        .unwrap();
+    assert!(
+        read(&scope).is_err(),
+        "a valid earlier binding cannot supersede STOP"
+    );
+}
+
 /// The composed journey: launch retains the binding, the admission binds the
 /// exact channel durably, two queued instructions reach the fixture worker as
 /// complete framed turns and are acknowledged by the exact correlated

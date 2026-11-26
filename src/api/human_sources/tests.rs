@@ -533,7 +533,11 @@ async fn modern_route_matrix_closes_before_body_extractors_and_store() {
     for (path, methods) in REGISTERED_ROUTES {
         for method in *methods {
             if *method == "GET"
-                && (OWNED_HUMAN_GET_PATHS.contains(path) || *path == HUMAN_EVENT_DETAIL_PATH)
+                && (OWNED_HUMAN_GET_PATHS.contains(path)
+                    || matches!(
+                        *path,
+                        HUMAN_EVENT_DETAIL_PATH | HUMAN_SESSION_CONVERSATION_PATH
+                    ))
                 || *path == "/healthz"
                 || *path == "/api/v1/status" && ["GET", "HEAD"].contains(method)
             {
@@ -557,7 +561,8 @@ async fn modern_route_matrix_closes_before_body_extractors_and_store() {
                 .replace("{create_id}", "synthetic")
                 .replace("{operation_id}", "synthetic")
                 .replace("{arm_id}", "synthetic")
-                .replace("{membership_id}", "synthetic");
+                .replace("{membership_id}", "synthetic")
+                .replace("{session_id}", "915e4e07-26a2-4d71-a45f-3b602a8dcf93");
             let request = axum::http::Request::builder()
                 .method(*method)
                 .uri(&path)
