@@ -166,7 +166,7 @@ fn workload_count_and_byte_limits_protect_both_reserves_and_other_principals() {
                 .admit_workload(&prefix, &control, &policy, physical, total, cost, &b)
                 .is_err()
         );
-        cache
+        let error = cache
             .admit(
                 &prefix,
                 &control,
@@ -175,7 +175,11 @@ fn workload_count_and_byte_limits_protect_both_reserves_and_other_principals() {
                 cost,
                 Class::OrdinaryWrite,
             )
-            .unwrap();
+            .unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<AuditCapacityFailureV1>(),
+            Some(&AuditCapacityFailureV1::OrdinaryWriteBudgetExhausted)
+        );
         cache
             .admit(
                 &prefix,
