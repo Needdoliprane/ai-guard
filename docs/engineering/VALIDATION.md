@@ -1,5 +1,29 @@
 # Validation courante
 
+## 26 novembre 2026 — contraintes MySQL owned 14 et 15 sous TLS
+
+Le diagnostic reproduit la divergence en format 14 au rang 23 sur 94.
+MySQL 8.4.13 échappe les deux apostrophes du littéral binaire dans le
+dictionnaire de `ai_guard_supervision_meta_protocol`. Le format 15
+reste non exécuté lors de ce premier diagnostic. Manifeste
+`c7442c07268c9d55ca3c03571f27dc8d8d72831363201a467954889f037ecae6`.
+
+Sur `8e16237b` (arbre `75b9f7c5`), l’attendu Rust reprend ces octets.
+Le DDL reste identique. La régression isolée vérifie que la comparaison
+continue à refuser la variante sans échappement. Sur MySQL 8.4.13 ARM64,
+le conducteur applique le DDL extrait de ce gel à deux schémas jetables
+et compare les tuples. Il sort 0 et confirme 94/94 en format 14 et
+120/120 en format 15. `HEX(CHECK_CLAUSE)` confirme les deux séquences
+`5C27` dans chaque format. Le client vérifie l’identité du serveur en
+TLS 1.3 sur la boucle locale du réseau du conteneur. La fermeture du
+projet Docker est confirmée. Reçu et manifeste privés
+`8011c0ed2ab502ea31f6b0a9f417096934a8cbde70aea7f2cc5b616bfdabeca2`
+et `be0bdcfc4f940e654ff73cdaf8a57e5e9ce7dd8e75c06546f57855928d09ab02`.
+
+La preuve couvre le dictionnaire des contraintes. Le libtest de
+préparation sous verrou, la publication et sa reprise, l’admission par
+le gateway, le chemin réseau distant et le profil mTLS restent ouverts.
+
 ## 25 novembre 2026 — terminal Full3 et publication de la possession
 
 Sur `21695ce9` (arbre `ef0b03d8`), le lien du test et du CLI aboutit en
