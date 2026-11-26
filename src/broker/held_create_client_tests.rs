@@ -90,7 +90,7 @@ impl Fixture {
     pub(crate) fn new(tenant: &str) -> Self {
         let directory = tempfile::Builder::new()
             .permissions(fs::Permissions::from_mode(0o700))
-            .tempdir()
+            .tempdir_in(fs::canonicalize(std::env::temp_dir()).unwrap())
             .expect("private held-client fixture directory");
         let store_path = directory.path().join("tenant.sqlite");
         let store = Store::open_for_tenant(&store_path, tenant, Redactor::new(vec![]), 10_000)
@@ -1558,7 +1558,7 @@ async fn dropping_a_waiter_keeps_the_material_slot_until_owned_revalidation_fini
 fn constructor_bounds_known_secrets_and_includes_the_bearer_in_its_distinct_count() {
     let root = tempfile::Builder::new()
         .permissions(fs::Permissions::from_mode(0o700))
-        .tempdir()
+        .tempdir_in(fs::canonicalize(std::env::temp_dir()).unwrap())
         .expect("private constructor-only fixture");
 
     let max_value_accepted = client_from_config_secrets(&root, vec!["z".repeat(4096)]).is_ok();
