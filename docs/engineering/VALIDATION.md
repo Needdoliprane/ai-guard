@@ -1,5 +1,28 @@
 # Validation courante
 
+## 26 novembre 2026 — CI du candidat session
+
+Sur `16dd21b9`, le job front et les vérifications Rust préalables
+passent. Le job Rust échoue à la suite logicielle. Le relevé du journal
+compte 37 échecs sur 10 cibles, dont 21 dans le libtest et 16 dans les
+tests d’intégration. Les noms des résultats et la première cause
+observée sont conservés par cible. La fixture Legacy de
+`runtime_authorization` retourne HTTP 404 avant les assertions de
+décision, faute de chemin correspondant au client. Le cas de capacité
+workload atteint une réserve protégée. Les autres familles conservent
+leurs verdicts. [CI du commit exact](https://github.com/Needdoliprane/ai-guard/actions/runs/45775954951).
+
+## 26 novembre 2026 — préparation Rust MySQL owned sous verrou
+
+Sur `851afb6c` (arbre `a358a2da`), Cargo lie le libtest, puis le
+conducteur confirme le sélecteur `owned_audit_tables_remain_unpublished_and_refuse_reentry`
+et négocie TLS 1.3. L’exécution sort 101 avec la catégorie de harnais
+`LEGACY_REFUSAL`. Conteneur, réseau, port loopback et fichiers privés
+sont fermés et vérifiés. Après ce refus, mTLS reste non exécuté. Le
+reçu privé porte l’empreinte
+`773096a7450a98add00a55a99ea9ebc2c7cd6c2e0240677930a930cd11350d71`.
+Le résultat du dictionnaire sur `8e16237b` garde son propre périmètre.
+
 ## 26 novembre 2026 — terminal métier et fermeture Full3
 
 Sur `b696d94b` (arbre `79b92a72`), Cargo lie le CLI et le test
