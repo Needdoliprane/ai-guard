@@ -45,7 +45,11 @@ use crate::human_authority::{
 };
 use std::{
     collections::BTreeMap,
-    sync::{Arc, Mutex},
+    io,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant},
 };
 use uuid::Uuid;
@@ -54,6 +58,7 @@ use uuid::Uuid;
 /// the turn keeps its truthful durable status and the channel is freed; no
 /// instruction is ever resent.
 const MAX_RECONCILE_FRAMES: usize = 256;
+const READ_RETIREMENT_CHECK_INTERVAL: Duration = Duration::from_millis(50);
 
 /// Bounded acquisition of the owned-source epoch gate. The gate is a real
 /// single-writer exclusion: a concurrent short transaction (or STOP) may hold
@@ -71,6 +76,33 @@ struct BoundConversation {
     channel: StdioConversation,
 }
 
+struct ConversationSlot {
+    retiring: AtomicBool,
+    bound: Mutex<BoundConversation>,
+}
+
+impl ConversationSlot {
+    fn next_response(
+        &self,
+        channel: &mut StdioConversation,
+        deadline: Instant,
+    ) -> io::Result<String> {
+        loop {
+            if self.retiring.load(Ordering::Acquire) {
+                return Err(io::ErrorKind::Interrupted.into());
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(io::ErrorKind::TimedOut.into());
+            }
+            match channel.read_line(remaining.min(READ_RETIREMENT_CHECK_INTERVAL)) {
+                Err(error) if error.kind() == io::ErrorKind::TimedOut => continue,
+                result => return result,
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 struct BeforeWritePause {
     min_written: usize,
@@ -85,7 +117,7 @@ pub struct SessionConversationComposerV1<'a> {
     owner: &'a OwnedHumanSources,
     source: &'a OwnedSourceToken,
     read_deadline: Duration,
-    sessions: Mutex<BTreeMap<String, Arc<Mutex<BoundConversation>>>>,
+    sessions: Mutex<BTreeMap<String, Arc<ConversationSlot>>>,
     #[cfg(test)]
     before_write: Mutex<Option<BeforeWritePause>>,
     #[cfg(test)]
@@ -210,12 +242,15 @@ impl<'a> SessionConversationComposerV1<'a> {
             },
         )?;
         let fingerprint = binding.fingerprint()?;
-        let slot = Arc::new(Mutex::new(BoundConversation {
-            binding: binding.clone(),
-            fingerprint,
-            adapter: ConversationAdapterV1::new(),
-            channel: stdio,
-        }));
+        let slot = Arc::new(ConversationSlot {
+            retiring: AtomicBool::new(false),
+            bound: Mutex::new(BoundConversation {
+                binding: binding.clone(),
+                fingerprint,
+                adapter: ConversationAdapterV1::new(),
+                channel: stdio,
+            }),
+        });
         let replaced = self
             .sessions
             .lock()
@@ -226,7 +261,8 @@ impl<'a> SessionConversationComposerV1<'a> {
         if let Some(replaced) = replaced {
             // The durable bind committed: the replaced attempt's channel is
             // torn down explicitly, never by a message.
-            let mut old = replaced.lock().expect("replaced conversation");
+            replaced.retiring.store(true, Ordering::Release);
+            let mut old = replaced.bound.lock().expect("replaced conversation");
             old.adapter.close_turn();
             old.channel.close();
         }
@@ -261,7 +297,7 @@ impl<'a> SessionConversationComposerV1<'a> {
             }
             .into());
         };
-        let mut guard = slot.lock().expect("admitted conversation");
+        let mut guard = slot.bound.lock().expect("admitted conversation");
         let bound = &mut *guard;
         let mut receipts = Vec::new();
         loop {
@@ -342,11 +378,12 @@ impl<'a> SessionConversationComposerV1<'a> {
                 )?
             };
             let mut acknowledged = false;
+            let reconcile_until = Instant::now() + self.read_deadline;
             for _ in 0..MAX_RECONCILE_FRAMES {
-                let line = match bound.channel.read_line(self.read_deadline) {
+                let line = match slot.next_response(&mut bound.channel, reconcile_until) {
                     Ok(line) => line,
-                    // Cut or timeout: no reconcilable observation. The durable
-                    // status stays truthful; the turn is freed, never resent.
+                    // Retirement, EOF or timeout ends the wait without changing
+                    // the last durably observed status.
                     Err(_) => break,
                 };
                 let Ok(value) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
@@ -400,6 +437,9 @@ impl<'a> SessionConversationComposerV1<'a> {
                 bound.adapter.close_turn();
             }
             receipts.push(receipt);
+            if slot.retiring.load(Ordering::Acquire) {
+                break;
+            }
         }
         Ok(receipts)
     }
@@ -435,11 +475,14 @@ impl<'a> SessionConversationComposerV1<'a> {
             .get(session_id)
             .cloned();
         if let Some(slot) = slot {
+            // The durable close succeeded. Wake an in-progress reconciliation
+            // before waiting to own and reap its exact channel.
+            slot.retiring.store(true, Ordering::Release);
             #[cfg(test)]
             if let Some(observer) = &self.stop_slot_observer {
                 let _ = observer.send(());
             }
-            let mut bound = slot.lock().expect("admitted conversation");
+            let mut bound = slot.bound.lock().expect("admitted conversation");
             bound.adapter.close_turn();
             bound.channel.close_and_reap()?;
             // A replay must find this slot until teardown has completed.
