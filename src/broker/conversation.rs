@@ -82,20 +82,28 @@ struct ConversationSlot {
 }
 
 impl ConversationSlot {
+    fn is_retiring(&self) -> bool {
+        self.retiring.load(Ordering::Acquire)
+    }
+
     fn next_response(
         &self,
         channel: &mut StdioConversation,
         deadline: Instant,
     ) -> io::Result<String> {
         loop {
-            if self.retiring.load(Ordering::Acquire) {
+            if self.is_retiring() {
                 return Err(io::ErrorKind::Interrupted.into());
             }
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
                 return Err(io::ErrorKind::TimedOut.into());
             }
-            match channel.read_line(remaining.min(READ_RETIREMENT_CHECK_INTERVAL)) {
+            let result = channel.read_line(remaining.min(READ_RETIREMENT_CHECK_INTERVAL));
+            if self.is_retiring() {
+                return Err(io::ErrorKind::Interrupted.into());
+            }
+            match result {
                 Err(error) if error.kind() == io::ErrorKind::TimedOut => continue,
                 result => return result,
             }
@@ -127,8 +135,8 @@ pub struct SessionConversationComposerV1<'a> {
 }
 
 impl<'a> SessionConversationComposerV1<'a> {
-    /// Compose over one retained owned source. The read deadline bounds each
-    /// response observation; it never extends the binding's original expiry.
+    /// Compose over one retained owned source. The read deadline bounds the
+    /// response reads for one turn; it never extends the binding's expiry.
     pub fn new(
         store: &'a Store,
         owner: &'a OwnedHumanSources,
@@ -196,9 +204,34 @@ impl<'a> SessionConversationComposerV1<'a> {
     }
 
     fn write_epoch_until(&self, deadline: Instant) -> anyhow::Result<HumanSourcesWriteEpoch> {
+        Self::retry_write_epoch_until(deadline, || self.owner.try_write_epoch())
+    }
+
+    fn acknowledgement_epoch(
+        &self,
+        slot: &ConversationSlot,
+    ) -> anyhow::Result<Option<HumanSourcesWriteEpoch>> {
+        Self::retry_write_epoch_until(Instant::now() + EPOCH_RETRY_DEADLINE, || {
+            if slot.is_retiring() {
+                return Ok(None);
+            }
+            let epoch = self.owner.try_write_epoch();
+            // Retirement is published under the write epoch. A successful
+            // acquisition can commit the ACK only if it won that ordering.
+            if slot.is_retiring() {
+                return Ok(None);
+            }
+            epoch.map(Some)
+        })
+    }
+
+    fn retry_write_epoch_until<T>(
+        deadline: Instant,
+        mut try_epoch: impl FnMut() -> Result<T, HumanAuthorityFailure>,
+    ) -> anyhow::Result<T> {
         loop {
-            match self.owner.try_write_epoch() {
-                Ok(epoch) => return Ok(epoch),
+            match try_epoch() {
+                Ok(result) => return Ok(result),
                 Err(HumanAuthorityFailure::GateBusy) if Instant::now() < deadline => {
                     std::thread::sleep(
                         EPOCH_RETRY_INTERVAL
@@ -300,12 +333,13 @@ impl<'a> SessionConversationComposerV1<'a> {
             .lock()
             .expect("conversation registry")
             .insert(session_id.into(), slot);
+        if let Some(replaced) = &replaced {
+            // Publish retirement under the same epoch as the durable rebind.
+            replaced.retiring.store(true, Ordering::Release);
+        }
         // A replaced dispatch can need an epoch while it still owns the slot.
         drop(epoch);
         if let Some(replaced) = replaced {
-            // The durable bind committed: the replaced attempt's channel is
-            // torn down explicitly, never by a message.
-            replaced.retiring.store(true, Ordering::Release);
             let mut old = replaced.bound.lock().expect("replaced conversation");
             old.adapter.close_turn();
             old.channel.close();
@@ -450,7 +484,9 @@ impl<'a> SessionConversationComposerV1<'a> {
                                     pause();
                                 }
                             }
-                            let epoch = self.write_epoch()?;
+                            let Some(epoch) = self.acknowledgement_epoch(&slot)? else {
+                                break;
+                            };
                             receipt = self.store.record_session_message_acknowledged_scoped(
                                 &epoch,
                                 self.source,
@@ -488,7 +524,7 @@ impl<'a> SessionConversationComposerV1<'a> {
                 bound.adapter.close_turn();
             }
             receipts.push(receipt);
-            if slot.retiring.load(Ordering::Acquire) {
+            if slot.is_retiring() {
                 break;
             }
         }
@@ -516,19 +552,20 @@ impl<'a> SessionConversationComposerV1<'a> {
                 session_id: session_id.into(),
             },
         )?;
-        // The durable close already fences writing. Dispatch must be able to
-        // read that close under its own epoch while it still owns the slot.
-        drop(epoch);
         let slot = self
             .sessions
             .lock()
             .expect("conversation registry")
             .get(session_id)
             .cloned();
-        if let Some(slot) = slot {
-            // The durable close succeeded. Interrupt any in-progress
-            // reconciliation before waiting to reap its exact channel.
+        if let Some(slot) = &slot {
+            // Publish retirement under the same epoch as the durable close.
             slot.retiring.store(true, Ordering::Release);
+        }
+        // Dispatch may still need an epoch to observe closure while it owns
+        // the slot. Wait for teardown only after releasing the epoch.
+        drop(epoch);
+        if let Some(slot) = slot {
             #[cfg(test)]
             if let Some(observer) = &self.stop_slot_observer {
                 let _ = observer.send(());
