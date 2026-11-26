@@ -69,3 +69,31 @@
   .human-broker-evaluation, .human-broker-footnote { padding: 14px 18px; }
   .human-broker-details > div { grid-template-columns: minmax(0, 1fr); gap: 8px; }
 }
+
+/* Nouvelle session : the prepare→launch journey. Editorial surfaces, thin lines, 4px radius, Courier repères. */
+.sl { display: grid; gap: 20px; max-width: 860px; }
+.sl-form, .sl-card { padding: 24px; display: grid; gap: 16px; }
+.sl-form h2, .sl-card h3 { margin: 0; font-size: 22px; letter-spacing: -0.01em; }
+.sl-field { display: grid; gap: 6px; }
+.sl-input { font-family: "Courier New", Courier, monospace; font-size: 13px; }
+.sl-actions { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
+.sl-phase { font-size: 14px; color: var(--muted); }
+.sl-status { display: grid; gap: 12px; }
+.sl-result { display: grid; gap: 20px; }
+.sl-card-head { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.sl-card-head h3 { flex: 1 1 auto; }
+.sl-rows { display: grid; gap: 0; border-top: 1px solid var(--line); }
+.sl-row { display: grid; grid-template-columns: minmax(140px, 220px) minmax(0, 1fr); gap: 16px; padding: 10px 0; border-bottom: 1px solid var(--line); align-items: baseline; }
+.sl-row-label { font: 11px/1.4 "Courier New", Courier, monospace; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); }
+.sl-row-value { font-size: 14px; overflow-wrap: anywhere; }
+.sl-row .mono { font-size: 13px; overflow-wrap: anywhere; }
+.sl-conversation { display: grid; gap: 12px; border-top: 1px solid var(--line); padding-top: 16px; }
+.sl-conversation h4 { margin: 0; font-size: 15px; }
+.sl-warning { max-width: none; padding: 14px 16px; border: 1px solid var(--amber-border); border-radius: 4px; background: var(--amber-bg); color: var(--amber-text); font-size: 13px; }
+@media (max-width: 720px) {
+  .sl-form, .sl-card { padding: 18px; }
+  .sl-row { grid-template-columns: minmax(0, 1fr); gap: 4px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .sl * { transition: none !important; animation: none !important; }
+}

@@ -7,6 +7,8 @@ import { ADMIN_PAGE_BYTES, adminUrls, grantChangeBody, membershipChangeBody, par
   parseMembershipChangeReceipt, parseMembershipPage, parseUsagePage, type GrantChange, type GrantChangeReceipt, type HumanConfiguration, type HumanGrant,
   type HumanQuota, type MembershipChange, type MembershipChangeReceipt, type MembershipPage, type UsagePage } from "./admin-model.ts";
 import { OPERATION_FACTS, access, availabilityText } from "./access-model.ts";
+import { parseSessionLaunchReceipt, parseSessionPrepareReceipt, sessionLaunchBody, sessionLaunchUrls, sessionPrepareBody,
+  type SessionLaunchReceipt, type SessionLaunchRequest, type SessionPrepareReceipt, type SessionPrepareRequest } from "./session-launch-model.ts";
 
 export class HumanSuperseded extends Error { constructor() { super("Lecture abandonnée après changement de contexte."); } }
 export class HumanApiError extends Error {
@@ -136,7 +138,9 @@ export class HumanApiClient {
       !/^\/api\/v1\/human\/federation\/workers(?:\?[^#]*)?$/.test(path) && !/^\/api\/v1\/human\/events\/recent(?:\?[^#]*)?$/.test(path) &&
       !/^\/api\/v1\/human\/owned\/brokers(?:\?[^#]*)?$/.test(path) &&
       !/^\/api\/v1\/human\/admin\/(memberships|quota|usage|configuration|grants)(?:\?[^#]*)?$/.test(path) &&
-      !(body !== undefined && /^\/api\/v1\/human\/admin\/memberships\/[0-9a-fA-F-]{36}$/.test(path))) throw new HumanContractError();
+      !(body !== undefined && /^\/api\/v1\/human\/admin\/memberships\/[0-9a-fA-F-]{36}$/.test(path)) &&
+      !(body !== undefined && /^\/api\/v1\/human\/owned\/sessions\/(prepare|launch)$/.test(path)) &&
+      !(body === undefined && /^\/api\/v1\/human\/owned\/sessions\/preparations\/[0-9a-f-]{36}$/.test(path))) throw new HumanContractError();
     // The durable read budget bounds reads; a change is not a read and keeps its own refusals.
     if (this.#readBudgetStopped && body === undefined) {
       if (!this.#operatorReadAllowed || stream) throw new HumanApiError(429, "audit_read_budget_exhausted", "Lecture automatique suspendue : budget durable de lecture atteint. Contactez l’opérateur.", "contact_operator");
@@ -341,6 +345,38 @@ export class HumanApiClient {
     this.#served(snapshot, "configuration_read");
     const body = await this.#json(await this.#request(adminUrls.configuration(), snapshot, signal), snapshot, ADMIN_PAGE_BYTES);
     return this.#finishRead(parseHumanConfiguration(body.value, this.#anchors(snapshot)), snapshot, signal);
+  }
+  /**
+   * Retain one nominative launch preparation on the caller's own owned source. The control revalidates the personal
+   * launch context and commits the mandatory audit before the receipt; prepare creates no grant, reservation or start
+   * claim. The caller keeps `operation_id` across retries: an exact replay returns the retained receipt, a divergent
+   * intent under the same operation is a conflict.
+   */
+  async sessionPrepare(request: SessionPrepareRequest, signal?: AbortSignal): Promise<SessionPrepareReceipt> {
+    const snapshot = this.#snapshot(true);
+    this.#served(snapshot, "session_launch_prepare");
+    const text = sessionPrepareBody(request);
+    const body = await this.#json(await this.#request(sessionLaunchUrls.prepare(), snapshot, signal, false, text), snapshot, ADMIN_PAGE_BYTES);
+    return this.#finishRead(parseSessionPrepareReceipt(body.value, { operationId: request.operation_id, launchTargetId: request.launch_target_id }), snapshot, signal);
+  }
+  /**
+   * Commit one retained preparation as a real nominative session launch. The control commits the launch audit, the
+   * nominative grant and the retained conversation binding together before the receipt. Accepted launch is not a
+   * running worker: the supervised admission and the runtime-observed start remain the broker's separate effect.
+   */
+  async sessionLaunch(request: SessionLaunchRequest, signal?: AbortSignal): Promise<SessionLaunchReceipt> {
+    const snapshot = this.#snapshot(true);
+    this.#served(snapshot, "session_launch");
+    const text = sessionLaunchBody(request);
+    const body = await this.#json(await this.#request(sessionLaunchUrls.launch(), snapshot, signal, false, text), snapshot, ADMIN_PAGE_BYTES);
+    return this.#finishRead(parseSessionLaunchReceipt(body.value, { operationId: request.operation_id, launchTargetId: request.launch_target_id }), snapshot, signal);
+  }
+  /** Read one retained preparation receipt for a still-authorized caller; revocation closes the read. */
+  async sessionPreparation(operationId: string, signal?: AbortSignal): Promise<SessionPrepareReceipt> {
+    const snapshot = this.#snapshot(true);
+    this.#served(snapshot, "session_launch_prepare");
+    const body = await this.#json(await this.#request(sessionLaunchUrls.preparation(operationId), snapshot, signal), snapshot, ADMIN_PAGE_BYTES);
+    return this.#finishRead(parseSessionPrepareReceipt(body.value, { operationId }), snapshot, signal);
   }
   async federationWorkers(selection: HumanFederationSelection = {}, signal?: AbortSignal) {
     const snapshot = this.#snapshot(true);
