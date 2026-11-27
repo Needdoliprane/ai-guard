@@ -267,7 +267,14 @@ impl Store {
         for (_, _, sql) in SCHEMA {
             tx.execute_batch(sql)?;
         }
-        let stored = self.append_authorized_in_transaction(tx, event, payload, &clock)?;
+        let stored = self.append_with_authorized_capacity_class_at(
+            tx,
+            event,
+            payload,
+            capacity::Class::OrdinaryWrite,
+            &clock,
+            Utc::now(),
+        )?;
         tx.execute(
             "INSERT INTO legacy_session_prepare_meta(singleton,genesis_seq,genesis_hash) VALUES(1,?1,?2)",
             params![stored.seq, stored.hash],
@@ -327,7 +334,14 @@ impl Store {
             event.data == expected,
             "Legacy session launch target requires redaction"
         );
-        let stored = self.append_authorized_in_transaction(&tx, event, payload, &clock)?;
+        let stored = self.append_with_authorized_capacity_class_at(
+            &tx,
+            event,
+            payload,
+            capacity::Class::OrdinaryWrite,
+            &clock,
+            Utc::now(),
+        )?;
         let version = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
         validate_target_event(&tx, version, &stored)?;
         self.commit_authorized(tx, &clock)?;

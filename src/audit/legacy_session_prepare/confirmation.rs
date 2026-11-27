@@ -476,7 +476,8 @@ impl Store {
             anyhow::ensure!(record.request == request, IdentityFailureV1::Conflict);
             authorize_target_replay(&tx, &record, &initiator)?;
             let receipt = prepared_receipt(&stored, &record, true)?;
-            self.commit_checked(tx)?;
+            self.commit_authorized(tx, &clock)?;
+            anyhow::ensure!(expires > Utc::now(), IdentityFailureV1::InvalidRequest);
             return Ok(receipt);
         }
         let worker_operation: bool = tx.query_row(
@@ -534,7 +535,8 @@ impl Store {
             anyhow::ensure!(record.request == request, IdentityFailureV1::Conflict);
             authorize_target_replay(&tx, &prepared, &initiator)?;
             let receipt = confirmed_receipt(&confirmed, &record, true);
-            self.commit_checked(tx)?;
+            self.commit_authorized(tx, &clock)?;
+            anyhow::ensure!(deadline > Utc::now(), IdentityFailureV1::ContextRevoked);
             return Ok(receipt);
         }
         let expires = deadline.min(crate::broker_registry::parse_time(

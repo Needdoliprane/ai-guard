@@ -1445,6 +1445,7 @@ where
         if proof.redactor.value_unclipped(&value) != value {
             return Err(super::human_sources::unavailable());
         }
+        context.ensure_valid().map_err(state_failure)?;
         Ok(Json(result))
     })
     .await
