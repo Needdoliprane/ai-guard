@@ -1,5 +1,23 @@
 # Validation courante
 
+## 27 novembre 2026 — écriture et fermeture d’une conversation
+
+Le libtest Darwin ARM64 de `b15b974e` (arbre `bf962286`) compile.
+Huit sélecteurs passent une fois chacun. Ils vérifient la récolte du
+processus stdio de recette à l’abandon du canal, deux tours de dialogue,
+l’incertitude après une coupure, les arrêts avant le premier octet et
+pendant l’attente d’un acquittement, le rejeu d’arrêt, la conservation du
+prédécesseur exact et l’absence de redirection d’un message épinglé.
+
+La vérification de l’autorité précède chaque écriture non bloquante.
+La fermeture explicite donne deux secondes à l’observation de la sortie
+du processus. Une sortie non confirmée reste à examiner lors du rejeu.
+Manifeste privé du gel
+`f48742c7256fcb46018f6b9af1fc3fde080ff68a322ec944865a30a4fe079cb7`.
+Les sources Rust du gel sont reprises dans `1fd4b524`. La qualification
+exacte du commit d’intégration, le canal fournisseur réel, l’identité du
+thread natif et la preuve de reprise après perte de liaison restent ouverts.
+
 ## 27 novembre 2026 — cible Prepare, garde stdin E3 et fenêtres OIDC
 
 Le libtest Darwin ARM64 du gel `302e0db7` (arbre `ce6381d5`) compile.
