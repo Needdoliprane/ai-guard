@@ -46,7 +46,7 @@ The Legacy CLI uses a local named account and a personal context with `launch_se
 
    The JSON receipt returns `target_id`, `target_revision`, `audit_seq` and `audit_hash`. Reusing the same target file and revision returns the same audit receipt with `replayed: true`. Give the named user the target ID and revision. Resume the Legacy gateway for the human requests below.
 
-   A new active target and a new preparation require the grant's current workload credential to belong to the selected broker and incarnation and remain valid. After a revocation, restore a valid broker binding. Publish a new target revision when the grant revision changes.
+   Publishing an active target, preparing a launch and confirming it for the first time require a valid workload credential for the broker and incarnation named by the grant. After a revocation, restore a valid broker binding. Publish a new target revision when the grant revision changes.
 
 ### Named request and replay
 
