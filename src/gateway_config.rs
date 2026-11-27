@@ -6,6 +6,7 @@ use agentsandbox::control::kubernetes_session::{
 #[cfg(feature = "mysql-storage")]
 use agentsandbox::diagnostics::gateway_files::{
     MAX_REGISTRY_BYTES, MySqlAuthenticationFiles, MySqlStorageFiles, TenantRegistryFiles,
+    TenantStorageFiles,
 };
 use agentsandbox::diagnostics::gateway_files::{
     SelectedTenantStorage, decode_tenant_registry, read_tenant_registry_file, storage_for_gateway,
@@ -412,6 +413,7 @@ pub fn load(path: &Path) -> Result<Vec<ConfiguredTenant>> {
 pub(crate) enum MysqlPreparationProfileRefusal {
     SharedSchema,
     SharedUser,
+    SharedGatewayUser,
     TargetMismatch,
 }
 
@@ -419,10 +421,11 @@ pub(crate) enum MysqlPreparationProfileRefusal {
 impl std::fmt::Display for MysqlPreparationProfileRefusal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
-            Self::SharedSchema => {
-                "Each MySQL host, port and schema in a publication registry must belong to one tenant"
-            }
+            Self::SharedSchema => "Each MySQL host, port and schema must belong to one tenant",
             Self::SharedUser => "MySQL publication requires different operator and gateway usernames",
+            Self::SharedGatewayUser => {
+                "MySQL gateway tenants on the same configured host and port require distinct usernames"
+            }
             Self::TargetMismatch => {
                 "MySQL operator and gateway profiles must select the same host, port, schema and namespace"
             }
@@ -447,8 +450,8 @@ pub(crate) fn load_mysql_preparation_target(
     let gateway_file = PrivateFile::open(&absolute_path(gateway_path)?, MAX_REGISTRY_BYTES)?;
     let operator_registry = decode_tenant_registry(operator_file.bytes())?;
     let gateway_registry = decode_tenant_registry(gateway_file.bytes())?;
-    let operator_profiles = mysql_preparation_profiles(&operator_registry)?;
-    let gateway_profiles = mysql_preparation_profiles(&gateway_registry)?;
+    let operator_profiles = mysql_registry_profiles(&operator_registry)?;
+    let gateway_profiles = mysql_gateway_profiles(&gateway_registry)?;
     let (Some(operator), Some(gateway)) = (
         operator_profiles.get(tenant_id).copied(),
         gateway_profiles.get(tenant_id).copied(),
@@ -482,7 +485,7 @@ pub(crate) fn load_mysql_preparation_target(
 }
 
 #[cfg(feature = "mysql-storage")]
-fn mysql_preparation_profiles(
+fn mysql_registry_profiles(
     registry: &TenantRegistryFiles,
 ) -> Result<BTreeMap<&str, &MySqlStorageFiles>> {
     use agentsandbox::tenancy::validate_tenant_id;
@@ -516,6 +519,28 @@ fn mysql_preparation_profiles(
     Ok(profiles)
 }
 
+#[cfg(feature = "mysql-storage")]
+fn mysql_gateway_profiles(
+    registry: &TenantRegistryFiles,
+) -> Result<BTreeMap<&str, &MySqlStorageFiles>> {
+    let profiles = mysql_registry_profiles(registry)?;
+    let mut accounts = BTreeSet::new();
+    for profile in profiles.values() {
+        // Compare configured endpoints. Physical identity and grants require
+        // separate deployment evidence.
+        let account = (
+            profile.host.to_ascii_lowercase(),
+            profile.port,
+            profile.username.as_str(),
+        );
+        anyhow::ensure!(
+            accounts.insert(account),
+            MysqlPreparationProfileRefusal::SharedGatewayUser
+        );
+    }
+    Ok(profiles)
+}
+
 pub(crate) fn load_from_retained_registry(
     file: &agentsandbox::control_fs::PrivateFile,
     load_token: impl FnMut(&Path) -> Result<String>,
@@ -532,6 +557,14 @@ fn load_registry_bytes(
     mut load_token: impl FnMut(&Path) -> Result<String>,
 ) -> Result<Vec<ConfiguredTenant>> {
     let registry = decode_tenant_registry(bytes)?;
+    #[cfg(feature = "mysql-storage")]
+    if registry
+        .tenants
+        .iter()
+        .any(|tenant| matches!(tenant.storage.as_ref(), Some(TenantStorageFiles::MySql(_))))
+    {
+        mysql_gateway_profiles(&registry)?;
+    }
     let parent = path
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -1146,6 +1179,77 @@ mod tests {
                 Some(&MysqlPreparationProfileRefusal::SharedSchema)
             );
         }
+    }
+
+    #[cfg(feature = "mysql-storage")]
+    #[test]
+    fn mysql_gateway_refuses_shared_schema_or_account_before_loading_material() {
+        let dir = tempfile::tempdir().unwrap();
+        let operator = dir.path().join("operator.json");
+        let gateway = dir.path().join("gateway.json");
+        write_mysql_preparation_registry(
+            &operator,
+            &[("tenant-a", mysql_preparation_storage("operator_a"))],
+        );
+        let primary = mysql_preparation_storage("gateway_a");
+        let mut secondary = mysql_preparation_storage("gateway_b");
+        secondary["host"] = json!("DB.example.invalid");
+        secondary["namespace"] = json!("6657019d-5302-4ced-922f-406aa3d8ec5c");
+        secondary["authentication"] = json!({"mode": "password"});
+
+        for (database, username, expected) in [
+            (
+                "audit_a",
+                "gateway_b",
+                MysqlPreparationProfileRefusal::SharedSchema,
+            ),
+            (
+                "audit_b",
+                "gateway_a",
+                MysqlPreparationProfileRefusal::SharedGatewayUser,
+            ),
+        ] {
+            secondary["database"] = json!(database);
+            secondary["username"] = json!(username);
+            write_mysql_preparation_registry(
+                &gateway,
+                &[
+                    ("tenant-a", primary.clone()),
+                    ("tenant-b", secondary.clone()),
+                ],
+            );
+
+            let error = load(&gateway).err().unwrap();
+            assert_eq!(
+                error.downcast_ref::<MysqlPreparationProfileRefusal>(),
+                Some(&expected)
+            );
+            let error = load_mysql_preparation_target(&operator, &gateway, "tenant-a").unwrap_err();
+            assert_eq!(
+                error.downcast_ref::<MysqlPreparationProfileRefusal>(),
+                Some(&expected)
+            );
+        }
+
+        secondary["username"] = json!("gateway_b");
+        write_mysql_preparation_registry(
+            &gateway,
+            &[
+                ("tenant-a", primary.clone()),
+                ("tenant-b", secondary.clone()),
+            ],
+        );
+        let registry = decode_tenant_registry(&std::fs::read(&gateway).unwrap()).unwrap();
+        assert_eq!(mysql_gateway_profiles(&registry).unwrap().len(), 2);
+
+        secondary["username"] = json!("gateway_a");
+        secondary["port"] = json!(3307);
+        write_mysql_preparation_registry(
+            &gateway,
+            &[("tenant-a", primary), ("tenant-b", secondary)],
+        );
+        let registry = decode_tenant_registry(&std::fs::read(&gateway).unwrap()).unwrap();
+        assert_eq!(mysql_gateway_profiles(&registry).unwrap().len(), 2);
     }
 
     #[cfg(feature = "mysql-storage")]
