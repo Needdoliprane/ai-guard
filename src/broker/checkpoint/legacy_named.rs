@@ -2730,8 +2730,34 @@ mod tests {
                 terminal_receipt.clone(),
             )
             .await?;
-        // Both calls queue their load against the same Writer head before
-        // either receives its response and can attempt the append.
+        let plan_base = verification_writer
+            .load(operation)
+            .await?
+            .ok_or(JournalError::Conflict)?;
+        let plan_base_lifecycle = plan_base
+            .broker_checkpoint_v3()
+            .ok_or(JournalError::Conflict)?;
+        let plan_base_head = plan_base.head().clone();
+        let pending_plan = plan_base
+            .broker_checkpoint_v2()
+            .and_then(|checkpoint| checkpoint.supervision().legacy_named_admission())
+            .ok_or(JournalError::Conflict)?
+            .clone()
+            .with_import_verification_plan(verification_helper_id)?;
+        let pending_supervision = plan_base_lifecycle
+            .broker()
+            .supervision()
+            .clone()
+            .with_legacy_named_admission(pending_plan)?;
+        let pending_broker = BrokerCheckpointV2::new(
+            plan_base_lifecycle.broker().runner().clone(),
+            pending_supervision,
+        )?;
+        let exact_pending_lifecycle =
+            BrokerCheckpointV3::new(pending_broker, plan_base_lifecycle.commands().to_vec())?;
+        // Exercise concurrent callers without depending on which one the
+        // executor polls first. A direct stale write below proves the exact
+        // same V3 candidate cannot publish twice from this saved head.
         let (inserted, concurrent) = tokio::join!(
             verification_writer
                 .record_legacy_named_import_verification_plan(&plan, verification_helper_id),
@@ -2740,6 +2766,12 @@ mod tests {
         );
         let inserted = inserted?;
         let concurrent = concurrent?;
+        assert_ne!(inserted.inserted(), concurrent.inserted());
+        let (inserted, concurrent) = if inserted.inserted() {
+            (&inserted, &concurrent)
+        } else {
+            (&concurrent, &inserted)
+        };
         assert!(inserted.inserted());
         assert!(!concurrent.inserted());
         assert!(equal(
@@ -2747,6 +2779,21 @@ mod tests {
             &verified_prefix.import_verification_permission()?
         )?);
         assert_eq!(inserted.parent_revision(), arm.expected_revision);
+        let committed_lifecycle = verification_writer
+            .load(operation)
+            .await?
+            .and_then(|job| job.broker_checkpoint_v3().cloned())
+            .ok_or(JournalError::Conflict)?;
+        assert_eq!(
+            committed_lifecycle.canonical_bytes()?,
+            exact_pending_lifecycle.canonical_bytes()?
+        );
+        assert!(matches!(
+            verification_writer
+                .advance_lifecycle(operation, plan_base_head, exact_pending_lifecycle.clone())
+                .await,
+            Err(JournalError::Conflict)
+        ));
         let planned_head = verification_writer
             .load(operation)
             .await?
@@ -2894,6 +2941,16 @@ mod tests {
                     Some(before_lifecycle),
                     Some(before_lifecycle.broker()),
                     before_stop.checkpoint(),
+                    None,
+                )
+                .is_err()
+        );
+        assert!(
+            forged_after_stop
+                .validate_transition(
+                    Some(after_stop_lifecycle),
+                    Some(after_stop_lifecycle.broker()),
+                    after_stop.checkpoint(),
                     None,
                 )
                 .is_err()
