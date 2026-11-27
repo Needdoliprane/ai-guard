@@ -1238,7 +1238,9 @@ impl Fixture {
         let process = ObservedChild::spawn_with_custody(
             &mut command,
             self.root.join(format!("{}.stderr", role.name())),
-            self.selection != Role::Legacy && !self.legacy_start_attempted,
+            self.selection != Role::Legacy
+                && !self.legacy_start_attempted
+                && !self.fresh_start_attempted,
         )?;
         self.enforcers.push((role, process));
         timeout(Duration::from_secs(10), async {
@@ -1355,7 +1357,7 @@ impl Fixture {
             &mut command,
             self.root
                 .join(format!("broker-{}.stderr", self.broker_starts)),
-            !fresh && !first_legacy && !self.legacy_start_attempted,
+            !fresh && !first_legacy && !self.legacy_start_attempted && !self.fresh_start_attempted,
         )?);
         self.fresh_start_attempted |= fresh;
         self.legacy_start_attempted |= first_legacy;
@@ -2257,7 +2259,7 @@ impl Fixture {
                 Some(owner) => {
                     let endpoint = Directory::open_existing(&self.broker_root.join("broker"))
                         .and_then(|role| {
-                            if legacy_started {
+                            if legacy_started || self.fresh_start_attempted {
                                 RetainedFixtureEndpoint::capture_sequence(role, self.broker_starts)
                             } else {
                                 RetainedFixtureEndpoint::capture(role)
@@ -2336,12 +2338,24 @@ impl Fixture {
         if read_closed_journal && let Some(check_journal) = check_journal {
             check_journal(&self.root);
         }
-        if (legacy_started || self.selection == Role::Legacy) && !engine_closed {
+        let comparison_guardians_closed = if ((legacy_started || self.selection == Role::Legacy)
+            && !engine_closed)
+            || (self.fresh_start_attempted && (!engine_closed || !broker_closed))
+        {
             failed = true;
+            false
         } else {
+            let mut closed = true;
             for (_, guardian) in &mut self.enforcers {
-                failed |= guardian.stop().await.is_err();
+                if guardian.stop().await.is_err() {
+                    failed = true;
+                    closed = false;
+                }
             }
+            closed
+        };
+        if guardian_closed && comparison_guardians_closed {
+            self.fresh_start_attempted = false;
         }
         if let Some(stop) = self.server_stop.take() {
             let _ = stop.send(());
@@ -2414,15 +2428,17 @@ impl Drop for Fixture {
                 let _ = child.child.start_kill();
             }
         }
-        let legacy_pending = self.legacy_start_attempted
+        let retained_custody_pending = self.fresh_start_attempted
+            || self.legacy_start_attempted
             || (self.selection == Role::Legacy
                 && self
                     .enforcers
                     .iter()
                     .any(|(_, child)| child.child.id().is_some()));
-        if legacy_pending {
+        if retained_custody_pending {
             println!(
-                "phase=fixture_drop category=legacy_reconciliation_required private_state_preserved=true guardian_attested={} broker_join_unconfirmed={} guardian_announcement={}",
+                "phase=fixture_drop category=retained_guardian_reconciliation_required private_state_preserved=true fresh_guardian_attested={} legacy_guardian_attested={} broker_join_unconfirmed={} guardian_announcement={}",
+                self.fresh_guardian.is_some(),
                 self.legacy_guardian.is_some(),
                 self.broker.is_some(),
                 self.broker_root
