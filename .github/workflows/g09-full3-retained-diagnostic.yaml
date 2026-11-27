@@ -13,8 +13,8 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
-      SOURCE_SHA: d2e3b46548cef7c5b3639ed226a88631d038b2a9
-      SOURCE_TREE: 1d53e93d1143a12543b597df381b34b232b68e04
+      SOURCE_SHA: e716b22c18c5757a944281042006a85bdaa388e7
+      SOURCE_TREE: a48b7478426b0110d8132261727c01431c444efb
       CARGO_BUILD_JOBS: '1'
       CARGO_INCREMENTAL: '0'
       CARGO_PROFILE_DEV_DEBUG: '0'
@@ -24,7 +24,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: d2e3b46548cef7c5b3639ed226a88631d038b2a9
+          ref: e716b22c18c5757a944281042006a85bdaa388e7
           persist-credentials: false
 
       - name: Verify the original Full3 assignment through Existing IPC
@@ -125,7 +125,7 @@ jobs:
           failed=0
           for selector in "${selectors[@]}"; do
             status=$(check_selector "$selector")
-            grep -E '^(full3_read_stage=(fresh_requested|fresh_ready|submitted|endpoint_retained|history_confirmed|existing_ready)|full3_read_cleanup=(closed|unconfirmed)|phase=full3_retained_relay category=(confirmed_no_effects|authorized_read_refused|unconfirmed_worker_arm reason=(Confirmed|RelayRecordAbsent|StopSnapshotIncomplete|WorkerArmNotFound|SourceHeadNotAncestor|RelayReadUnavailable)))$' "$scratch/test.log" || true
+            grep -E '^(full3_read_stage=(fresh_requested|fresh_ready|submitted|endpoint_retained|history_confirmed|existing_ready|authorized_arm_confirmed|source_revision_verified|foreign_scope_refused)|full3_read_cleanup=(closed|unconfirmed)|(Error: )?phase=full3_retained_relay category=(confirmed_no_effects|authorized_transport|authorized_read_refused|unconfirmed_worker_arm reason=(Confirmed|RelayRecordAbsent|StopSnapshotIncomplete|WorkerArmNotFound|SourceHeadNotAncestor|RelayReadUnavailable)))$' "$scratch/test.log" || true
             printf 'test=%s status=%s\n' "$selector" "$status"
             if [[ "$status" == PASS ]]; then
               printf 'retained_relay=confirmed_no_effects\n'

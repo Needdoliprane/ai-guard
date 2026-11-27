@@ -191,9 +191,9 @@ pub async fn request(
                 status.version == 1 && status.operation_id == operation,
                 "incompatible or uncorrelated recovery-relay-status reply"
             ),
-            BrokerReplyV1::Error { code } => {
-                anyhow::bail!("recovery-relay-status refused ({code}); no fallback was attempted")
-            }
+            // Preserve the broker's refusal for callers that distinguish
+            // scope denial from a missing, malformed or uncorrelated reply.
+            BrokerReplyV1::Error { .. } => {}
             _ => anyhow::bail!("incompatible broker reply to recovery-relay-status"),
         }
     }
