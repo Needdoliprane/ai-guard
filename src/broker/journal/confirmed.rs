@@ -16,6 +16,7 @@ pub(super) struct ConfirmedChainV1 {
     pub chain: Vec<RevisionRefV1>,
     pub command_receipts: HashMap<Uuid, LocalCommandReceiptV1>,
     pub cancel_boundaries: HashMap<Uuid, usize>,
+    pub named_import_arm_revision: Option<u64>,
     pub outbox_receipts: HashMap<(Uuid, Option<i64>), OutboxReceiptV1>,
     pub last_cancel_operations: Option<usize>,
 }
@@ -35,6 +36,7 @@ pub(super) struct ChainVerifierV1<'a> {
     cancel_boundaries: HashMap<Uuid, usize>,
     outbox_receipts: HashMap<(Uuid, Option<i64>), OutboxReceiptV1>,
     last_cancel_operations: Option<usize>,
+    named_import_arm_revision: Option<u64>,
 }
 impl<'a> ChainVerifierV1<'a> {
     #[cfg(test)]
@@ -70,6 +72,7 @@ impl<'a> ChainVerifierV1<'a> {
             cancel_boundaries: HashMap::new(),
             outbox_receipts: HashMap::new(),
             last_cancel_operations: None,
+            named_import_arm_revision: None,
         })
     }
 
@@ -83,6 +86,7 @@ impl<'a> ChainVerifierV1<'a> {
         self.cancel_boundaries = prefix.cancel_boundaries;
         self.outbox_receipts = prefix.outbox_receipts;
         self.last_cancel_operations = prefix.last_cancel_operations;
+        self.named_import_arm_revision = prefix.named_import_arm_revision;
         self
     }
 
@@ -132,6 +136,23 @@ impl<'a> ChainVerifierV1<'a> {
             Some(5) => decode!(RetirementCheckpoint, V5, "ai-guard:broker-checkpoint:v5"),
             _ => return Err(JournalError::UnsupportedVersion),
         };
+        let old_named_arm = self
+            .payload
+            .as_ref()
+            .and_then(LoadedCheckpoint::supervised)
+            .and_then(|value| value.supervision().legacy_named_admission())
+            .and_then(|value| value.import_arm());
+        let next_named_arm = next_payload
+            .supervised()
+            .and_then(|value| value.supervision().legacy_named_admission())
+            .and_then(|value| value.import_arm());
+        if old_named_arm.is_none() && next_named_arm.is_some() {
+            if self.named_import_arm_revision.replace(revision).is_some() {
+                return Err(JournalError::Corrupt);
+            }
+        } else if old_named_arm.is_some() && next_named_arm.is_none() {
+            return Err(JournalError::Corrupt);
+        }
         context_checkpoint_with_launch(
             self.scope,
             self.control,
@@ -214,6 +235,7 @@ impl<'a> ChainVerifierV1<'a> {
             chain: self.chain,
             command_receipts: self.command_receipts,
             cancel_boundaries: self.cancel_boundaries,
+            named_import_arm_revision: self.named_import_arm_revision,
             outbox_receipts: self.outbox_receipts,
             last_cancel_operations: self.last_cancel_operations,
         })

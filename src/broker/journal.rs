@@ -2306,6 +2306,7 @@ impl Journal {
             cancel_boundaries: _,
             outbox_receipts,
             last_cancel_operations,
+            named_import_arm_revision: _,
         } = verified.confirmed.clone();
         writer.verified_prefix = Some(verified);
         writer.floors.insert(operation_id, current.head.clone());

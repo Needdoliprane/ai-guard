@@ -60,6 +60,7 @@ pub struct RecoveredJobV1 {
     outbox_receipts: HashMap<(Uuid, Option<i64>), OutboxReceiptV1>,
     cancel_boundaries: HashMap<Uuid, usize>,
     pending_arms: usize,
+    named_import_arm_revision: Option<u64>,
     metadata: Option<Box<StopMetadata>>,
     retirements: Vec<crate::broker::retirement_checkpoint::RetirementEntryV1>,
 }
@@ -93,6 +94,7 @@ pub struct CancelStopProjectionV1 {
     stops: Vec<RecoveredStopV1>,
     cancel_prefixes: Vec<ConfirmedCancelPrefixV1>,
     named_reservation: Option<Box<NamedReservationStop>>,
+    named_import: Option<Box<NamedImportStop>>,
     incomplete: bool,
 }
 
@@ -133,6 +135,41 @@ impl NamedReservationStop {
         };
         request.input_hash().map_err(|_| JournalError::Conflict)?;
         Ok(Some((request, reserved.clone())))
+    }
+}
+
+/// Facts for a named import whose Created observation and Arm pending record
+/// were retained before STOP. The Arm ACK can be absent. This projection carries no RuntimeAuthority and
+/// cannot be used as a start or runtime-operation capability.
+pub(in crate::broker) struct NamedImportStop {
+    admission: LegacyNamedAdmissionCheckpoint,
+    evidence: crate::broker::checkpoint::LegacyNamedCreatedImportEvidenceV1,
+    arm_pending_head: RevisionRefV1,
+    stop_head: RevisionRefV1,
+    command_id: Uuid,
+}
+
+#[allow(
+    dead_code,
+    reason = "consumed by the named import STOP reconciliation lot"
+)]
+impl NamedImportStop {
+    pub(in crate::broker) fn admission(&self) -> &LegacyNamedAdmissionCheckpoint {
+        &self.admission
+    }
+    pub(in crate::broker) fn evidence(
+        &self,
+    ) -> &crate::broker::checkpoint::LegacyNamedCreatedImportEvidenceV1 {
+        &self.evidence
+    }
+    pub(in crate::broker) fn arm_pending_head(&self) -> &RevisionRefV1 {
+        &self.arm_pending_head
+    }
+    pub(in crate::broker) fn stop_head(&self) -> &RevisionRefV1 {
+        &self.stop_head
+    }
+    pub(in crate::broker) fn command_id(&self) -> Uuid {
+        self.command_id
     }
 }
 
@@ -233,6 +270,13 @@ impl StopJobSnapshotV1 {
 impl CancelStopProjectionV1 {
     pub(in crate::broker) fn named_reservation(&self) -> Option<&NamedReservationStop> {
         self.named_reservation.as_deref()
+    }
+    #[allow(
+        dead_code,
+        reason = "consumed by the named import STOP reconciliation lot"
+    )]
+    pub(in crate::broker) fn named_import(&self) -> Option<&NamedImportStop> {
+        self.named_import.as_deref()
     }
     pub(crate) fn cancel_prefix_for_stop(&self, index: usize) -> Option<&ConfirmedCancelPrefixV1> {
         self.cancel_prefixes.get(index)
@@ -862,6 +906,7 @@ fn project_cancel(
         .get(&command_id)
         .cloned()
         .ok_or(JournalError::Corrupt)?;
+    let named_import = named_import_stop(&recovered, command_id, &receipt).map(Box::new);
     let cancel_prefixes = recovered
         .stops
         .iter()
@@ -886,8 +931,50 @@ fn project_cancel(
         stops,
         cancel_prefixes,
         named_reservation,
+        named_import,
         incomplete,
     }))
+}
+
+fn named_import_stop(
+    recovered: &RecoveredJobV1,
+    command_id: Uuid,
+    stop_receipt: &LocalCommandReceiptV1,
+) -> Option<NamedImportStop> {
+    let metadata = recovered.metadata.as_ref()?;
+    let admission = metadata
+        .checkpoint
+        .supervised()?
+        .supervision()
+        .legacy_named_admission()?;
+    let plan = admission.plan();
+    if admission.import_creation().is_none()
+        || metadata.intent.legacy_named_plan() != Some(plan)
+        || plan.operation_id != recovered.operation_id
+    {
+        return None;
+    }
+    let arm_revision = recovered.named_import_arm_revision?;
+    let arm_index = usize::try_from(arm_revision).ok()?;
+    // Both births must be independently confirmed by the exact verified
+    // chain. A STOP in the same checkpoint revision is order-ambiguous.
+    if stop_receipt.command_id() != command_id
+        || arm_revision >= stop_receipt.head().revision()
+        || recovered.chain.get(arm_index).is_none()
+        || !recovered
+            .chain
+            .iter()
+            .any(|head| head == stop_receipt.head())
+    {
+        return None;
+    }
+    Some(NamedImportStop {
+        admission: admission.clone(),
+        evidence: admission.created_import_evidence()?,
+        arm_pending_head: recovered.chain.get(arm_index)?.clone(),
+        stop_head: stop_receipt.head().clone(),
+        command_id,
+    })
 }
 
 fn named_reservation_stop(recovered: &RecoveredJobV1) -> Option<NamedReservationStop> {
@@ -2054,6 +2141,7 @@ impl StopRecoveryReaderV1 {
                 outbox_receipts: confirmed.outbox_receipts,
                 cancel_boundaries: confirmed.cancel_boundaries,
                 pending_arms,
+                named_import_arm_revision: confirmed.named_import_arm_revision,
                 retirements: confirmed
                     .payload
                     .retirement()
