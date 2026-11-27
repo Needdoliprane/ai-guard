@@ -1,8 +1,8 @@
 //! Session control contracts shared by the catalogue and launch.
 
 use super::{
-    AdmissionResultV1, ControlFailure, SupervisedAdmissionV1, bounded, conflict, content_hash,
-    invalid, uuid,
+    AdmissionResultV1, ControlFailure, LaunchSpecV1, SupervisedAdmissionV1, bounded, conflict,
+    content_hash, invalid, uuid,
 };
 use crate::identity::{IdentityReceiptV1, PrincipalRefV1};
 use serde::{Deserialize, Serialize};
@@ -140,6 +140,35 @@ pub(crate) struct LegacyConfirmedPlanV1 {
     pub expires_at: chrono::DateTime<chrono::Utc>,
 }
 
+/// Private projection of the exact sandbox launch prepared for this broker.
+/// This carries no host source locator, credential or runtime permission.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct LegacyConfirmedLaunchSpecV1 {
+    pub version: u32,
+    pub plan: LegacyConfirmedPlanV1,
+    pub launch: LaunchSpecV1,
+}
+
+impl LegacyConfirmedLaunchSpecV1 {
+    pub(crate) fn validate(&self) -> anyhow::Result<()> {
+        self.launch.validate()?;
+        self.launch.validate_supervised()?;
+        invalid(
+            self.version == 1
+                && self.plan.version == 1
+                && self.launch.credential_binding_id.is_none()
+                && self.launch.provider_resolution.is_none()
+                && self.launch.egress.is_none(),
+        )?;
+        conflict(
+            self.launch.session_id == self.plan.session_id.to_string()
+                && self.launch.spec_hash()? == self.plan.launch_spec_hash,
+        )
+    }
+}
+
+pub(crate) const LEGACY_CONFIRMED_LAUNCH_SPEC_RESPONSE_BYTES: usize = 128 * 1024;
 pub(crate) const LEGACY_NAMED_ADMISSION_REQUEST_BYTES: usize = 65_536;
 pub(crate) const LEGACY_NAMED_ADMISSION_RECEIPT_NOT_FOUND: &str =
     "named_admission_receipt_not_found";

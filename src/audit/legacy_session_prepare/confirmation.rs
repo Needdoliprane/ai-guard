@@ -2,9 +2,9 @@ use super::*;
 use crate::{
     broker_registry::BrokerIdentityV1,
     control::{
-        ControlFailure,
+        ControlFailure, LaunchSpecV1,
         session_control::{
-            LegacyConfirmedPlanV1, LegacySessionConfirmationReceiptV1,
+            LegacyConfirmedLaunchSpecV1, LegacyConfirmedPlanV1, LegacySessionConfirmationReceiptV1,
             SessionLaunchPrepareRequestV1, SessionLaunchRequestV1, SessionPrepareReceiptV1,
             canonical_uuid,
         },
@@ -99,6 +99,7 @@ struct ConfirmationAuthority {
 
 struct ResolvedLegacyConfirmedPlan {
     plan: LegacyConfirmedPlanV1,
+    launch: LaunchSpecV1,
     confirmed: StoredEvent,
     initiator: Initiator,
     authorization_revision: u64,
@@ -106,14 +107,14 @@ struct ResolvedLegacyConfirmedPlan {
 }
 
 impl ResolvedLegacyConfirmedPlan {
-    fn release_at(self, now: DateTime<Utc>) -> anyhow::Result<LegacyConfirmedPlanV1> {
+    fn release_at(&self, now: DateTime<Utc>) -> anyhow::Result<()> {
         // A plan that has lost its authority has the same answer as a missing plan.
         anyhow::ensure!(
             now < self.plan.expires_at
                 && workload::canonical_control_time(now)? < self.broker_deadline,
             ControlFailure::NotFound
         );
-        Ok(self.plan)
+        Ok(())
     }
 }
 
@@ -123,11 +124,11 @@ fn confirmed_plan(
     prepared: &Prepared,
     target: TargetRecord,
     expires_at: DateTime<Utc>,
-) -> anyhow::Result<LegacyConfirmedPlanV1> {
+) -> anyhow::Result<(LegacyConfirmedPlanV1, LaunchSpecV1)> {
     let target = target.command.target;
     let mut launch = target.launch;
     launch.session_id = record.session_id.to_string();
-    Ok(LegacyConfirmedPlanV1 {
+    let plan = LegacyConfirmedPlanV1 {
         version: 1,
         binding_ref,
         control_namespace_uuid: prepared.namespace.clone(),
@@ -138,7 +139,8 @@ fn confirmed_plan(
         broker_profile_id: target.broker_profile_id,
         launch_spec_hash: launch.spec_hash()?,
         expires_at,
-    })
+    };
+    Ok((plan, launch))
 }
 
 #[derive(Clone, Copy, Serialize, Deserialize)]
@@ -537,6 +539,31 @@ impl Store {
         broker: &BrokerIdentityV1,
         binding_ref: Uuid,
     ) -> anyhow::Result<LegacyConfirmedPlanV1> {
+        Ok(self
+            .read_resolved_legacy_confirmed_plan(broker, binding_ref)?
+            .plan)
+    }
+
+    pub(crate) fn legacy_confirmed_launch_spec(
+        &self,
+        broker: &BrokerIdentityV1,
+        binding_ref: Uuid,
+    ) -> anyhow::Result<LegacyConfirmedLaunchSpecV1> {
+        let resolved = self.read_resolved_legacy_confirmed_plan(broker, binding_ref)?;
+        let material = LegacyConfirmedLaunchSpecV1 {
+            version: 1,
+            plan: resolved.plan,
+            launch: resolved.launch,
+        };
+        material.validate()?;
+        Ok(material)
+    }
+
+    fn read_resolved_legacy_confirmed_plan(
+        &self,
+        broker: &BrokerIdentityV1,
+        binding_ref: Uuid,
+    ) -> anyhow::Result<ResolvedLegacyConfirmedPlan> {
         let mut db = self
             .db
             .lock()
@@ -550,7 +577,8 @@ impl Store {
         let clock = workload::capture_control_time(&tx)?;
         let resolved = self.resolve_legacy_confirmed_plan(&tx, broker, binding_ref, &clock)?;
         self.commit_authorized(tx, &clock)?;
-        resolved.release_at(Utc::now())
+        resolved.release_at(Utc::now())?;
+        Ok(resolved)
     }
 
     fn resolve_legacy_confirmed_plan(
@@ -629,9 +657,10 @@ impl Store {
                 && expires_at > clock.at(),
             ControlFailure::NotFound
         );
-        let plan = confirmed_plan(binding_ref, &record, &prepared, target, expires_at)?;
+        let (plan, launch) = confirmed_plan(binding_ref, &record, &prepared, target, expires_at)?;
         Ok(ResolvedLegacyConfirmedPlan {
             plan,
+            launch,
             confirmed,
             initiator: prepared.initiator,
             authorization_revision: scope.authorization_revision(),

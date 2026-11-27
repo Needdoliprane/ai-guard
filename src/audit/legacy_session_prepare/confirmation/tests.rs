@@ -328,25 +328,31 @@ async fn confirmed_plan_is_private_and_requires_current_initiator() {
     drop(fixture.store);
     let store = Arc::new(Fixture::open(&path, Redactor::new(vec![])));
     let runner = "fixture-runner-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-    let state = GatewayState::for_tenants(
-        vec![TenantGateway {
-            tenant_id: "tenant-a".into(),
-            store: Arc::clone(&store),
-            runner_token: runner.into(),
-            viewer_token: "fixture-viewer-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
-        }],
-        Policy::default(),
-        None,
-        Redactor::new(vec![]),
-    )
-    .unwrap();
-    let app = gateway_router(state);
+    let router = |redactor| {
+        gateway_router(
+            GatewayState::for_tenants(
+                vec![TenantGateway {
+                    tenant_id: "tenant-a".into(),
+                    store: Arc::clone(&store),
+                    runner_token: runner.into(),
+                    viewer_token: "fixture-viewer-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+                }],
+                Policy::default(),
+                None,
+                redactor,
+            )
+            .unwrap(),
+        )
+    };
+    let app = router(Redactor::new(vec![]));
     let path = format!(
         "/api/v1/control/session-confirmations/{}",
         confirmation.binding_ref
     );
     let private = format!("/control{path}");
-    let get = |path: &str, bearer: &str| {
+    let public_spec = format!("{path}/launch-spec");
+    let private_spec = format!("{private}/launch-spec");
+    let get = |app: &axum::Router, path: &str, bearer: &str| {
         app.clone().oneshot(
             Request::get(path)
                 .header(header::AUTHORIZATION, format!("Bearer {bearer}"))
@@ -355,19 +361,21 @@ async fn confirmed_plan_is_private_and_requires_current_initiator() {
         )
     };
     let before = store.head().unwrap();
+    let quota = QuotaPolicyV1::default();
+    let held_workers = store.worker_quota(&quota).unwrap().held_workers;
     assert_eq!(
-        get(&path, BROKER_TOKEN).await.unwrap().status(),
+        get(&app, &path, BROKER_TOKEN).await.unwrap().status(),
         StatusCode::NOT_FOUND
     );
     assert_eq!(
-        get(&private, runner).await.unwrap().status(),
+        get(&app, &private, runner).await.unwrap().status(),
         StatusCode::FORBIDDEN
     );
     assert_eq!(
-        get(&private, foreign_broker).await.unwrap().status(),
+        get(&app, &private, foreign_broker).await.unwrap().status(),
         StatusCode::NOT_FOUND
     );
-    let response = get(&private, BROKER_TOKEN).await.unwrap();
+    let response = get(&app, &private, BROKER_TOKEN).await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let context: crate::control::session_control::LegacyConfirmedPlanV1 =
         serde_json::from_slice(&to_bytes(response.into_body(), 4096).await.unwrap()).unwrap();
@@ -390,6 +398,53 @@ async fn confirmed_plan_is_private_and_requires_current_initiator() {
     assert_eq!(
         context.expires_at,
         crate::broker_registry::parse_time(HUMAN_DEADLINE).unwrap()
+    );
+    assert_eq!(
+        get(&app, &public_spec, BROKER_TOKEN)
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        get(&app, &private_spec, runner).await.unwrap().status(),
+        StatusCode::FORBIDDEN
+    );
+    let foreign = get(&app, &private_spec, foreign_broker).await.unwrap();
+    let unknown = format!(
+        "/control/api/v1/control/session-confirmations/{}/launch-spec",
+        Uuid::new_v4()
+    );
+    let absent = get(&app, &unknown, foreign_broker).await.unwrap();
+    assert_eq!(foreign.status(), StatusCode::NOT_FOUND);
+    assert_eq!(absent.status(), StatusCode::NOT_FOUND);
+    assert_eq!(
+        to_bytes(foreign.into_body(), 4096).await.unwrap(),
+        to_bytes(absent.into_body(), 4096).await.unwrap()
+    );
+    let response = get(&app, &private_spec, BROKER_TOKEN).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+    let material: serde_json::Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), 4096).await.unwrap()).unwrap();
+    assert_eq!(
+        material,
+        serde_json::json!({"version": 1, "plan": context, "launch": launch})
+    );
+    let issued: LaunchSpecV1 = serde_json::from_value(material["launch"].clone()).unwrap();
+    assert_eq!(issued.spec_hash().unwrap(), context.launch_spec_hash);
+
+    // The command was valid at provisioning. A newly protected literal must
+    // still refuse disclosure without returning an altered launch spec.
+    let protected_literal = launch.command.argv[0].clone();
+    let masked = router(Redactor::new(vec![protected_literal.clone()]));
+    let response = get(&masked, &private_spec, BROKER_TOKEN).await.unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body = to_bytes(response.into_body(), 4096).await.unwrap();
+    assert!(
+        !std::str::from_utf8(&body)
+            .unwrap()
+            .contains(&protected_literal)
     );
     {
         let Some(AuthenticatedWorkload::Broker(broker)) =
@@ -416,6 +471,10 @@ async fn confirmed_plan_is_private_and_requires_current_initiator() {
         );
     }
     assert_eq!(store.head().unwrap(), before);
+    assert_eq!(
+        store.worker_quota(&quota).unwrap().held_workers,
+        held_workers
+    );
 
     store
         .mutate_identity(&IdentityMutationV1 {
@@ -441,7 +500,14 @@ async fn confirmed_plan_is_private_and_requires_current_initiator() {
         .unwrap();
     let after_revocation = store.head().unwrap();
     assert_eq!(
-        get(&private, BROKER_TOKEN).await.unwrap().status(),
+        get(&app, &private, BROKER_TOKEN).await.unwrap().status(),
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        get(&app, &private_spec, BROKER_TOKEN)
+            .await
+            .unwrap()
+            .status(),
         StatusCode::NOT_FOUND
     );
     assert_eq!(store.head().unwrap(), after_revocation);

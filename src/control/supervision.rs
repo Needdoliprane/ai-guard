@@ -400,18 +400,20 @@ impl SupervisedAdmissionV1 {
         invalid(self.version == 1)?;
         hash(&self.intent_hash)?;
         self.admission.validate()?;
-        uuid(&self.admission.launch.authority_id)?;
-        invalid(
-            self.admission
-                .launch
-                .security_preset
-                .requires_no_engine_logs(),
-        )
+        self.admission.launch.validate_supervised()
     }
 
     pub fn input_hash(&self) -> anyhow::Result<String> {
         self.validate()?;
         content_hash("ai-guard:supervised-admission:v1", self)
+    }
+}
+
+impl LaunchSpecV1 {
+    /// Additional launch constraints shared by supervised admission and its preparation.
+    pub(super) fn validate_supervised(&self) -> anyhow::Result<()> {
+        uuid(&self.authority_id)?;
+        invalid(self.security_preset.requires_no_engine_logs())
     }
 }
 

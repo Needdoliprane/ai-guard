@@ -224,7 +224,10 @@ pub fn control_route(method: &Method, path: &str) -> Option<ControlRouteIdentity
         {
             Some(BrokerPresence)
         }
-        (&Method::GET, ["control", "session-confirmations", id]) if v1 && canonical_uuid(id) => {
+        (&Method::GET, ["control", "session-confirmations", id])
+        | (&Method::GET, ["control", "session-confirmations", id, "launch-spec"])
+            if v1 && canonical_uuid(id) =>
+        {
             Some(BrokerSession)
         }
         (&Method::POST, ["control", "session-confirmations", id, "admission"])

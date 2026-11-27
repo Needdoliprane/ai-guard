@@ -5,8 +5,9 @@ use crate::control::{
     ControlProtocolV1, ExportRequestV1, HelperClaimResultV1, HelperCleanupV1, HelperObservationV1,
     HelperStartClaimV1, MutationReceiptV1, MutationResultV1, SupervisedAdmissionV1,
     session_control::{
-        LEGACY_NAMED_ADMISSION_RECEIPT_NOT_FOUND, LegacyConfirmedPlanV1,
-        LegacyNamedAdmissionReceiptV1, LegacyNamedSupervisedAdmissionV1, canonical_uuid,
+        LEGACY_CONFIRMED_LAUNCH_SPEC_RESPONSE_BYTES, LEGACY_NAMED_ADMISSION_RECEIPT_NOT_FOUND,
+        LegacyConfirmedLaunchSpecV1, LegacyConfirmedPlanV1, LegacyNamedAdmissionReceiptV1,
+        LegacyNamedSupervisedAdmissionV1, canonical_uuid,
     },
 };
 use crate::tenant_store::StoreHealth;
@@ -20,6 +21,10 @@ pub(super) fn routes() -> Router<GatewayState> {
         .route(
             "/control/session-confirmations/{binding_ref}",
             get(confirmed_plan),
+        )
+        .route(
+            "/control/session-confirmations/{binding_ref}/launch-spec",
+            get(confirmed_launch_spec),
         )
         .route(
             "/control/session-confirmations/{binding_ref}/admission",
@@ -110,6 +115,18 @@ impl FromRequestParts<GatewayState> for PrivateControlTransport {
     }
 }
 
+fn confirmed_plan_error(store: &TenantStore, error: anyhow::Error) -> (StatusCode, Json<Value>) {
+    if error.downcast_ref::<ControlFailure>() == Some(&ControlFailure::NotFound) {
+        workload::response(
+            StatusCode::NOT_FOUND,
+            "session_confirmation_not_found",
+            "Confirmation de session introuvable.",
+        )
+    } else {
+        workload::store_failure(store, error)
+    }
+}
+
 async fn confirmed_plan(
     _private: PrivateControlTransport,
     broker: workload::VerifiedBroker,
@@ -121,17 +138,7 @@ async fn confirmed_plan(
             let store = tenant.store.sqlite_api()?;
             let plan = store
                 .legacy_confirmed_plan(&broker, binding_ref)
-                .map_err(|error| {
-                    if error.downcast_ref::<ControlFailure>() == Some(&ControlFailure::NotFound) {
-                        workload::response(
-                            StatusCode::NOT_FOUND,
-                            "session_confirmation_not_found",
-                            "Confirmation de session introuvable.",
-                        )
-                    } else {
-                        workload::store_failure(&tenant.store, error)
-                    }
-                })?;
+                .map_err(|error| confirmed_plan_error(&tenant.store, error))?;
             let value = serde_json::to_value(&plan).map_err(|error| control_error(error.into()))?;
             if redactor.value_unclipped(&value) != value {
                 return Err(control_error(anyhow::anyhow!(
@@ -139,6 +146,35 @@ async fn confirmed_plan(
                 )));
             }
             Ok(Json(plan))
+        })
+        .await
+}
+
+async fn confirmed_launch_spec(
+    _private: PrivateControlTransport,
+    broker: workload::VerifiedBroker,
+    Path(binding_ref): Path<String>,
+) -> ApiResult<Json<LegacyConfirmedLaunchSpecV1>> {
+    let binding_ref = canonical_uuid(&binding_ref).map_err(control_error)?;
+    broker
+        .blocking_on(store_io::Lane::Control, move |tenant, broker, redactor| {
+            let store = tenant.store.sqlite_api()?;
+            let material = store
+                .legacy_confirmed_launch_spec(&broker, binding_ref)
+                .map_err(|error| confirmed_plan_error(&tenant.store, error))?;
+            let value =
+                serde_json::to_value(&material).map_err(|error| control_error(error.into()))?;
+            if store.redactor_union(&redactor).value_unclipped(&value) != value
+                || serde_json::to_vec(&value)
+                    .map_err(|error| control_error(error.into()))?
+                    .len()
+                    > LEGACY_CONFIRMED_LAUNCH_SPEC_RESPONSE_BYTES
+            {
+                return Err(control_error(anyhow::anyhow!(
+                    "confirmed launch spec cannot be returned exactly"
+                )));
+            }
+            Ok(Json(material))
         })
         .await
 }
