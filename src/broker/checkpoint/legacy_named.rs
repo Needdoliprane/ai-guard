@@ -53,6 +53,35 @@ pub(crate) struct LegacyNamedImportArmCheckpointV1 {
     receipt: Option<ArmReceiptV1>,
 }
 
+/// Created/Arm facts retained by the named checkpoint. This is evidence only:
+/// it carries no RuntimeAuthority and cannot be used to start or inspect a
+/// runtime.
+pub(crate) struct LegacyNamedCreatedImportEvidenceV1 {
+    owned: OwnedContainerSnapshot,
+    arm: ArmV1,
+    receipt: Option<ArmReceiptV1>,
+    handle_fingerprint: String,
+    runtime_binding_hash: String,
+}
+
+impl LegacyNamedCreatedImportEvidenceV1 {
+    pub(crate) fn owned(&self) -> &OwnedContainerSnapshot {
+        &self.owned
+    }
+    pub(crate) fn arm(&self) -> &ArmV1 {
+        &self.arm
+    }
+    pub(crate) fn receipt(&self) -> Option<&ArmReceiptV1> {
+        self.receipt.as_ref()
+    }
+    pub(crate) fn handle_fingerprint(&self) -> &str {
+        &self.handle_fingerprint
+    }
+    pub(crate) fn runtime_binding_hash(&self) -> &str {
+        &self.runtime_binding_hash
+    }
+}
+
 impl LegacyNamedImportArmCheckpointV1 {
     pub(crate) fn receipt(&self) -> Option<&ArmReceiptV1> {
         self.receipt.as_ref()
@@ -282,6 +311,29 @@ impl LegacyNamedAdmissionCheckpoint {
 
     pub(crate) fn import_arm(&self) -> Option<&LegacyNamedImportArmCheckpointV1> {
         self.import_arm.as_deref()
+    }
+
+    /// Return a complete, already-validated Created/Arm fact set. Incomplete
+    /// historical records deliberately stay unavailable to STOP projection.
+    pub(crate) fn created_import_evidence(&self) -> Option<LegacyNamedCreatedImportEvidenceV1> {
+        let creation = self.import_creation.as_deref()?;
+        let authority = creation.authority.as_ref()?;
+        let owned = creation.preparation.owned()?.clone();
+        let saved_arm = self.import_arm.as_deref()?;
+        if creation.version != 2
+            || saved_arm.version != 1
+            || owned.handle.id() != saved_arm.arm.inspection.container_id
+            || owned.handle.authority_fingerprint() != saved_arm.arm.authority_binding_hash
+        {
+            return None;
+        }
+        Some(LegacyNamedCreatedImportEvidenceV1 {
+            owned,
+            arm: saved_arm.arm.clone(),
+            receipt: saved_arm.receipt().cloned(),
+            handle_fingerprint: authority.handle_fingerprint.clone(),
+            runtime_binding_hash: authority.binding_hash.clone(),
+        })
     }
 
     pub(crate) fn import_arm_request(&self) -> Option<LegacyNamedImportArmRequestV1> {
@@ -1384,6 +1436,20 @@ mod tests {
             let stop = cancellation.await.map_err(|failure| failure.error())?;
             assert!(stop.incomplete());
             assert!(stop.named_reservation().is_none());
+            let named_import = stop.named_import().expect("pending Arm predates STOP");
+            assert_eq!(named_import.command_id(), stop_id);
+            assert!(
+                named_import.arm_pending_head().revision() < named_import.stop_head().revision()
+            );
+            assert_eq!(named_import.admission().plan(), &plan);
+            assert!(equal(named_import.evidence().owned(), &owned)?);
+            assert!(equal(named_import.evidence().arm(), &submitted)?);
+            assert_eq!(named_import.evidence().receipt(), None);
+            assert_eq!(
+                named_import.evidence().handle_fingerprint(),
+                authority.fingerprint()
+            );
+            assert_eq!(named_import.evidence().runtime_binding_hash().len(), 64);
             assert!(stop.stops().is_empty());
             let snapshot = writer.stops().recovery_status(operation).await?.unwrap();
             assert!(snapshot.incomplete());
@@ -1405,6 +1471,19 @@ mod tests {
                 .unwrap();
             assert!(replayed_stop.incomplete());
             assert!(replayed_stop.named_reservation().is_none());
+            let replayed_import = replayed_stop
+                .named_import()
+                .expect("Arm remains before STOP");
+            assert_eq!(replayed_import.command_id(), stop_id);
+            assert_eq!(
+                replayed_import.arm_pending_head(),
+                named_import.arm_pending_head()
+            );
+            assert_eq!(replayed_import.stop_head(), named_import.stop_head());
+            assert_eq!(
+                replayed_import.evidence().receipt(),
+                Some(&arm_result.receipt)
+            );
             let snapshot = writer.stops().recovery_status(operation).await?.unwrap();
             assert!(snapshot.incomplete());
             assert_eq!(snapshot.pending_arms(), 0);
@@ -1546,6 +1625,7 @@ mod tests {
         let stop = cancellation.await.map_err(|failure| failure.error())?;
         assert!(stop.incomplete());
         assert!(stop.named_reservation().is_none());
+        assert!(stop.named_import().is_none());
         let snapshot = stops.recovery_status(operation).await?.unwrap();
         assert!(snapshot.incomplete());
         assert_eq!(snapshot.pending_arms(), 0);

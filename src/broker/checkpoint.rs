@@ -22,7 +22,8 @@ pub(crate) use legacy_named::LegacyNamedAdmissionCheckpoint as LegacyNamedAdmiss
 )]
 pub(crate) use legacy_named::LegacyNamedAdmissionPendingV2;
 pub(crate) use legacy_named::{
-    LegacyNamedAdmissionCheckpoint, validate_legacy_named_admission_receipt,
+    LegacyNamedAdmissionCheckpoint, LegacyNamedCreatedImportEvidenceV1,
+    validate_legacy_named_admission_receipt,
 };
 
 const MAX_BYTES: usize = 32 * 1024 * 1024;
