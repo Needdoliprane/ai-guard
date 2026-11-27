@@ -2,6 +2,7 @@
 //! Local receipts are immutable recovery evidence, never execution authority.
 use crate::{
     broker_registry::{BrokerAuthorityV1, BrokerRuntimeKindV1},
+    control::session_control::{LegacyConfirmedPlanV1, LegacyNamedSupervisedAdmissionV1},
     control_fs::{Directory, PrivateFile},
     redaction::Redactor,
 };
@@ -29,6 +30,7 @@ mod http;
 #[cfg(test)]
 mod http_tests;
 mod legacy_named_admission;
+pub(crate) use legacy_named_admission::Outcome as LegacyNamedAdmissionOutcome;
 /// Proposed owned broker-supervision publisher, selected only by its explicit
 /// configuration profile. It never falls back to, adopts or migrates legacy.
 pub(crate) mod owned;
@@ -325,8 +327,20 @@ impl PreparedPresence {
         }
         Ok(())
     }
-    /// Perform one broker-authorized Legacy admission exchange. Callers keep
-    /// this exact request and its IDs if the response outcome is uncertain.
+    /// Read and validate the plan before the caller records its pending request.
+    #[allow(
+        dead_code,
+        reason = "the broker admission caller is a separate G04 integration"
+    )]
+    pub(crate) async fn read_legacy_confirmed_plan(
+        &self,
+        expected_broker_profile_id: &str,
+        binding_ref: Uuid,
+    ) -> Result<LegacyConfirmedPlanV1> {
+        self.revalidate()?;
+        legacy_named_admission::read_plan(self, expected_broker_profile_id, binding_ref).await
+    }
+    /// Submit the exact plan and request after the caller records them durably.
     #[allow(
         dead_code,
         reason = "the broker admission caller is a separate G04 integration"
@@ -334,10 +348,11 @@ impl PreparedPresence {
     pub(crate) async fn admit_legacy_named(
         &self,
         expected_broker_profile_id: &str,
-        request: &crate::control::session_control::LegacyNamedSupervisedAdmissionV1,
-    ) -> Result<legacy_named_admission::Outcome> {
+        plan: &LegacyConfirmedPlanV1,
+        request: &LegacyNamedSupervisedAdmissionV1,
+    ) -> Result<LegacyNamedAdmissionOutcome> {
         self.revalidate()?;
-        legacy_named_admission::admit(self, expected_broker_profile_id, request).await
+        legacy_named_admission::admit(self, expected_broker_profile_id, plan, request).await
     }
     /// Read a receipt for the exact retained request after a missed reply.
     #[allow(
@@ -347,9 +362,9 @@ impl PreparedPresence {
     pub(crate) async fn reconcile_legacy_named(
         &self,
         expected_broker_profile_id: &str,
-        plan: &crate::control::session_control::LegacyConfirmedPlanV1,
-        request: &crate::control::session_control::LegacyNamedSupervisedAdmissionV1,
-    ) -> Result<Option<legacy_named_admission::Outcome>> {
+        plan: &LegacyConfirmedPlanV1,
+        request: &LegacyNamedSupervisedAdmissionV1,
+    ) -> Result<Option<LegacyNamedAdmissionOutcome>> {
         self.revalidate()?;
         legacy_named_admission::reconcile(self, expected_broker_profile_id, plan, request).await
     }

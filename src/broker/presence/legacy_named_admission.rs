@@ -20,23 +20,41 @@ enum AdmissionOperation {
     Reconcile,
 }
 
-pub(super) async fn admit(
+pub(super) async fn read_plan(
     presence: &PreparedPresence,
     expected_broker_profile_id: &str,
-    request: &LegacyNamedSupervisedAdmissionV1,
-) -> Result<Outcome> {
-    request.validate().map_err(|_| PresenceError::Protocol)?;
-    let binding = request.binding_ref;
-    let path = format!("/api/v1/control/session-confirmations/{binding}");
+    binding_ref: Uuid,
+) -> Result<LegacyConfirmedPlanV1> {
+    if binding_ref.is_nil() {
+        return Err(PresenceError::Protocol);
+    }
+    let path = format!("/api/v1/control/session-confirmations/{binding_ref}");
     let client = Client::new(presence)?;
-
     let before = checked_identity(&client, presence).await?;
     let plan = confirmed_plan(&client, presence, &path).await?;
-    validate_plan(presence, expected_broker_profile_id, request, &plan)?;
+    validate_plan_scope(
+        &presence.scope.control_namespace_uuid.to_string(),
+        expected_broker_profile_id,
+        binding_ref,
+        &plan,
+    )?;
     let after = checked_identity(&client, presence).await?;
     if before != after {
         return Err(PresenceError::Conflict);
     }
+    presence.revalidate()?;
+    Ok(plan)
+}
+
+pub(super) async fn admit(
+    presence: &PreparedPresence,
+    expected_broker_profile_id: &str,
+    plan: &LegacyConfirmedPlanV1,
+    request: &LegacyNamedSupervisedAdmissionV1,
+) -> Result<Outcome> {
+    validate_plan(presence, expected_broker_profile_id, request, plan)?;
+    let client = Client::new(presence)?;
+    checked_identity(&client, presence).await?;
     send_request(&client, presence, request, AdmissionOperation::Reserve)
         .await?
         .ok_or(PresenceError::AdmissionOutcomeUnknown)
@@ -88,25 +106,31 @@ async fn send_request(
         .map_err(|_| PresenceError::AdmissionOutcomeUnknown)?;
     let value = crate::json::decode_unique(&bytes, 64)
         .map_err(|_| PresenceError::AdmissionOutcomeUnknown)?;
+    let Some(receipt) = decode_receipt(status, operation, value.clone())? else {
+        return Ok(None);
+    };
     presence
         .screen(&value)
         .map_err(|_| PresenceError::AdmissionOutcomeUnknown)?;
-    decode_response(
+    validate_receipt(
         presence.scope.control_namespace_uuid,
         request,
-        operation,
+        &receipt,
         status,
-        value,
     )
+    .map_err(|_| PresenceError::AdmissionOutcomeUnknown)?;
+    Ok(Some(if receipt.admission.accepted {
+        Outcome::Accepted(receipt)
+    } else {
+        Outcome::Refused(receipt)
+    }))
 }
 
-fn decode_response(
-    namespace: uuid::Uuid,
-    request: &LegacyNamedSupervisedAdmissionV1,
-    operation: AdmissionOperation,
+fn decode_receipt(
     status: StatusCode,
+    operation: AdmissionOperation,
     value: Value,
-) -> Result<Option<Outcome>> {
+) -> Result<Option<LegacyNamedAdmissionReceiptV1>> {
     if operation == AdmissionOperation::Reconcile
         && status == StatusCode::NOT_FOUND
         && value["error"]["code"] == LEGACY_NAMED_ADMISSION_RECEIPT_NOT_FOUND
@@ -114,32 +138,14 @@ fn decode_response(
         // Absence was observed at this read. A separate request may still commit.
         return Ok(None);
     }
+    // An error response cannot settle an operation that may already have committed.
+    // Its transient prose is never returned, persisted or used as evidence.
     let receipt: LegacyNamedAdmissionReceiptV1 =
-        serde_json::from_value(value.clone()).map_err(|_| {
-            if value.get("error").is_some() {
-                let error = super::http::remote_error(status, &value);
-                match error {
-                    PresenceError::Authentication
-                    | PresenceError::Forbidden
-                    | PresenceError::Capacity
-                    | PresenceError::Conflict
-                    | PresenceError::Clock => error,
-                    _ => PresenceError::AdmissionOutcomeUnknown,
-                }
-            } else {
-                PresenceError::AdmissionOutcomeUnknown
-            }
-        })?;
+        serde_json::from_value(value).map_err(|_| PresenceError::AdmissionOutcomeUnknown)?;
     if operation == AdmissionOperation::Reconcile && !receipt.admission.replayed {
         return Err(PresenceError::AdmissionOutcomeUnknown);
     }
-    validate_receipt(namespace, request, &receipt, status)
-        .map_err(|_| PresenceError::AdmissionOutcomeUnknown)?;
-    Ok(Some(if receipt.admission.accepted {
-        Outcome::Accepted(receipt)
-    } else {
-        Outcome::Refused(receipt)
-    }))
+    Ok(Some(receipt))
 }
 
 async fn confirmed_plan(
@@ -161,7 +167,6 @@ async fn confirmed_plan(
         .await?;
     if status != StatusCode::OK {
         let value = crate::json::decode_unique(&bytes, 64).map_err(|_| PresenceError::Protocol)?;
-        presence.screen(&value)?;
         return Err(super::http::remote_error(status, &value));
     }
     let value = crate::json::decode_unique(&bytes, 64).map_err(|_| PresenceError::Protocol)?;
@@ -306,6 +311,38 @@ mod tests {
             .unwrap_err(),
             PresenceError::Forbidden
         );
+    }
+
+    #[test]
+    fn admission_error_responses_cannot_settle_a_pending_request() {
+        let absent =
+            || serde_json::json!({"error": {"code": LEGACY_NAMED_ADMISSION_RECEIPT_NOT_FOUND}});
+        assert!(matches!(
+            decode_receipt(
+                StatusCode::NOT_FOUND,
+                AdmissionOperation::Reconcile,
+                absent()
+            ),
+            Ok(None)
+        ));
+        assert!(matches!(
+            decode_receipt(StatusCode::NOT_FOUND, AdmissionOperation::Reserve, absent()),
+            Err(PresenceError::AdmissionOutcomeUnknown)
+        ));
+        for status in [
+            StatusCode::NOT_FOUND,
+            StatusCode::FORBIDDEN,
+            StatusCode::TOO_MANY_REQUESTS,
+        ] {
+            assert!(matches!(
+                decode_receipt(
+                    status,
+                    AdmissionOperation::Reconcile,
+                    serde_json::json!({"error": "fixture"})
+                ),
+                Err(PresenceError::AdmissionOutcomeUnknown)
+            ));
+        }
     }
 
     #[test]
