@@ -1,25 +1,29 @@
 //! Private operator configuration. A profile routes authentication; its tenant
 //! strings are expectations to compare with the gateway, never an identity.
+use super::protocol::BrokerErrorCodeV1;
 use crate::{
     broker::{
         egress_owner::resolve::{Resolver, ResolverConfigV1, SystemLookup},
         journal::JournalScopeV1,
     },
     control::{
-        EgressLaunchV1,
-        session_control::{SessionLaunchTargetSelectionV1, canonical_uuid},
+        EgressLaunchV1, content_hash,
+        session_control::{
+            LegacyConfirmedLaunchSpecV1, SessionLaunchTargetSelectionV1, canonical_uuid,
+        },
     },
     control_fs::{Directory, PrivateFile, absolute_path},
     provider::AuthPreference,
     runner::RunOptions,
     runtime::{NetworkMode, RuntimeKind, validate_command},
-    workspace::AuthorizedSource,
+    workspace::{AuthorizedSource, Limits, PreparedWorkspace},
 };
 use anyhow::{Result, anyhow, ensure};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
     fmt,
+    fs::File,
     net::IpAddr,
     path::{Path, PathBuf},
     sync::Arc,
@@ -482,10 +486,6 @@ impl Registry {
     }
     /// Retain the local source for the authenticated profile and exact target
     /// selection. The caller supplies the scope and selection from Prepare.
-    #[allow(
-        dead_code,
-        reason = "the named broker preparation caller is a separate G04 integration"
-    )]
     pub(super) fn open_legacy_named_source(
         &self,
         scope: &JournalScopeV1,
@@ -512,6 +512,48 @@ impl Registry {
         self.source.revalidate()?;
         self.source_directory.revalidate()?;
         Ok(source)
+    }
+
+    /// Keep the archive from the single authorized collection whose manifest
+    /// matches the confirmed launch.
+    #[allow(
+        dead_code,
+        reason = "the named broker preparation caller is a separate G04 integration"
+    )]
+    pub(super) fn prepare_legacy_named_workspace(
+        &self,
+        scope: &JournalScopeV1,
+        material: &LegacyConfirmedLaunchSpecV1,
+        excluded_roots: &[&File],
+    ) -> std::result::Result<PreparedWorkspace, BrokerErrorCodeV1> {
+        let plan = &material.plan;
+        if plan.broker_profile_id != scope.profile_id()
+            || plan.control_namespace_uuid != scope.control_namespace_uuid().to_string()
+        {
+            return Err(BrokerErrorCodeV1::Forbidden);
+        }
+        material
+            .validate()
+            .map_err(|_| BrokerErrorCodeV1::InvalidInput)?;
+        let target =
+            SessionLaunchTargetSelectionV1::new(plan.launch_target_id, plan.target_revision)
+                .map_err(|_| BrokerErrorCodeV1::InvalidInput)?;
+        let source = self
+            .open_legacy_named_source(scope, target)
+            .map_err(|_| BrokerErrorCodeV1::Unavailable)?;
+        let workspace = source
+            .prepare(Limits::default(), excluded_roots)
+            .map_err(|_| BrokerErrorCodeV1::Unavailable)?;
+        let digest = content_hash("ai-guard:workspace-manifest:v1", &workspace.manifest)
+            .map_err(|_| BrokerErrorCodeV1::Unavailable)?;
+        if digest != material.launch.workspace_manifest_digest {
+            return Err(BrokerErrorCodeV1::Conflict);
+        }
+        self.source
+            .revalidate()
+            .and_then(|()| self.source_directory.revalidate())
+            .map_err(|_| BrokerErrorCodeV1::Conflict)?;
+        Ok(workspace)
     }
 
     pub(super) fn start_profile(&self, id: &str) -> PrearmedStartProfile {
@@ -856,6 +898,96 @@ mod tests {
         })
     }
 
+    fn check_named_workspace(
+        registry: &Registry,
+        scope: &JournalScopeV1,
+        target_id: Uuid,
+        source: &Path,
+    ) -> Result<()> {
+        use crate::{
+            control::{
+                LaunchSpecV1, NetworkV1, RestartPolicyV1, RuntimeKindV1, SecurityPresetV1,
+                session_control::LegacyConfirmedPlanV1,
+            },
+            model::CommandSpec,
+            workspace::{Fingerprint, Manifest, scan_workspace_archive},
+        };
+        use sha2::{Digest, Sha256};
+
+        let file = source.join("tracked.txt");
+        let contents = b"prepared contents";
+        std::fs::write(&file, contents)?;
+        let private = source.join("private-control");
+        std::fs::create_dir(&private)?;
+        std::fs::set_permissions(&private, std::fs::Permissions::from_mode(0o700))?;
+        std::fs::write(private.join("excluded.txt"), b"control fixture")?;
+        let excluded = File::open(&private)?;
+        let manifest = Manifest::from([(
+            "tracked.txt".into(),
+            Fingerprint {
+                sha256: hex::encode(Sha256::digest(contents)),
+                bytes: contents.len() as u64,
+                mode: Some(0o644),
+            },
+        )]);
+
+        let session = Uuid::new_v4();
+        let launch = LaunchSpecV1 {
+            version: 1,
+            session_id: session.to_string(),
+            command: CommandSpec {
+                argv: vec!["/usr/bin/id".into(), "-u".into()],
+                cwd: "/workspace".into(),
+            },
+            profile: "strict".into(),
+            runtime_kind: RuntimeKindV1::Docker,
+            authority_id: Uuid::new_v4().to_string(),
+            image_ref: "worker:synthetic".into(),
+            image_id: format!("sha256:{}", "b".repeat(64)),
+            network: NetworkV1::None,
+            cpu_millis: 2000,
+            memory_bytes: 1_073_741_824,
+            pids_limit: 256,
+            timeout_seconds: 30,
+            security_preset: SecurityPresetV1::FixedSandboxV2,
+            restart_policy: RestartPolicyV1::No,
+            workspace_manifest_digest: content_hash("ai-guard:workspace-manifest:v1", &manifest)?,
+            workspace_import_policy_version: 1,
+            provider: "generic".into(),
+            capture_output: false,
+            credential_binding_id: None,
+            credential_names: vec![],
+            provider_resolution: None,
+            egress: None,
+        };
+        let material = LegacyConfirmedLaunchSpecV1 {
+            version: 1,
+            plan: LegacyConfirmedPlanV1 {
+                version: 1,
+                binding_ref: Uuid::new_v4(),
+                control_namespace_uuid: scope.control_namespace_uuid().to_string(),
+                operation_id: Uuid::new_v4(),
+                session_id: session,
+                launch_target_id: target_id,
+                target_revision: 1,
+                broker_profile_id: scope.profile_id().into(),
+                launch_spec_hash: launch.spec_hash()?,
+                expires_at: chrono::DateTime::from_timestamp(4_102_444_800, 0).unwrap(),
+            },
+            launch,
+        };
+        let workspace = registry.prepare_legacy_named_workspace(scope, &material, &[&excluded])?;
+        assert_eq!(workspace.manifest, manifest);
+        std::fs::write(&file, b"changed contents")?;
+        assert!(matches!(
+            registry.prepare_legacy_named_workspace(scope, &material, &[&excluded]),
+            Err(BrokerErrorCodeV1::Conflict)
+        ));
+        let retained = scan_workspace_archive(workspace.archive.reopen()?, Limits::default())?;
+        assert_eq!(retained, manifest);
+        Ok(())
+    }
+
     #[test]
     fn registry_v2_resolves_only_the_exact_named_source_revision() -> Result<()> {
         let temporary = tempfile::Builder::new()
@@ -910,6 +1042,7 @@ mod tests {
         let retained = registry.open_legacy_named_source(&scope, select(1)?)?;
         assert_eq!(retained.path(), first.as_path());
         retained.revalidate()?;
+        check_named_workspace(&registry, &scope, target_id, &first)?;
         assert_eq!(
             registry
                 .open_legacy_named_source(&scope, select(2)?)?
