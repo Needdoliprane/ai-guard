@@ -419,7 +419,7 @@ fn assert_live_owners(
     phase: &str,
 ) -> Value {
     let registry = oidc.registry.lock().unwrap();
-    let now = Instant::now();
+    let now = oidc.admission_now();
     let owners = native_owners(&registry).count();
     let oldest = pending
         .iter()
@@ -549,15 +549,15 @@ async fn disjoint_tenant_native_owners_cannot_take_b_refresh_capacity() {
     )
     .await;
 
+    freeze_admission_clock(oidc);
     let pressure_started = Instant::now();
     let mut pending = Vec::new();
     let mut responses = 0;
     let mut wave_observations = Vec::new();
     for wave in 0..4 {
-        // Initial passage also clears the positive B probe's real window.
-        // Later passages separate the four waves, with no clock, rate counter,
-        // intent or product deadline mutation during native pressure.
-        tokio::time::sleep(Duration::from_millis(1050)).await;
+        // Cross the real rate boundary between waves, including the positive
+        // B probe's window. Previously issued owners keep their original deadlines.
+        advance_admission_clock(oidc, Duration::from_secs(1));
         assert_eq!(
             (0..8)
                 .map(|principal| readers[principal * 4 + wave]

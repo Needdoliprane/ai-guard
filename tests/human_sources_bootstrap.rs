@@ -107,13 +107,14 @@ fn cli_store15_reuses_exact_closure_and_leaves_the_neighbor_unchanged() {
             .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
             .unwrap();
         let events = db
-            .prepare("SELECT seq,kind,hash FROM events ORDER BY seq")
+            .prepare("SELECT seq,kind,hash,prev_hash FROM events ORDER BY seq")
             .unwrap()
             .query_map([], |row| {
                 Ok((
                     row.get::<_, i64>(0)?,
                     row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
                 ))
             })
             .unwrap()
@@ -362,15 +363,37 @@ fn cli_store15_reuses_exact_closure_and_leaves_the_neighbor_unchanged() {
     assert_eq!(installed["tenant_id"], "tenant-a");
     let after_rights = snapshot(0);
     assert_eq!(after_rights.0, 15);
-    assert_eq!(after_rights.1.len(), after_a.1.len() + 1);
+    let expected_markers = [
+        ("human_rights_v2", "control.identity.human_rights.genesis"),
+        ("session_prepare_v1", "control.session_prepare.genesis"),
+    ];
+    assert_eq!(
+        after_rights.1.len(),
+        after_a.1.len() + expected_markers.len()
+    );
     assert_eq!(&after_rights.1[..after_a.1.len()], after_a.1.as_slice());
-    let marker = after_rights.1.last().unwrap();
-    assert_eq!(marker.1, "control.identity.human_rights.genesis");
-    assert_eq!(installed["markers"][0]["seq"], marker.0);
-    assert_eq!(installed["markers"][0]["hash"], marker.2.as_str());
+    let receipts = installed["markers"].as_array().unwrap();
+    assert_eq!(receipts.len(), expected_markers.len());
+    let mut previous = after_a.1.last().unwrap();
+    for (((marker, kind), row), receipt) in expected_markers
+        .into_iter()
+        .zip(&after_rights.1[after_a.1.len()..])
+        .zip(receipts)
+    {
+        assert_eq!(row.0, previous.0 + 1);
+        assert_eq!(row.1, kind);
+        assert_eq!(row.3, previous.2);
+        assert_eq!(
+            *receipt,
+            serde_json::json!({"marker": marker, "seq": row.0, "hash": row.2})
+        );
+        previous = row;
+    }
+    assert_eq!(snapshot(1), after_b);
     let resumed = rights("resume");
-    assert_eq!(resumed["state"], "confirmed");
-    assert_eq!(resumed["markers"], installed["markers"]);
+    let mut expected_resume = installed;
+    expected_resume["state"] = serde_json::json!("confirmed");
+    assert_eq!(resumed, expected_resume);
     assert_eq!(snapshot(0), after_rights);
     assert_eq!(snapshot(1), after_b);
     assert!(fs::read(&second_manifest).unwrap() == second_bytes);

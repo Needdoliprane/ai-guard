@@ -257,9 +257,28 @@ pub struct OidcGateway {
     partitioned_capacity: bool,
     ca_bundle_pem: Option<String>,
     registry: Mutex<Registry>,
+    #[cfg(test)]
+    admission_test_now: Mutex<Option<Instant>>,
     cleanup_slots: Arc<tokio::sync::Semaphore>,
 }
 impl OidcGateway {
+    /// Monotonic time for the shared start window and native refresh owners.
+    fn admission_now(&self) -> Instant {
+        #[cfg(test)]
+        if let Some(now) = *self.admission_test_now.lock().unwrap() {
+            return now;
+        }
+        Instant::now()
+    }
+
+    fn refresh_now(&self, kind: SessionKind) -> Instant {
+        if kind == SessionKind::NativeCli {
+            self.admission_now()
+        } else {
+            Instant::now()
+        }
+    }
+
     /// Closed transport word for the administration configuration read.
     pub(crate) fn transport_kind(&self) -> &'static str {
         match self.config.provider.transport {
@@ -309,6 +328,8 @@ impl OidcGateway {
                 tenant_limits,
                 ..Registry::default()
             }),
+            #[cfg(test)]
+            admission_test_now: Mutex::new(None),
             cleanup_slots: Arc::new(tokio::sync::Semaphore::new(32)),
         })
     }

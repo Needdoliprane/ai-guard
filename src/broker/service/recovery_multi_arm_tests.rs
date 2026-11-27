@@ -98,12 +98,34 @@ fn private_barrier() -> tempfile::TempDir {
 }
 
 struct AbandonmentObservations {
-    b_before_release: bool,
+    b_delivery_before_release: bool,
     a_cancel_before_release: Option<Uuid>,
+    a_ack_epoch_before_release: Option<Uuid>,
     target_count_before_release: usize,
-    a_after_release: bool,
+    a_delivery_after_release: bool,
     same_epoch: bool,
     release_was_absent: bool,
+}
+
+async fn wait_for_delivery_without_business_retry(
+    client: &EnforcerStopClient,
+    target: &TargetBinding,
+    command: Uuid,
+    epoch: Uuid,
+) -> bool {
+    let expires = std::time::Instant::now() + Duration::from_secs(3);
+    while std::time::Instant::now() < expires {
+        if client.acknowledged_restore_epoch(&target.arm) == Some(epoch)
+            && client
+                .query_stop(&target.arm, &target.registration_hash)
+                .await
+                .is_ok_and(|slot| slot.cancel_command_id() == Some(command))
+        {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    false
 }
 
 async fn abandon_waiter_while_a_is_blocked<T>(
@@ -149,24 +171,22 @@ async fn abandon_waiter_while_a_is_blocked<T>(
     }
     // From this point onward only read-only observations are submitted. There
     // is no second deliver_projection/restore call to introduce Arm B.
-    let b_before_release = wait_for_cancel_without_business_retry(
-        client,
-        &targets[1].arm,
-        &targets[1].registration_hash,
-        command,
-    )
-    .await;
+    let b_delivery_before_release =
+        wait_for_delivery_without_business_retry(client, &targets[1], command, epoch).await;
+    // Restore installs the verified Cancel before replying. The client cache
+    // records delivery only after validating the separate StopAccepted ACK.
     let a_cancel_before_release = client
         .query_stop(&targets[0].arm, &targets[0].registration_hash)
         .await
         .unwrap()
         .cancel_command_id();
     let target_count_before_release = client.status().await.unwrap().slot_count();
-    let same_epoch = crate::broker::discovery::load_endpoint(root)
+    let same_epoch_before_release = crate::broker::discovery::load_endpoint(root)
         .unwrap()
         .unwrap()
         .epoch()
         == epoch;
+    let a_ack_epoch_before_release = client.acknowledged_restore_epoch(&targets[0].arm);
     let release_was_absent = !barrier.join("release").exists();
     // repeat_barrier prevents a timed-out A connection from permitting a later
     // A retry to bypass this gate while B's independent progress is observed.
@@ -177,24 +197,20 @@ async fn abandon_waiter_while_a_is_blocked<T>(
         .open(barrier.join("release"))
         .and_then(|mut file| std::io::Write::write_all(&mut file, b"fixture-release\n"))
         .unwrap();
-    let a_after_release = wait_for_cancel_without_business_retry(
-        client,
-        &targets[0].arm,
-        &targets[0].registration_hash,
-        command,
-    )
-    .await;
+    let a_delivery_after_release =
+        wait_for_delivery_without_business_retry(client, &targets[0], command, epoch).await;
     AbandonmentObservations {
-        b_before_release,
+        b_delivery_before_release,
         a_cancel_before_release,
+        a_ack_epoch_before_release,
         target_count_before_release,
-        a_after_release,
-        same_epoch,
+        a_delivery_after_release,
+        same_epoch: same_epoch_before_release && client.connection_epoch() == Some(epoch),
         release_was_absent,
     }
 }
 
-fn assert_independent_multi_arm_recovery(observed: AbandonmentObservations) {
+fn assert_independent_multi_arm_recovery(observed: AbandonmentObservations, command: Uuid) {
     assert!(
         observed.same_epoch,
         "the original authenticated guardian must remain alive"
@@ -204,20 +220,25 @@ fn assert_independent_multi_arm_recovery(observed: AbandonmentObservations) {
         "Arm A's gate must stay closed while observing B"
     );
     assert_eq!(
-        observed.a_cancel_before_release, None,
+        observed.a_cancel_before_release,
+        Some(command),
+        "A must already retain the exact Cancel while its Restore reply is held"
+    );
+    assert_eq!(
+        observed.a_ack_epoch_before_release, None,
         "A must still lack its Deliver ACK behind the barrier"
     );
     assert!(
-        observed.b_before_release,
-        "Arm B of the same proven job must progress after caller abort while A is still blocked"
+        observed.b_delivery_before_release,
+        "Arm B must have its exact Deliver ACK when observed after caller abort while A is still blocked"
     );
     assert_eq!(
         observed.target_count_before_release, 2,
         "one actor per original Arm must be reserved"
     );
     assert!(
-        observed.a_after_release,
-        "the already owned A operation must finish after its gate is released"
+        observed.a_delivery_after_release,
+        "the already owned A operation must receive its exact Deliver ACK after its gate is released"
     );
 }
 
@@ -439,7 +460,7 @@ async fn recovery_projection_retains_all_job_arms_before_an_abandoned_waiter() {
     // digest includes the original CID, authority, receipt and Arm deadline.
     drop(client);
     drop(child);
-    assert_independent_multi_arm_recovery(observed);
+    assert_independent_multi_arm_recovery(observed, command);
 }
 
 async fn close_fixture_and_open_report(
@@ -530,7 +551,7 @@ async fn recovery_report_job_retains_all_arms_before_an_abandoned_bootstrap_wait
     .await;
     drop(client);
     drop(child);
-    assert_independent_multi_arm_recovery(observed);
+    assert_independent_multi_arm_recovery(observed, command);
 }
 
 #[path = "d5_ledger_tests.rs"]

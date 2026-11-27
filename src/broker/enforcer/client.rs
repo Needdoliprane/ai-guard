@@ -15,7 +15,7 @@ use crate::{
     egress::ids::IdV1,
     runner::broker::FreshStartPermission,
     runtime::{
-        BeforeSpawnGuard, PrearmedStartControl,
+        PrearmedStartControl,
         bootstrap_stdin::{
             BootstrapStdinSubmitError, NativeBootstrapRelease, NativeConnectGuard,
             NativeConnectRefusal,
@@ -2246,6 +2246,8 @@ impl Client {
         self.authenticate(&mut stream).await?;
         write_frame(&mut stream, &request, MAX_FRAME, IO_TIMEOUT).await?;
         let response = read_frame(&mut stream, MAX_FRAME, timeout).await?;
+        #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+        retained_cancel_tests::hold_register_reply(&request, &response).await;
         #[cfg(test)]
         if is_begin
             && matches!(&response, Response::ProspectiveArmExchange { .. })
@@ -2561,7 +2563,12 @@ impl EnforcedSlot {
                 ));
             }
         };
-        if value.arm_id != arm.operation_id || value.registration_hash != self.local.digest {
+        if value.arm_id != permission.arm_id()
+            || value.registration_hash != self.local.digest
+            || value.generation != permission.generation()
+            || value.phase != SlotPhaseV1::Ready
+            || !value.prepared_once
+        {
             return Err(failure(
                 EnforcerFailureReason::ResponseBindingMismatch,
                 Some(&sample),
@@ -2601,13 +2608,14 @@ impl EnforcedSlot {
             .lock()
             .map_err(|_| failure(EnforcerFailureReason::LockPoisoned, Some(&sample)))? =
             (value, Instant::now());
-        Ok(PrearmedStartControl::with_launch_profile(
-            Box::new(SpawnGuard {
-                client: self.client.clone(),
-                local: Arc::clone(&self.local),
-                expected_generation,
-                clock,
-            }),
+        let guard = SpawnGuard {
+            client: self.client.clone(),
+            local: Arc::clone(&self.local),
+            permission,
+            clock,
+        };
+        Ok(PrearmedStartControl::with_owned_spawn_check(
+            move |authority, created| guard.check_before_spawn(authority, created),
             self.local.stop.subscribe(),
             registration.authority.docker_launch_profile.clone(),
             native_release,
@@ -2817,11 +2825,17 @@ impl WorkerReleaseDeadline {
 struct SpawnGuard {
     client: EnforcerClient,
     local: Arc<LocalSlot>,
-    expected_generation: u64,
+    // Keep the exact live claim (including its emitter) in the single-use
+    // guard until the last check for the registered spawn.
+    permission: FreshStartPermission,
     clock: Arc<NativeHostClock>,
 }
-impl BeforeSpawnGuard for SpawnGuard {
-    fn check_before_spawn(self: Box<Self>, target: &str) -> anyhow::Result<()> {
+impl SpawnGuard {
+    fn check_before_spawn(
+        self,
+        authority: &RuntimeAuthority,
+        created: &OwnedContainerSnapshot,
+    ) -> anyhow::Result<()> {
         let arm = &self.local.registration.arm;
         let failure = |reason, sample: Option<&HostClockSampleV1>| {
             EnforcerStageFailure::from_arm(arm, EnforcerStage::BeforeSpawn, reason, sample)
@@ -2845,15 +2859,24 @@ impl BeforeSpawnGuard for SpawnGuard {
             .status
             .lock()
             .map_err(|_| failure(EnforcerFailureReason::LockPoisoned, None))?;
-        if target != self.local.registration.owned.handle.id() {
+        if !self
+            .local
+            .registration
+            .matches_spawn_target(authority, created)
+        {
             return Err(failure(EnforcerFailureReason::TargetMismatch, None).into());
         }
-        if self.local.generation.current() != self.expected_generation
-            || self.expected_generation == u64::MAX
+        let expected_generation = self.permission.generation();
+        if self.local.generation.current() != expected_generation || expected_generation == u64::MAX
         {
             return Err(failure(EnforcerFailureReason::GenerationChanged, None).into());
         }
-        if let Some(reason) = spawn_snapshot_failure(status, self.expected_generation, received) {
+        if status.arm_id != self.permission.arm_id()
+            || status.registration_hash != self.local.digest
+        {
+            return Err(failure(EnforcerFailureReason::ResponseBindingMismatch, None).into());
+        }
+        if let Some(reason) = spawn_snapshot_failure(status, expected_generation, received) {
             return Err(failure(reason, None).with_slot_snapshot(status).into());
         }
         if *self.local.stop.borrow() {

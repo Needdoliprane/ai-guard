@@ -22,10 +22,21 @@
 
 use super::{bounded, content_hash, invalid};
 use serde_json::Value;
+use std::{
+    io::{self, Write},
+    os::fd::AsRawFd,
+    time::{Duration, Instant},
+};
 
 /// Upper bound of one framed conversation line (request or response). A frame
 /// beyond this bound is refused, never partially written or read.
 pub const MAX_FRAME_BYTES: usize = 64 * 1024;
+const MAX_WRITE_CHUNK_BYTES: usize = 4 * 1024;
+const JSON_FRAME_END: &[u8; 2] = b"}\n";
+const FRAME_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
+const WRITE_RETRY_INTERVAL: Duration = Duration::from_millis(5);
+const CHILD_REAP_TIMEOUT: Duration = Duration::from_secs(2);
+const CHILD_REAP_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 /// The exact `turn/start` request the control writes for one instruction. The
 /// control correlates it locally by `rpc_id`; the operation identity and the
@@ -265,10 +276,15 @@ impl ConversationAdapterV1 {
 /// instruction as a shell command and never opens a network socket: it is a
 /// pipe to the provider client process the trusted broker already owns.
 pub struct StdioConversation {
-    child: std::process::Child,
+    child: Option<std::process::Child>,
+    retire: std::sync::mpsc::Sender<std::process::Child>,
     stdin: Option<std::process::ChildStdin>,
     lines: std::sync::mpsc::Receiver<std::io::Result<String>>,
 }
+
+/// A borrowed, currently usable nonblocking FIFO writer. Preparation does
+/// not write to the pipe and precedes the durable emission latch.
+pub(crate) struct ConversationInput<'a>(&'a mut std::process::ChildStdin);
 
 impl StdioConversation {
     /// Spawn the provider client by program and separate arguments (no shell),
@@ -285,6 +301,7 @@ impl StdioConversation {
         args: &[std::ffi::OsString],
         env: &[(std::ffi::OsString, std::ffi::OsString)],
     ) -> std::io::Result<Self> {
+        require_waitable_children()?;
         let mut command = std::process::Command::new(program);
         command
             .args(args)
@@ -294,11 +311,30 @@ impl StdioConversation {
         for (key, value) in env {
             command.env(key, value);
         }
+        // Reserve a reaper before spawning the child. An abandoned channel
+        // hands off its child without waiting under the caller's locks.
+        let (retire, abandoned) = std::sync::mpsc::channel::<std::process::Child>();
+        let reaper = std::thread::Builder::new().spawn(move || {
+            if let Ok(mut child) = abandoned.recv()
+                && matches!(child.try_wait(), Ok(None))
+            {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        })?;
+        drop(reaper);
         let mut child = command.spawn()?;
         let stdin = child.stdin.take();
-        let stdout = child.stdout.take().expect("piped stdout");
+        let stdout = child.stdout.take();
         let (sender, lines) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
+        let channel = Self {
+            child: Some(child),
+            retire,
+            stdin,
+            lines,
+        };
+        let stdout = stdout.ok_or_else(|| io::Error::other("conversation stdout unavailable"))?;
+        let reader = std::thread::Builder::new().spawn(move || {
             use std::io::{BufRead, Read};
             let mut reader = std::io::BufReader::new(stdout);
             loop {
@@ -332,49 +368,234 @@ impl StdioConversation {
                     }
                 }
             }
-        });
-        Ok(Self {
-            child,
-            stdin,
-            lines,
-        })
+        })?;
+        drop(reader);
+        Ok(channel)
     }
 
-    /// Write one complete frame, newline-terminated, and flush. A partial or
+    // The fixture can retain the peer past child teardown to observe every
+    // byte already submitted to the stream, followed by EOF.
+    #[cfg(test)]
+    pub(crate) fn with_stdin_for_test(mut self, stdin: std::process::ChildStdin) -> Self {
+        self.stdin = Some(stdin);
+        self
+    }
+
+    /// Write one complete newline-terminated frame. A partial or
     /// failed write leaves delivery unknown; the caller never resends blindly.
-    pub fn write_frame(&mut self, frame: &str) -> std::io::Result<()> {
-        use std::io::Write;
-        invalid(frame.len() <= MAX_FRAME_BYTES).map_err(|_| {
-            std::io::Error::new(std::io::ErrorKind::InvalidInput, "frame too large")
-        })?;
+    pub fn write_frame(&mut self, frame: &str) -> io::Result<()> {
+        self.prepare_input()?
+            .write_frame_guarded(frame, |_, _| Ok(()), |&()| Ok(()))
+    }
+
+    pub(crate) fn prepare_input(&mut self) -> io::Result<ConversationInput<'_>> {
         let stdin = self
             .stdin
             .as_mut()
-            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::BrokenPipe, "stdin closed"))?;
-        stdin.write_all(frame.as_bytes())?;
-        stdin.write_all(b"\n")?;
-        stdin.flush()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::BrokenPipe, "stdin closed"))?;
+        ConversationInput::certify_pipe(stdin)?;
+        Ok(ConversationInput(stdin))
+    }
+
+    pub(crate) fn close_input(&mut self) {
+        self.stdin = None;
     }
 
     /// Read the next non-empty line within the deadline. Harness noise lines
     /// that are not JSON objects are skipped by the caller, not here.
     pub fn read_line(&mut self, deadline: std::time::Duration) -> std::io::Result<String> {
-        self.lines.recv_timeout(deadline).map_err(|_| {
-            std::io::Error::new(std::io::ErrorKind::TimedOut, "conversation read timed out")
-        })?
+        use std::sync::mpsc::RecvTimeoutError;
+
+        self.lines
+            .recv_timeout(deadline)
+            .map_err(|error| match error {
+                RecvTimeoutError::Timeout => {
+                    io::Error::new(io::ErrorKind::TimedOut, "conversation read timed out")
+                }
+                RecvTimeoutError::Disconnected => {
+                    io::Error::new(io::ErrorKind::UnexpectedEof, "conversation channel closed")
+                }
+            })?
     }
 
     /// Close the write side and reap the child. Used by STOP and by teardown.
     pub fn close(&mut self) {
-        self.stdin = None;
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        let _ = self.close_and_reap();
+    }
+
+    pub(crate) fn close_and_reap(&mut self) -> io::Result<()> {
+        self.close_input();
+        let Some(child) = &mut self.child else {
+            return Ok(());
+        };
+        if child.try_wait()?.is_none()
+            && let Err(error) = child.kill()
+            && child.try_wait()?.is_none()
+        {
+            return Err(error);
+        }
+        let deadline = Instant::now() + CHILD_REAP_TIMEOUT;
+        while child.try_wait()?.is_none() {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "conversation child exit was not observed",
+                ));
+            }
+            std::thread::sleep(remaining.min(CHILD_REAP_POLL_INTERVAL));
+        }
+        self.child = None;
+        Ok(())
+    }
+}
+
+/// Retaining a Child must retain the exited process's status and PID until
+/// its owner waits. Query the inherited disposition without changing it.
+fn require_waitable_children() -> io::Result<()> {
+    let mut action = std::mem::MaybeUninit::<libc::sigaction>::uninit();
+    // SAFETY: the null action queries SIGCHLD into the writable out-pointer.
+    if unsafe { libc::sigaction(libc::SIGCHLD, std::ptr::null(), action.as_mut_ptr()) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: the successful query initialized action.
+    let action = unsafe { action.assume_init() };
+    if action.sa_sigaction == libc::SIG_IGN || action.sa_flags & libc::SA_NOCLDWAIT != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "conversation requires waitable children (SIGCHLD)",
+        ));
+    }
+    Ok(())
+}
+
+impl ConversationInput<'_> {
+    /// Enter the effect guard for each syscall, including the newline. Frame
+    /// preparation and any wait for pipe capacity precede guard acquisition.
+    pub(crate) fn write_frame_guarded<G, E>(
+        &mut self,
+        frame: &str,
+        mut enter_effect: impl FnMut(usize, Instant) -> Result<G, E>,
+        check_effect: impl Fn(&G) -> Result<(), E>,
+    ) -> Result<(), E>
+    where
+        E: From<io::Error>,
+    {
+        if frame.len() > MAX_FRAME_BYTES {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "frame too large").into());
+        }
+        let prefix = frame
+            .strip_suffix('}')
+            .filter(|prefix| {
+                prefix.starts_with('{')
+                    && !prefix.contains(['\n', '\r'])
+                    && serde_json::from_str::<Value>(frame).is_ok_and(|value| value.is_object())
+            })
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid JSON frame"))?
+            .as_bytes();
+        let deadline = Instant::now() + FRAME_WRITE_TIMEOUT;
+        let mut written = 0;
+        loop {
+            let final_chunk = written == prefix.len();
+            // An EOF reader may parse its last line without a newline. Keep
+            // the JSON object unparseable until the atomic pipe write of }+LF.
+            let chunk = if final_chunk {
+                JSON_FRAME_END
+            } else {
+                &prefix[written..(written + MAX_WRITE_CHUNK_BYTES).min(prefix.len())]
+            };
+            let result = {
+                let effect = enter_effect(written, deadline)?;
+                check_effect(&effect)?;
+                if Instant::now() >= deadline {
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "conversation write timed out",
+                    )
+                    .into());
+                }
+                // ChildStdin is unbuffered. This is one nonblocking write;
+                // the guard drops before retry or any wait.
+                self.0.write(chunk)
+            };
+            match result {
+                Ok(count) if final_chunk && count == JSON_FRAME_END.len() => return Ok(()),
+                Ok(_) if final_chunk => {
+                    return Err(
+                        io::Error::other("incomplete atomic conversation terminator").into(),
+                    );
+                }
+                Ok(0) => return Err(io::Error::from(io::ErrorKind::WriteZero).into()),
+                Ok(count) => written += count,
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    let delay = deadline.saturating_duration_since(Instant::now());
+                    std::thread::sleep(WRITE_RETRY_INTERVAL.min(delay));
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+    }
+
+    fn certify_pipe(stdin: &std::process::ChildStdin) -> io::Result<()> {
+        let fd = stdin.as_raw_fd();
+        let mut facts = std::mem::MaybeUninit::<libc::stat>::uninit();
+        // SAFETY: fd is owned and live, and facts is writable.
+        if unsafe { libc::fstat(fd, facts.as_mut_ptr()) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: successful fstat initialized facts; fd is still live.
+        let kind = unsafe { facts.assume_init() }.st_mode & libc::S_IFMT;
+        // SAFETY: the descriptor remains owned for the path configuration query.
+        if kind != libc::S_IFIFO
+            || unsafe { libc::fpathconf(fd, libc::_PC_PIPE_BUF) }
+                <= JSON_FRAME_END.len() as libc::c_long
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "input pipe atomicity unavailable",
+            ));
+        }
+        // SAFETY: the owned ChildStdin keeps fd live for fcntl and poll.
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+        if flags < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if flags & libc::O_ACCMODE != libc::O_WRONLY {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "input pipe is not write-only",
+            ));
+        }
+        // SAFETY: fd is retained and this sets only the nonblocking status flag.
+        if unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let mut readiness = libc::pollfd {
+            fd,
+            events: libc::POLLOUT,
+            revents: 0,
+        };
+        // SAFETY: one live descriptor, one writable pollfd and no wait.
+        if unsafe { libc::poll(&mut readiness, 1, 0) } < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if readiness.revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "stdin peer closed",
+            ));
+        }
+        Ok(())
     }
 }
 
 impl Drop for StdioConversation {
     fn drop(&mut self) {
-        self.close();
+        self.close_input();
+        if let Some(child) = self.child.take() {
+            // The receiver waits for this single handoff until Drop.
+            let _ = self.retire.send(child);
+        }
     }
 }
 

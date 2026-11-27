@@ -82,23 +82,25 @@ impl std::fmt::Debug for LegacyStartVeto {
 /// A fresh start claim and the stop notification of an independently armed enforcer.
 /// Neither this notification nor the transport establishes a worker's terminal state.
 pub struct PrearmedStartControl {
-    guard: Box<dyn BeforeSpawnGuard>,
+    guard: OwnedSpawnCheck,
     stop: tokio::sync::watch::Receiver<bool>,
     launch_profile: Option<Box<launch_profile::DockerLaunchProfileBindingV1>>,
     stdout_tap: Option<crate::provider_activity::StdoutTap>,
     #[cfg(unix)]
     native_release: Option<Box<dyn bootstrap_stdin::NativeBootstrapRelease>>,
 }
+type OwnedSpawnCheck =
+    Box<dyn FnOnce(&RuntimeAuthority, &OwnedContainerSnapshot) -> Result<()> + Send>;
+
 impl PrearmedStartControl {
     pub fn new(guard: Box<dyn BeforeSpawnGuard>, stop: tokio::sync::watch::Receiver<bool>) -> Self {
-        Self {
+        Self::with_launch_profile(
             guard,
             stop,
-            launch_profile: None,
-            stdout_tap: None,
+            None,
             #[cfg(unix)]
-            native_release: None,
-        }
+            None,
+        )
     }
     pub(crate) fn with_launch_profile(
         guard: Box<dyn BeforeSpawnGuard>,
@@ -106,8 +108,22 @@ impl PrearmedStartControl {
         launch_profile: Option<launch_profile::DockerLaunchProfileBindingV1>,
         #[cfg(unix)] native_release: Option<Box<dyn bootstrap_stdin::NativeBootstrapRelease>>,
     ) -> Self {
+        Self::with_owned_spawn_check(
+            move |_, created| guard.check_before_spawn(created.handle.id()),
+            stop,
+            launch_profile,
+            #[cfg(unix)]
+            native_release,
+        )
+    }
+    pub(crate) fn with_owned_spawn_check(
+        guard: impl FnOnce(&RuntimeAuthority, &OwnedContainerSnapshot) -> Result<()> + Send + 'static,
+        stop: tokio::sync::watch::Receiver<bool>,
+        launch_profile: Option<launch_profile::DockerLaunchProfileBindingV1>,
+        #[cfg(unix)] native_release: Option<Box<dyn bootstrap_stdin::NativeBootstrapRelease>>,
+    ) -> Self {
         Self {
-            guard,
+            guard: Box::new(guard),
             stop,
             launch_profile: launch_profile.map(Box::new),
             stdout_tap: None,
@@ -123,19 +139,16 @@ impl PrearmedStartControl {
         self
     }
 }
-struct ProfileBoundSpawnGuard {
-    inner: Box<dyn BeforeSpawnGuard>,
-    expected: Option<Box<launch_profile::DockerLaunchProfileBindingV1>>,
-    prepared: Option<launch_profile::DockerLaunchProfileBindingV1>,
-}
-impl BeforeSpawnGuard for ProfileBoundSpawnGuard {
-    fn check_before_spawn(self: Box<Self>, target: &str) -> Result<()> {
-        ensure!(
-            self.expected.as_deref() == self.prepared.as_ref(),
-            "prepared Docker start profile differs from the armed control"
-        );
-        self.inner.check_before_spawn(target)
-    }
+fn check_profile_before_spawn(
+    expected: Option<&launch_profile::DockerLaunchProfileBindingV1>,
+    prepared: Option<&launch_profile::DockerLaunchProfileBindingV1>,
+    guard: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    ensure!(
+        expected == prepared,
+        "prepared Docker start profile differs from the armed control"
+    );
+    guard()
 }
 impl std::fmt::Debug for PrearmedStartControl {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -970,11 +983,13 @@ enum SpawnedPrearmedInput<'execution> {
 
 fn spawn_prearmed_cli<'execution>(
     mut command: Command,
-    target: &str,
+    authority: &RuntimeAuthority,
+    created: &OwnedContainerSnapshot,
     input: OwnedStartInput<'execution>,
-    guard: Box<dyn BeforeSpawnGuard>,
+    guard: impl FnOnce(&RuntimeAuthority, &OwnedContainerSnapshot) -> Result<()>,
     stop: &tokio::sync::watch::Receiver<bool>,
 ) -> Result<(tokio::process::Child, SpawnedPrearmedInput<'execution>)> {
+    let target = created.handle.id();
     command.args(["start", "--attach"]);
     match &input {
         OwnedStartInput::Historical(None) => {}
@@ -994,9 +1009,7 @@ fn spawn_prearmed_cli<'execution>(
         || RuntimePrestartStageFailure::new(RuntimePrestartStage::GuardBeforeSpawn, target);
     let spawn_failure = || RuntimePrestartStageFailure::new(RuntimePrestartStage::Spawn, target);
     // Keep the final trusted check adjacent to spawn.
-    guard
-        .check_before_spawn(target)
-        .with_context(guard_failure)?;
+    guard(authority, created).with_context(guard_failure)?;
     let mut child = command.spawn().with_context(spawn_failure)?;
     let input = match input {
         OwnedStartInput::Historical(archive) => SpawnedPrearmedInput::Historical(archive),
@@ -2224,13 +2237,20 @@ impl Runtime {
             !input.is_bootstrap() || native_release.is_some(),
             "retained bootstrap requires the original native worker release authorization"
         );
-        let guard: Box<dyn BeforeSpawnGuard> = Box::new(ProfileBoundSpawnGuard {
-            inner: guard,
-            expected: launch_profile,
-            prepared: prepared_profile,
-        });
-        let (mut child, input) =
-            spawn_prearmed_cli(command, &instance.target, input, guard, &stop)?;
+        let (mut child, input) = spawn_prearmed_cli(
+            command,
+            authority.binding(),
+            created,
+            input,
+            |authority, created| {
+                check_profile_before_spawn(
+                    launch_profile.as_deref(),
+                    prepared_profile.as_ref(),
+                    || guard(authority, created),
+                )
+            },
+            &stop,
+        )?;
         let input = match input {
             SpawnedPrearmedInput::Historical(archive) => archive,
             #[cfg(unix)]
@@ -3109,24 +3129,69 @@ mod capture_error_tests {
             (Some(binding.clone()), None, false),
         ] {
             let before = count.load(Ordering::SeqCst);
-            let guard = Box::new(ProfileBoundSpawnGuard {
-                inner: Box::new(Count(count.clone())),
-                expected: expected.map(Box::new),
-                prepared,
+            let result = check_profile_before_spawn(expected.as_ref(), prepared.as_ref(), || {
+                Box::new(Count(count.clone())).check_before_spawn("synthetic-cid")
             });
-            assert_eq!(guard.check_before_spawn("synthetic-cid").is_ok(), ok);
+            assert_eq!(result.is_ok(), ok);
             assert_eq!(count.load(Ordering::SeqCst), before + usize::from(ok));
         }
         let mut other = binding.clone();
         other.parent_operation_id = Uuid::from_u128(4);
         let before = count.load(Ordering::SeqCst);
-        let guard = Box::new(ProfileBoundSpawnGuard {
-            inner: Box::new(Count(count.clone())),
-            expected: Some(Box::new(binding)),
-            prepared: Some(other),
+        let result = check_profile_before_spawn(Some(&binding), Some(&other), || {
+            Box::new(Count(count.clone())).check_before_spawn("synthetic-cid")
         });
-        assert!(guard.check_before_spawn("synthetic-cid").is_err());
+        assert!(result.is_err());
         assert_eq!(count.load(Ordering::SeqCst), before);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn prepare_bound_spawn_rejects_another_operation_with_the_same_cid() -> Result<()> {
+        use crate::broker::journal::retirement_live_fixture::live_fixture;
+
+        let fixture = live_fixture();
+        let target = fixture.registration.prospective()?;
+        let expected = target.owned();
+        let mut different = serde_json::to_value(expected)?;
+        different["handle"]["operation"] = serde_json::json!(Uuid::from_u128(42));
+        let different: OwnedContainerSnapshot = serde_json::from_value(different)?;
+        assert_eq!(different.handle.id(), expected.handle.id());
+        assert_ne!(
+            different.handle.operation_id(),
+            expected.handle.operation_id()
+        );
+
+        let temporary = tempfile::tempdir()?;
+        let nonexistent = temporary.path().join("no-runtime-program");
+        let (_stop_owner, stop) = tokio::sync::watch::channel(false);
+        let stage = |created: &OwnedContainerSnapshot| -> Result<RuntimePrestartStage> {
+            let Err(error) = spawn_prearmed_cli(
+                Command::new(&nonexistent),
+                target.authority(),
+                created,
+                OwnedStartInput::Historical(None),
+                |authority, created| {
+                    ensure!(
+                        fixture
+                            .registration
+                            .matches_spawn_target(authority, created),
+                        "Prepare target diverged"
+                    );
+                    Ok(())
+                },
+                &stop,
+            ) else {
+                bail!("the nonexistent test program was unexpectedly spawned");
+            };
+            Ok(error
+                .downcast_ref::<RuntimePrestartStageFailure>()
+                .context("expected the prestart stage")?
+                .stage())
+        };
+        assert_eq!(stage(expected)?, RuntimePrestartStage::Spawn);
+        assert_eq!(stage(&different)?, RuntimePrestartStage::GuardBeforeSpawn);
+        Ok(())
     }
 
     #[tokio::test]

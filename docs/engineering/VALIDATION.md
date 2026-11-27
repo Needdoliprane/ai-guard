@@ -1,5 +1,152 @@
 # Validation courante
 
+## 27 novembre 2026 — écriture et fermeture d’une conversation
+
+Le libtest Darwin ARM64 de `b15b974e` (arbre `bf962286`) compile.
+Huit sélecteurs passent une fois chacun. Ils vérifient la récolte du
+processus stdio de recette à l’abandon du canal, deux tours de dialogue,
+l’incertitude après une coupure, les arrêts avant le premier octet et
+pendant l’attente d’un acquittement, le rejeu d’arrêt, la conservation du
+prédécesseur exact et l’absence de redirection d’un message épinglé.
+
+La vérification de l’autorité précède chaque écriture non bloquante.
+La fermeture explicite donne deux secondes à l’observation de la sortie
+du processus. Une sortie non confirmée reste à examiner lors du rejeu.
+Manifeste privé du gel
+`f48742c7256fcb46018f6b9af1fc3fde080ff68a322ec944865a30a4fe079cb7`.
+Les sources Rust du gel sont reprises dans `1fd4b524`. La qualification
+exacte du commit d’intégration, le canal fournisseur réel, l’identité du
+thread natif et la preuve de reprise après perte de liaison restent ouverts.
+
+## 27 novembre 2026 — cible Prepare, garde stdin E3 et fenêtres OIDC
+
+Le libtest Darwin ARM64 du gel `302e0db7` (arbre `ce6381d5`) compile.
+La garde de démarrage refuse le même conteneur lorsqu’il est présenté
+avec une autre opération. Deux sélecteurs vérifient les appels de
+démarrage avec bootstrap retenu et au format historique. Le témoin
+E3 observe les deux acquittements durables, le premier octet, puis
+l’EOF seulement après fermeture explicite par l’appelant. La garde
+Prepare et la possession du stdin correspondent aux blobs intégrés
+dans `9d4c00de`, `3b325e66`, `c463a5ee` et `0014342f`. Ces tests
+utilisent des fixtures. Le témoin DockerNormalCompletion et le passage
+du canal vers une conversation fournisseur réelle restent ouverts.
+
+La fenêtre commune de démarrage, la séparation des places natives
+et la capacité réservée à un tenant passent avec une horloge de test
+par instance. Le test d’échéance confirme le refus sur la borne de
+15 secondes et la collecte ultérieure du propriétaire expiré. Ce lot
+est repris dans `1e12c32b`. Manifeste du sélecteur d’échéance
+`483830973483b208d1c9cf3202119819aab240367c4a3bc1baa2262ea29b880a`.
+
+Le test de projection refuse le format SQLite 16 dans `d3361218`.
+Le témoin de faute après COMMIT échoue à l’ouverture SQLite sans
+suivi de lien sous `/var`, puis passe sur le même libtest avec le
+répertoire temporaire canonique. Le candidat `c5237daf` canonise
+le chemin dans cette fixture. Son rejeu à partir du candidat exact
+reste à exécuter. Manifeste du rejeu
+`f32946c0502af901dc6d52bfb0d5c0894c26afff18ccf7c2e045e1488def6858`.
+
+Sur le même gel, la suite conversation passe 16 cas, dont les gardes
+du premier octet et d’EOF, et échoue sur le retour de STOP quand un
+tiers occupe l’epoch. Le canal observateur ignoré par le libtest est
+invoqué par son test parent. Un sélecteur isolé passe pour la
+conservation du canal remplacé. Le composeur reste en validation.
+Manifeste commun
+`16f52bba75988cd38d955850e1a0716a2642c686e3df038654448bb3458c5a36`.
+
+## 27 novembre 2026 — CI e1f24fa5 et garde durable des ACK
+
+Sur `e1f24fa5`, la CI réussit le front et signale 37 échecs Rust
+sur 10 cibles. La comparaison avec `16dd21b9` retrouve 36 cas
+communs. Un cas de fenêtre OIDC apparaît et le cas de réserve
+workload disparaît de la liste des échecs.
+[CI du gel](https://github.com/Needdoliprane/ai-guard/actions/runs/45907054605)
+et manifeste privé
+`ac9420dc3cc4bc1fd39bfef8b4c934e096e5955ce62d10e923bcddc8edb2d4b8`.
+
+La fixture d’alias attendait 503 sur le GET de protocole réservé.
+Le chemin exact exige des identifiants et retourne 401 sans eux.
+`c5044bed` aligne l’attente sans changer les routes. Deux tests
+existants sur le gel `0662d993` vérifient les refus avant Store et
+les limites de GET public, HEAD et des mutations. Le tableau
+modifié attend un rejeu sur la nouvelle candidate.
+Manifeste `3870b0c10a86d49b6fbc7df278b060c80d94a9e7d2228a00b6a2ae3576384ba1`.
+
+Les deux cas Store14 et Store15 reproduisent sur `e50a37d1` un
+nouvel ACK accepté après STOP ou rebind durable. Sur `0662d993`,
+ils passent avec les 17 tests de composition. Un reçu déjà committé
+reste rejouable et un nouvel ACK doit correspondre à la liaison
+active et à son epoch. Les deux patches sont repris par `96e05970`
+et `34d547b4`. Ces oracles séparent la mutation durable de la
+notification du composeur. L’injection d’un retour `EpochExpired`
+après COMMIT et le reap du canal remplacé gardent leurs preuves
+propres. Manifestes RED
+`8aaff7df5755676e70a0c78431d43316162ee7e29370ba2aa25d314b7d40d888`
+et GREEN
+`e73c07b300b1d94632ae994c85eec2cd0db09450ff6b74d8155dd7ede4a607d7`.
+
+## 27 novembre 2026 — régressions ciblées conversation et enforcer
+
+Le libtest de `63fe6a03` (arbre `1b6776e5`) compile. La famille
+conversation passe 13 cas, dont les témoins du premier octet, de la
+fin JSON à EOF et du rejeu STOP jusqu’à fermeture. Le processus de
+lecture EOF est exécuté par son test parent. Les huit sélecteurs
+enforcer qui échouaient sur `16dd21b9` passent séparément. Ils
+utilisent les fixtures corrigées dans `dff416f5`, `038dd12c` et
+`69c9371d`, reprises avec les mêmes blobs source.
+
+Manifeste des sélecteurs de `63fe6a03`
+`c2eeff44d06eeb4abf4a1a97e3a01759da687679a4b62ea26d620f8fd51229b2`.
+
+Le test ajouté dans `3aaabf2b` reproduit l’attente de STOP derrière
+une réponse non corrélable, code 101. Le gel `6da488b0` passe ensuite
+16 tests de conversation, dont cette régression et les deux cas de
+rejeu de bind. Le sélecteur Service sur un acquittement STOP d’un
+nouvel epoch passe également. Ses deux blobs sont repris dans
+`a9867f7c`. Manifeste des exécutions
+`ccf80b49848b5b05af8b02e1200c56ee2c5b5a263c5830312bcc8e4f80f11e74`.
+
+La revue de `6da488b0` garde deux cas ouverts. Une réponse valide
+concurrente peut engager la reprise de l’epoch alors que STOP attend
+la fin de la lecture. Une déconnexion peut aussi être confondue avec
+le délai de lecture. Le correctif conversation reste sur son gel de
+validation. Le fournisseur et le raccord broker de production gardent
+leurs preuves propres.
+
+Sur `3b515be2`, les deux sélecteurs reproduisent l’attente d’un ACK
+derrière un epoch et la seconde lecture d’un canal déjà déconnecté.
+Le gel corrigé `3d4b3e22` passe 17 tests de conversation et 12 tests
+stdio. Dans le candidat, `fbe39505` reprend le delta EOF et son test
+avec une empreinte de patch identique. Manifeste RED
+`8fcfed3d183882ba9a6582dc8d1899492d99aa31047d750ec2ac4d4e68423d05`
+et manifeste GREEN
+`3c7387b55772228e50f8bf500bfefd74d15813b7a190811896392d16d7b68bfb`.
+
+La revue garde ouvert l’ordre après un COMMIT durable dont la validation
+finale renvoie `EpochExpired`. Le Store doit encore refuser un nouvel
+ACK pour une liaison fermée ou remplacée dans ce cas. Le rebind doit
+également conserver l’ancien canal tant que sa fermeture physique
+reste à confirmer. Ces deux cas maintiennent le composeur sur son gel
+de validation.
+
+## 27 novembre 2026 — canal de conversation dans Chromium
+
+Le front de `bf64c76e` passe les six vérifications dans Chromium
+148.0.7778.96 sur une fixture HTTP en loopback. Les 131 fichiers suivis
+du front correspondent au gel. Le navigateur ouvre le canal depuis
+Ressources ou avec un UUID connu, vérifie le focus et le clavier, relit
+une fois après `session_closed` et retire l’envoi à échéance sans requête
+supplémentaire. Un changement de contexte annule la lecture en vol et
+efface la sélection et le brouillon.
+
+La recette produit un seul POST synthétique, zéro requête externe et
+zéro erreur de page. La fermeture de Chromium et du listener est
+vérifiée. Reçu `ba73fd2acea75c89d5a6322f1354a0280692662026b7b6e89094bc6e1139a7c0`.
+Manifeste des douze pièces privées
+`cad808da4f3c851dda5054621893c8c4e4e8a011d4bcb1415a6962d038012f4d`.
+La recette utilise des réponses de fixture. Le passage par le gateway
+Rust et l’envoi à un fournisseur réel restent à éprouver ensemble.
+
 ## 27 novembre 2026 — publication unique MySQL owned 14 et 15
 
 Sur `e992a5a1` (arbre `d5b590e7`), le sélecteur exact

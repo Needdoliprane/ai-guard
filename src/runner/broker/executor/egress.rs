@@ -56,6 +56,8 @@ pub(super) struct EgressOpeningProgress {
     pub(super) opening_http: OnceLock<(u128, u16)>,
     pub(super) opening_receipt_held: OnceLock<Instant>,
     pub(super) release_intent_ack: OnceLock<Instant>,
+    pub(super) release_submitted: OnceLock<Instant>,
+    pub(super) close_release_stdin: Notify,
     pub(super) stop: OnceLock<Instant>,
     pub(super) callback_failed: OnceLock<Instant>,
     writer_failure: OnceLock<(Instant, EgressWitnessWriterFailure)>,
@@ -425,14 +427,19 @@ impl Execution<'_> {
             // The native authorization supplies the original generation and
             // deadline. This veto has local checks only.
             let mut native_stop: watch::Receiver<bool> = bootstrap.stop_receiver();
-            let authorization =
-                bootstrap.submit_once(runtime.binding(), &reinspected, head, || {
-                    // The only channel-stop sender stays here through the write.
-                    // The native owner orders its independent STOP with submission.
-                    ensure!(!stop.is_stopped(), "retained egress channel has stopped");
-                    self.require_egress_live(exec)
-                })?;
-            let authorization = Arc::from(authorization);
+            let submitted = bootstrap.submit_once(runtime.binding(), &reinspected, head, || {
+                // The only channel-stop sender stays here through the write.
+                // The native owner orders its independent STOP with submission.
+                ensure!(!stop.is_stopped(), "retained egress channel has stopped");
+                self.require_egress_live(exec)
+            })?;
+            #[cfg(test)]
+            if let Ok(progress) = EGRESS_OPENING_PROGRESS.try_with(Arc::clone) {
+                progress.mark(&progress.release_submitted);
+                progress.close_release_stdin.notified().await;
+            }
+            // The batch release protocol requires EOF before the worker proceeds.
+            let authorization = Arc::from(submitted.close_stdin());
             let stop = Arc::new(stop);
             let task_stop = Arc::clone(&stop);
             let task = tokio::spawn(async move {

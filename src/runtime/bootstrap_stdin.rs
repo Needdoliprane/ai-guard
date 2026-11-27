@@ -189,6 +189,22 @@ pub(crate) struct PreparedBootstrapStdin {
     native_release: Box<dyn NativeBootstrapRelease>,
 }
 
+/// The original stdin owner after successful guarded release submission.
+/// The endpoint stays private to the trusted runtime. The one-shot executor
+/// explicitly closes it before handing the native guard to egress supervision.
+#[must_use = "finish the guarded bootstrap stdin handoff"]
+pub(crate) struct SubmittedBootstrapStdin {
+    stdin: PrearmedBootstrapStdin,
+    authorization: Box<dyn NativeConnectGuard>,
+}
+
+impl SubmittedBootstrapStdin {
+    pub(crate) fn close_stdin(self) -> Box<dyn NativeConnectGuard> {
+        drop(self.stdin);
+        self.authorization
+    }
+}
+
 impl PreparedBootstrapStdin {
     #[allow(dead_code)] // Consumed by the separate broker composition.
     pub(crate) fn owned(&self) -> &OwnedContainerSnapshot {
@@ -209,16 +225,16 @@ impl PreparedBootstrapStdin {
     /// may check only in-memory liveness and proof under the native gate.
     /// The caller keeps the channel owned through submission and orders local
     /// revocation of release authority with that gate.
-    /// Success establishes one submission to the existing local CLI pipe
-    /// and transfers the retained slot guard for subsequent egress connects.
-    #[allow(dead_code)] // Consumed by the separate broker composition.
+    /// Success transfers the same writer and native slot guard together after
+    /// one complete submission to the existing local CLI pipe. Any failure
+    /// drops stdin and yields no owner for further use.
     pub(crate) fn submit_once(
         self,
         inspected_authority: &RuntimeAuthority,
         reinspected: &ContainerObservation,
         head: EgressReleaseHeadPermit,
         check_live_release: impl FnOnce() -> Result<()>,
-    ) -> Result<Box<dyn NativeConnectGuard>, BootstrapStdinSubmitError> {
+    ) -> Result<SubmittedBootstrapStdin, BootstrapStdinSubmitError> {
         let Self {
             stdin,
             stop,
@@ -228,7 +244,7 @@ impl PreparedBootstrapStdin {
             native_release,
         } = self;
         let frame = crate::egress::bootstrap_release::encode_frame(&attempt);
-        let result = native_release.submit(
+        let authorization = native_release.submit(
             &authority,
             &observed,
             &attempt,
@@ -258,10 +274,11 @@ impl PreparedBootstrapStdin {
                     .map_err(|_| BootstrapStdinSubmitError::Refused)?;
                 stdin.write_once(&frame)
             }),
-        );
-        // Closing the exclusive endpoint delivers EOF outside the native gate.
-        drop(stdin);
-        result
+        )?;
+        Ok(SubmittedBootstrapStdin {
+            stdin,
+            authorization,
+        })
     }
 }
 

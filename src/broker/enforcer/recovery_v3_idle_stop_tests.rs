@@ -360,15 +360,8 @@ async fn authenticated_stop_cannot_reserve_new_actor_after_idle_close() {
             value: Box::new(before),
         },
     )
-    .await
-    .unwrap();
-    assert!(matches!(
-        before_reply,
-        ReplyValue3::StopReserved {
-            replayed: false,
-            ..
-        }
-    ));
+    .await;
+    assert!(matches!(before_reply, Err(EnforcerError::NotReady)));
     drop(before_connection);
     fixture.discard_unstarted_canary(&before_arm);
 
@@ -474,39 +467,19 @@ async fn real_ledger_failure_preserves_authenticated_new_stop_recovery() {
     let value = fixture.restore_request("ledger-failure-new-stop");
     let arm_id = value.registration.arm.operation_id.clone();
     let mut stop = fixture.stop_connection().await;
-    let reserved = request(
+    let restore = request(
         &mut stop,
         StopRequest::RestoreRequiredStop {
             value: Box::new(value.clone()),
         },
     )
-    .await
-    .unwrap();
-    let new_reserved = matches!(
-        reserved,
-        ReplyValue3::StopReserved {
-            replayed: false,
-            ..
-        }
-    );
-
-    let actor = fixture.state.slots.lock().unwrap().get(&arm_id).cloned();
-    let Some(actor) = actor else {
-        drop((full_stream, stop));
-        drop(full);
-        finish_failed_ledger_fixture(fixture).await;
-        panic!("a ledger failure must preserve new STOP reservation; reserved={new_reserved}");
-    };
-    assert!(!actor.worker_owned.load(Ordering::SeqCst));
-    assert!(!actor.fail_spawn_once.load(Ordering::SeqCst));
-    let first_snapshot = actor.snapshot().unwrap();
-    assert_eq!(first_snapshot.phase, StopPhaseV1::Quarantined);
-    assert_eq!(first_snapshot.stop_failures, 1);
+    .await;
+    let actor = defer_failed_stop_actor(&fixture.state, &arm_id)
+        .expect("a ledger failure must preserve the exact failed STOP reservation");
 
     // Defer this fixture's retry deadline, as in the anchor transport fixture.
     // The additional pre-spawn guard catches any bypass without an OS thread.
     // This verifies replay while deferred, not the runtime retry schedule.
-    *actor.next_start.lock().unwrap() = Instant::now() + Duration::from_secs(3600);
     actor.fail_spawn_once.store(true, Ordering::SeqCst);
     let mut replay = fixture.stop_connection().await;
     let replayed = request(
@@ -515,9 +488,7 @@ async fn real_ledger_failure_preserves_authenticated_new_stop_recovery() {
             value: Box::new(value),
         },
     )
-    .await
-    .unwrap();
-    let replay_reserved = matches!(replayed, ReplyValue3::StopReserved { replayed: true, .. });
+    .await;
     let no_replay_attempt = actor.fail_spawn_once.swap(false, Ordering::SeqCst);
     let final_snapshot = actor.snapshot().unwrap();
     assert!(!actor.worker_owned.load(Ordering::SeqCst));
@@ -541,8 +512,8 @@ async fn real_ledger_failure_preserves_authenticated_new_stop_recovery() {
     assert!(full_refused);
     assert!(ledger_partial);
     assert!(full_still_unhealthy);
-    assert!(new_reserved);
-    assert!(replay_reserved);
+    assert!(matches!(restore, Err(EnforcerError::NotReady)));
+    assert!(matches!(replayed, Err(EnforcerError::NotReady)));
     assert!(no_replay_attempt, "replay attempted another business spawn");
     assert_eq!(final_snapshot.stop_failures, 1);
 }
