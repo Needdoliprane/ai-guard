@@ -1,6 +1,7 @@
 use super::*;
 use crate::{
-    control::*,
+    broker::service::protocol::BrokerErrorCodeV1,
+    control::{session_control::LegacyConfirmedLaunchSpecV1, *},
     runtime::{
         ContainerHandle, ContainerObservation, InvocationBindingV1, ManagedRuntime,
         OwnedContainerSnapshot, RuntimeAuthority, StartDirective,
@@ -886,6 +887,100 @@ use private_state::{AttemptGuard, Directory};
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    #[test]
+    fn named_workspace_archive_survives_reopen_and_preserves_an_orphan() -> Result<()> {
+        use crate::control::session_control::LegacyConfirmedPlanV1;
+        use std::os::unix::fs::PermissionsExt;
+
+        let temporary = tempfile::Builder::new()
+            .permissions(fs::Permissions::from_mode(0o700))
+            .tempdir()?;
+        let path = temporary.path().canonicalize()?;
+        let source = path.join("source");
+        fs::create_dir(&source)?;
+        let original = source.join("tracked.txt");
+        fs::write(&original, b"confirmed contents")?;
+        let workspace = workspace::prepare_workspace(&source, Limits::default())?;
+        let retry = workspace::prepare_workspace(&source, Limits::default())?;
+        let digest = hex::encode(Sha256::digest(fs::read(workspace.archive.path())?));
+        let manifest = workspace.manifest.clone();
+        let config = crate::control_fs::Directory::open_or_create(&path.join("config"))?;
+        let operation = Uuid::new_v4();
+        let session = Uuid::new_v4();
+        let launch = LaunchSpecV1 {
+            version: 1,
+            session_id: session.to_string(),
+            command: CommandSpec {
+                argv: vec!["/usr/bin/id".into(), "-u".into()],
+                cwd: "/workspace".into(),
+            },
+            profile: "strict".into(),
+            runtime_kind: RuntimeKindV1::Docker,
+            authority_id: Uuid::new_v4().to_string(),
+            image_ref: "worker:fixture".into(),
+            image_id: format!("sha256:{}", "c".repeat(64)),
+            network: NetworkV1::None,
+            cpu_millis: 2000,
+            memory_bytes: 1_073_741_824,
+            pids_limit: 256,
+            timeout_seconds: 30,
+            security_preset: SecurityPresetV1::FixedSandboxV2,
+            restart_policy: RestartPolicyV1::No,
+            workspace_manifest_digest: content_hash("ai-guard:workspace-manifest:v1", &manifest)?,
+            workspace_import_policy_version: 1,
+            provider: "generic".into(),
+            capture_output: false,
+            credential_binding_id: None,
+            credential_names: vec![],
+            provider_resolution: None,
+            egress: None,
+        };
+        let material = LegacyConfirmedLaunchSpecV1 {
+            version: 1,
+            plan: LegacyConfirmedPlanV1 {
+                version: 1,
+                binding_ref: Uuid::new_v4(),
+                control_namespace_uuid: Uuid::new_v4().to_string(),
+                operation_id: operation,
+                session_id: session,
+                launch_target_id: Uuid::new_v4(),
+                target_revision: 1,
+                broker_profile_id: "fixture-profile".into(),
+                launch_spec_hash: launch.spec_hash()?,
+                expires_at: chrono::DateTime::from_timestamp(4_102_444_800, 0).unwrap(),
+            },
+            launch,
+        };
+
+        fs::remove_file(original)?;
+        let retained = retain_legacy_named_archive(&config, operation, &material, workspace)?;
+        assert_eq!(retained.archive_name, format!("{operation}.tar"));
+        assert_eq!(retained.archive_digest, digest);
+        assert_eq!(retained.manifest, manifest);
+        let error = retain_legacy_named_archive(&config, operation, &material, retry)
+            .err()
+            .expect("an archive without an acknowledgement requires reconciliation");
+        assert_eq!(
+            error.downcast_ref::<crate::broker::service::protocol::BrokerErrorCodeV1>(),
+            Some(&crate::broker::service::protocol::BrokerErrorCodeV1::NeedsReconciliation)
+        );
+
+        let bytes = serde_json::to_vec(&retained)?;
+        drop(config);
+        let reopened = crate::control_fs::Directory::open_existing(&path.join("config"))?;
+        let proof: LegacyNamedWorkspaceArchiveV1 = serde_json::from_slice(&bytes)?;
+        let archive = proof.reopen(&reopened, operation, &material)?;
+        assert_eq!(
+            workspace::scan_workspace_archive(archive, Limits::default())?,
+            manifest
+        );
+        let empty = crate::control_fs::Directory::open_or_create(&path.join("other-config"))?;
+        assert!(proof.reopen(&empty, operation, &material).is_err());
+        assert!(!empty.path().join("sessions").exists());
+        Ok(())
+    }
+
     #[test]
     fn postprocessing_payload_without_projection_keeps_its_legacy_bytes() {
         let legacy = r#"{"version":1,"declared":{"state":"pending","normalized_events":null,"acknowledged_events":null,"dropped_events":null,"unknown_delivery_events":null,"not_attempted_events":null,"stdout_truncated":null,"unterminated_final_line_omitted":null,"error":null},"diff":null,"diff_error":null,"coverage_revision":0,"coverage":null,"coverage_acknowledged":false,"coverage_error":null,"previous_delivery_error":null}"#;
@@ -1650,14 +1745,108 @@ pub(super) struct BrokerPreparation<'a> {
 
 pub(super) fn broker_require_new_archive(config: &Path, operation: Uuid) -> Result<()> {
     let root = crate::control_fs::Directory::open_existing(config)?;
+    require_new_archive_sessions(&root, &format!("{operation}.tar"))?;
+    Ok(())
+}
+
+fn require_new_archive_sessions(
+    root: &crate::control_fs::Directory,
+    archive_name: &str,
+) -> Result<crate::control_fs::Directory> {
     let sessions = root.child("sessions")?;
     sessions.sync()?;
     root.sync()?;
     anyhow::ensure!(
         sessions
-            .private_entry(std::ffi::OsStr::new(&format!("{operation}.tar")))?
+            .private_entry(std::ffi::OsStr::new(archive_name))?
             .is_none(),
         "unbound workspace archive requires reconciliation; original source was not reread"
+    );
+    Ok(sessions)
+}
+
+/// Private evidence for the exact archive retained before named admission.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct LegacyNamedWorkspaceArchiveV1 {
+    version: u32,
+    archive_name: String,
+    archive_digest: String,
+    manifest: Manifest,
+}
+
+impl LegacyNamedWorkspaceArchiveV1 {
+    pub(super) fn reopen(
+        &self,
+        config: &crate::control_fs::Directory,
+        operation: Uuid,
+        material: &LegacyConfirmedLaunchSpecV1,
+    ) -> Result<fs::File> {
+        require_named_archive_manifest(operation, material, &self.manifest)?;
+        anyhow::ensure!(
+            self.version == 1 && self.archive_name == format!("{operation}.tar"),
+            "workspace archive identity differs from the confirmed operation"
+        );
+        hash(&self.archive_digest)?;
+        let sessions = Directory::from_control(config.open_existing_child("sessions")?)?;
+        open_verified_workspace_archive(
+            &sessions,
+            &self.archive_name,
+            &self.archive_digest,
+            &self.manifest,
+            &material.launch.workspace_manifest_digest,
+        )
+        .map_err(|_| BrokerErrorCodeV1::NeedsReconciliation.into())
+    }
+}
+
+/// Persist the supplied collection once; any interrupted publication requires
+/// reconciliation of the existing archive and its checkpoint.
+#[allow(
+    dead_code,
+    reason = "the named broker preparation caller is a separate G04 integration"
+)]
+pub(super) fn retain_legacy_named_archive(
+    config: &crate::control_fs::Directory,
+    operation: Uuid,
+    material: &LegacyConfirmedLaunchSpecV1,
+    workspace: workspace::PreparedWorkspace,
+) -> Result<LegacyNamedWorkspaceArchiveV1> {
+    require_named_archive_manifest(operation, material, &workspace.manifest)?;
+    let archive_name = format!("{operation}.tar");
+    let sessions = require_new_archive_sessions(config, &archive_name)
+        .and_then(Directory::from_control)
+        .map_err(|_| BrokerErrorCodeV1::NeedsReconciliation)?;
+    let archive_digest = sessions
+        .copy_archive(&archive_name, workspace.archive.reopen()?)
+        .map_err(|_| BrokerErrorCodeV1::NeedsReconciliation)?;
+    let retained = LegacyNamedWorkspaceArchiveV1 {
+        version: 1,
+        archive_name,
+        archive_digest,
+        manifest: workspace.manifest,
+    };
+    retained
+        .reopen(config, operation, material)
+        .map_err(|_| BrokerErrorCodeV1::NeedsReconciliation)?;
+    Ok(retained)
+}
+
+fn require_named_archive_manifest(
+    operation: Uuid,
+    material: &LegacyConfirmedLaunchSpecV1,
+    manifest: &Manifest,
+) -> Result<()> {
+    material.validate()?;
+    anyhow::ensure!(
+        !operation.is_nil() && operation == material.plan.operation_id,
+        "workspace archive operation differs from the confirmation"
+    );
+    anyhow::ensure!(
+        manifest.values().all(|file| file.mode.is_some())
+            && content_hash("ai-guard:workspace-manifest:v1", manifest)?
+                == material.launch.workspace_manifest_digest,
+        "workspace manifest differs from the confirmed launch"
     );
     Ok(())
 }
@@ -1755,15 +1944,31 @@ pub(super) async fn broker_prepare(input: BrokerPreparation<'_>) -> Result<Manag
 
 pub(super) fn broker_archive(checkpoint: &ManagedCheckpoint) -> Result<fs::File> {
     let sessions = Directory::root(&checkpoint.config_root)?.child("sessions")?;
-    let mut archive = sessions.archive(&checkpoint.archive_name, &checkpoint.archive_digest)?;
+    open_verified_workspace_archive(
+        &sessions,
+        &checkpoint.archive_name,
+        &checkpoint.archive_digest,
+        &checkpoint.before,
+        &checkpoint.admission.launch.workspace_manifest_digest,
+    )
+}
+
+fn open_verified_workspace_archive(
+    sessions: &Directory,
+    archive_name: &str,
+    archive_digest: &str,
+    expected_manifest: &Manifest,
+    expected_manifest_digest: &str,
+) -> Result<fs::File> {
+    let mut archive = sessions.archive(archive_name, archive_digest)?;
     let manifest = workspace::scan_workspace_archive(&mut archive, Limits::default())?;
     // Old checkpoints did not observe modes. Preserve exactly their recorded
     // coverage while still checking all paths, content and known modes.
-    let manifest = workspace::manifest_at_recorded_coverage(&checkpoint.before, &manifest);
+    let manifest = workspace::manifest_at_recorded_coverage(expected_manifest, &manifest);
     anyhow::ensure!(
-        manifest == checkpoint.before
+        &manifest == expected_manifest
             && content_hash("ai-guard:workspace-manifest:v1", &manifest)?
-                == checkpoint.admission.launch.workspace_manifest_digest,
+                == expected_manifest_digest,
         "immutable archive manifest differs from the admitted workspace"
     );
     use std::io::{Seek, SeekFrom};
