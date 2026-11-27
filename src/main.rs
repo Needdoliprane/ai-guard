@@ -1784,10 +1784,7 @@ mod tests {
         let gateway = Cli::try_parse_from(["agentsandbox", "gateway"]).unwrap();
         assert!(matches!(
             gateway.command,
-            Command::Gateway(GatewayArgs {
-                max_events: 100_000,
-                ..
-            })
+            Command::Gateway(args) if args.max_events == 100_000
         ));
 
         let offline = [
