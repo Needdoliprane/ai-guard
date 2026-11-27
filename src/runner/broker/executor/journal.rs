@@ -242,6 +242,10 @@ impl<'a> Execution<'a> {
             .context("job is unavailable")?;
         ensure!(same(job.scope(), context.scope())?, "job scope mismatch");
         ensure!(
+            !job.requires_legacy_named_execution(),
+            "named admission requires the authenticated named execution transport"
+        );
+        ensure!(
             executor.enforcer.full3().is_some()
                 || job
                     .broker_checkpoint_v5()

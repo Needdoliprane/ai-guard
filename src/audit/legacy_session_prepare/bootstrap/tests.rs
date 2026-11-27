@@ -1578,6 +1578,7 @@ fn legacy_named_checkpoint_retains_the_exact_store_admission_after_reopen() {
     let accepted = journal
         .accept(ticket, &intent, BindingInputs::None, &runner)
         .unwrap();
+    assert!(!accepted.requires_legacy_named_execution());
     let decision_checkpoint = |response| {
         SupervisionCheckpointV1::new(
             namespace,
@@ -1651,6 +1652,13 @@ fn legacy_named_checkpoint_retains_the_exact_store_admission_after_reopen() {
     journal
         .advance_supervised(operation, current(), &checkpoint(pending.clone()))
         .unwrap();
+    assert!(
+        journal
+            .load(operation)
+            .unwrap()
+            .unwrap()
+            .requires_legacy_named_execution()
+    );
     let receipt = store
         .admit_legacy_named(
             &broker,
@@ -1692,6 +1700,7 @@ fn legacy_named_checkpoint_retains_the_exact_store_admission_after_reopen() {
     let retained_receipt = response.admission_result().unwrap().receipt.clone();
     drop(journal);
     let reopened = open().load(operation).unwrap().unwrap();
+    assert!(reopened.requires_legacy_named_execution());
     let retained = reopened.broker_checkpoint_v2().unwrap();
     assert_eq!(
         retained.canonical_bytes().unwrap(),

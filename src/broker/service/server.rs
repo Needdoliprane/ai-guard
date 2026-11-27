@@ -2080,6 +2080,18 @@ impl Service {
         jobs::require_profile(&job, profile)?;
         Ok(job)
     }
+    async fn load_generic_execution_job(
+        &self,
+        writer: &WriterClient,
+        operation: Uuid,
+        profile: &ControlProfileV1,
+    ) -> Result<AcceptedJobV1, BrokerErrorCodeV1> {
+        let job = self.load_job(writer, operation, profile).await?;
+        if job.requires_legacy_named_execution() {
+            return Err(BrokerErrorCodeV1::IncompatibleControl);
+        }
+        Ok(job)
+    }
     async fn abandon_before_claim(
         &self,
         request: AuthorizedRequest,
@@ -2203,7 +2215,9 @@ impl Service {
             jobs,
         } = request;
         check_ids(operation, command)?;
-        let durable = self.load_job(&writer, operation, &profile).await?;
+        let durable = self
+            .load_generic_execution_job(&writer, operation, &profile)
+            .await?;
         reject_event_command_reuse(&durable, command)?;
         self.reject_export_command_reuse(&durable, command).await?;
         if let Some(existing) = durable
@@ -2237,7 +2251,9 @@ impl Service {
         let identity = jobs.identity_gate().await?;
         let job = jobs.job(operation)?;
         let running = job.enter()?;
-        let durable = self.load_job(&writer, operation, &profile).await?;
+        let durable = self
+            .load_generic_execution_job(&writer, operation, &profile)
+            .await?;
         reject_event_command_reuse(&durable, command)?;
         self.reject_export_command_reuse(&durable, command).await?;
         let (actual, receipt) = jobs::review(&durable).ok_or(BrokerErrorCodeV1::Conflict)?;
@@ -2414,11 +2430,14 @@ impl Service {
         } = request;
         self.require_starts().await?;
         check_ids(operation, command)?;
-        self.load_job(&writer, operation, &profile).await?;
+        self.load_generic_execution_job(&writer, operation, &profile)
+            .await?;
         let job = jobs.job(operation)?;
         let running = job.enter()?;
         let identity = jobs.identity_gate().await?;
-        let durable = self.load_job(&writer, operation, &profile).await?;
+        let durable = self
+            .load_generic_execution_job(&writer, operation, &profile)
+            .await?;
         self.reject_export_command_reuse(&durable, command).await?;
         if durable
             .broker_checkpoint_v3()
@@ -2506,11 +2525,14 @@ impl Service {
         } = request;
         self.require_starts().await?;
         check_ids(operation, command)?;
-        self.load_job(&writer, operation, &profile).await?;
+        self.load_generic_execution_job(&writer, operation, &profile)
+            .await?;
         let job = jobs.job(operation)?;
         let _running = job.enter()?;
         let identity = jobs.identity_gate().await?;
-        let durable = self.load_job(&writer, operation, &profile).await?;
+        let durable = self
+            .load_generic_execution_job(&writer, operation, &profile)
+            .await?;
         reject_event_command_reuse(&durable, command)?;
         if durable
             .broker_checkpoint_v3()
@@ -3741,6 +3763,9 @@ async fn restore_recovered_job_pass(
 }
 
 fn needs_autonomous_reconciliation(job: &AcceptedJobV1) -> bool {
+    if job.requires_legacy_named_execution() {
+        return false;
+    }
     if job
         .broker_checkpoint_v5()
         .is_some_and(|checkpoint| !checkpoint.retirements().is_empty())
