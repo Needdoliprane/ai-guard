@@ -27,7 +27,10 @@ use uuid::Uuid;
     reason = "the private named recovery caller is a separate G04 integration"
 )]
 pub(crate) use super::managed::reopen_legacy_named_archive;
-pub(crate) use super::managed::{LegacyNamedWorkspaceArchiveV1, retain_legacy_named_archive};
+pub(crate) use super::managed::{
+    LegacyNamedWorkspaceArchiveV1, broker_helper_spec, reopen_legacy_named_runtime,
+    retain_legacy_named_archive,
+};
 
 mod executor;
 pub(crate) use executor::{BatchExecutor, BatchOutcome, deliver_cancellation};

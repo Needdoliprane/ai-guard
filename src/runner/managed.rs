@@ -1539,7 +1539,7 @@ fn legacy_authority_seed_name(
 
 /// Reopen the local authority already provisioned for the authenticated profile.
 /// A named launch cannot mint an authority or initialize an engine binding.
-pub(super) async fn reopen_legacy_named_runtime(
+pub(crate) async fn reopen_legacy_named_runtime(
     material: &LegacyConfirmedLaunchSpecV1,
     options: &RunOptions,
     config: &crate::control_fs::Directory,
@@ -2380,7 +2380,7 @@ pub(super) async fn broker_runtime(
     Ok(runtime)
 }
 
-pub(super) fn broker_helper_spec(policy: &HelperExecutionPolicyV1) -> Result<ContainerSpec> {
+pub(crate) fn broker_helper_spec(policy: &HelperExecutionPolicyV1) -> Result<ContainerSpec> {
     policy.validate()?;
     ContainerSpec::with_operation(
         Uuid::parse_str(&policy.session_id)?,

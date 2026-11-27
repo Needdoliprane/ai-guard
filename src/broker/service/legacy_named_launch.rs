@@ -12,9 +12,11 @@ use crate::{
     },
     model::Outcome,
     runner::broker::{
-        LegacyNamedWorkspaceArchiveV1, PreparedSubmission, reopen_legacy_named_archive,
+        LegacyNamedWorkspaceArchiveV1, PreparedSubmission, broker_helper_spec,
+        create_import_volume, reopen_legacy_named_archive, reopen_legacy_named_runtime,
         retain_legacy_named_archive,
     },
+    runtime::{ManagedRuntime, OwnedContainerSnapshot, Runtime},
 };
 use std::fs::File;
 
@@ -91,6 +93,18 @@ impl AdmittedLegacyNamedLaunch {
     pub(super) fn config(&self) -> &Directory {
         &self.config
     }
+}
+
+/// The exact Created instance and its live admission remain together until
+/// the separate Arm and start-claim phase.
+#[allow(
+    dead_code,
+    reason = "the named import Arm caller is composed separately"
+)]
+pub(super) struct CreatedLegacyNamedImport {
+    pub(super) admission: Box<AdmittedLegacyNamedLaunch>,
+    pub(super) runtime: ManagedRuntime,
+    pub(super) owned: OwnedContainerSnapshot,
 }
 
 impl Service {
@@ -381,6 +395,95 @@ impl Service {
                     capacity,
                 },
             )))
+        }
+        .await;
+        job.result(result.as_ref().err().copied());
+        result
+    }
+
+    #[allow(
+        dead_code,
+        reason = "the named import Arm caller is composed separately"
+    )]
+    pub(super) async fn create_admitted_legacy_named_import(
+        &self,
+        admitted: Box<AdmittedLegacyNamedLaunch>,
+    ) -> Result<CreatedLegacyNamedImport, BrokerErrorCodeV1> {
+        let job = Arc::clone(&admitted.job);
+        let generation = admitted.running.generation();
+        let result = async {
+            require_generation(&job.cancel, generation)?;
+            self.require_starts().await?;
+            self.validate_control().await?;
+            let config = admitted.config().clone();
+            let profile = &admitted.request.profile;
+            let kind = profile.runtime;
+            let program = profile.runtime_program.clone();
+            let approved = self
+                .filesystem(move || {
+                    config.revalidate()?;
+                    Runtime::with_program(kind, &program)
+                })
+                .await?;
+            let options = admitted.accepted.intent().initial_options().run_options();
+            let runtime = reopen_legacy_named_runtime(
+                &admitted.material,
+                &options,
+                admitted.config(),
+                &approved,
+            )
+            .await
+            .map_err(|_| BrokerErrorCodeV1::NeedsReconciliation)?;
+            self.require_starts().await?;
+            self.validate_control().await?;
+            require_generation(&job.cancel, generation)?;
+
+            let writer = &admitted.request.writer;
+            let plan = &admitted.material.plan;
+            let digest = &admitted.archive_digest;
+            let creation = writer
+                .record_legacy_named_import_creation(
+                    plan,
+                    digest,
+                    Uuid::new_v4(),
+                    runtime.binding(),
+                )
+                .await
+                .map_err(jobs::journal_error)?
+                .into_job();
+            let policy = creation
+                .broker_checkpoint_v2()
+                .and_then(|checkpoint| checkpoint.supervision().legacy_named_admission())
+                .and_then(|named| named.import_creation())
+                .map(|prep| prep.policy())
+                .ok_or(BrokerErrorCodeV1::NeedsReconciliation)?;
+            let spec =
+                broker_helper_spec(policy).map_err(|_| BrokerErrorCodeV1::NeedsReconciliation)?;
+
+            // The intent is durable before either command. Either effect can
+            // win before STOP, so a failed response keeps reconciliation open.
+            create_import_volume(&runtime, &admitted.worker, &job.cancel, generation)
+                .await
+                .map_err(|_| BrokerErrorCodeV1::NeedsReconciliation)?;
+            let owned = runtime
+                .create_owned_import_for_generation(&spec, &job.cancel, generation)
+                .await
+                .map_err(|_| BrokerErrorCodeV1::NeedsReconciliation)?;
+            writer
+                .acknowledge_legacy_named_import_creation(
+                    plan,
+                    digest,
+                    runtime.binding(),
+                    owned.clone(),
+                )
+                .await
+                .map_err(|_| BrokerErrorCodeV1::NeedsReconciliation)?;
+            require_generation(&job.cancel, generation)?;
+            Ok(CreatedLegacyNamedImport {
+                admission: admitted,
+                runtime,
+                owned,
+            })
         }
         .await;
         job.result(result.as_ref().err().copied());

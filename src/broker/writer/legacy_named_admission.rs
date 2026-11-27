@@ -33,13 +33,16 @@ impl RecordedLegacyNamedAdmission {
 
 /// The confirmed first local create boundary. A journal read may recover the
 /// preparation data but never reconstruct this acknowledgement.
-#[allow(dead_code, reason = "the named create caller is composed separately")]
 pub(in crate::broker) struct RecordedLegacyNamedImportCreation(AcceptedJobV1);
 
 impl RecordedLegacyNamedImportCreation {
-    #[allow(dead_code, reason = "the named create caller is composed separately")]
+    #[cfg(test)]
     pub(in crate::broker) fn job(&self) -> &AcceptedJobV1 {
         &self.0
+    }
+
+    pub(in crate::broker) fn into_job(self) -> AcceptedJobV1 {
+        self.0
     }
 }
 
@@ -189,7 +192,6 @@ impl WriterClient {
         Ok(())
     }
 
-    #[allow(dead_code, reason = "the named create caller is composed separately")]
     pub(in crate::broker) async fn record_legacy_named_import_creation(
         &self,
         plan: &LegacyConfirmedPlanV1,
@@ -235,7 +237,6 @@ impl WriterClient {
 
     /// Append the first exact Created observation to an existing intent.
     /// An observation already made may be retained after STOP.
-    #[allow(dead_code, reason = "the named create caller is composed separately")]
     pub(in crate::broker) async fn acknowledge_legacy_named_import_creation(
         &self,
         plan: &LegacyConfirmedPlanV1,
