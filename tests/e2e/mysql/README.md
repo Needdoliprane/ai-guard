@@ -205,10 +205,13 @@ The [gateway SQL-06 fixture](GATEWAY_FIXTURE.md) prepares fresh schemas and dedi
 Use two private files in the existing tenant registry format. Pass the operator
 registry as `--registry` and the registry used at startup by the gateway of
 the same installation as `--gateway-registry` (the gateway's `--tenants-file`).
-Before connecting, the CLI checks that the selected tenant has the same
-namespace, host, port and database in both files and different SQL usernames.
-This check covers the supplied gateway registry. Use a dedicated empty schema
-and keep other writers and schema administration off it during publication.
+Before reading authentication files, the CLI checks that the selected tenant
+has the same namespace, host, port and database in both registries. Each
+registry must declare distinct targets for different tenants. The operator's
+SQL username must differ from every gateway username on the same configured
+host and port. These checks compare the configured hosts without regard to
+ASCII case. Verify aliases at the deployment level. Use a dedicated empty
+schema and keep other writers and schema administration off it during publication.
 
 The CLI opens only the operator's authentication files. Both TLS profiles
 require a password file and verify the server name and certificate chain

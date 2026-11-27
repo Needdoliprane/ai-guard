@@ -52,6 +52,11 @@ l’absence de rôle actif si `partial_revokes` est activé. Les droits restent
 stables pendant le contrôle. Le gateway et les autres comptes runtime
 gardent leurs droits bornés au tenant.
 
+Le CLI examine les deux registres avant de lire un fichier d’authentification.
+Chaque registre associe une cible déclarée à un seul tenant. Le compte
+opérateur est réservé à la préparation sur l’hôte et le port configurés.
+L’opérateur vérifie les alias et l’identité du serveur dans le déploiement.
+
 `SHOW GRANTS FOR CURRENT_USER()` décrit le compte courant. La sélection
 effective des droits de schéma peut dépendre d’une autre entrée hôte pour le
 même nom d’utilisateur. Un grant de schéma exact ou une attestation

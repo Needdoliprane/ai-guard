@@ -203,12 +203,14 @@ La [fixture gateway SQL-06](GATEWAY_FIXTURE.md) prépare les schémas neufs et l
 Utiliser deux fichiers privés au format de registre de tenants existant.
 Passer le registre opérateur avec `--registry` et celui utilisé au démarrage
 par le gateway de la même installation avec `--gateway-registry` (option
-`--tenants-file` du gateway). Avant toute connexion, le CLI vérifie pour le
-tenant choisi que le namespace, l’hôte, le port et la base sont identiques
-dans les deux fichiers et que les noms de compte SQL diffèrent. Ce contrôle
-porte sur le registre gateway fourni. Utiliser un schéma dédié vide et
-écarter les autres écritures et l’administration du schéma pendant la
-publication.
+`--tenants-file` du gateway). Avant de lire les fichiers d’authentification,
+le CLI vérifie que le tenant choisi a le même namespace, hôte, port et schéma
+dans les deux registres. Chaque registre doit déclarer des cibles distinctes
+pour les différents tenants. Le compte SQL de l’opérateur doit différer de
+tous les comptes gateway déclarés pour le même hôte et port. La comparaison
+des hôtes déclarés ignore la casse ASCII. Vérifier les alias au niveau du
+déploiement. Utiliser un schéma dédié vide et écarter les autres écritures et
+l’administration du schéma pendant la publication.
 
 Le CLI ouvre uniquement les fichiers d’authentification de l’opérateur. Les
 deux profils TLS exigent un fichier de mot de passe et vérifient le nom du
