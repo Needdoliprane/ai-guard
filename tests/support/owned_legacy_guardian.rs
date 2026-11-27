@@ -249,12 +249,11 @@ impl OwnedLegacyGuardian {
         Ok(())
     }
 
-    /// Verify custody after the runtime task joins and before stopping the
-    /// owning broker. The broker must be reaped before trying guardian exit.
+    /// The original must be live before broker reap. An earlier exit could
+    /// already have triggered a replacement that has not announced yet.
     pub(super) async fn require_cleanup_ready(&self) -> Result<()> {
         self.require_runtime_closed().await?;
-        self.revalidate()?;
-        self.cleanup_peer().await.map(drop)
+        self.checked_peer().await.map(drop)
     }
 
     async fn cleanup_peer(&self) -> Result<Option<UnixStream>> {
@@ -280,14 +279,10 @@ impl OwnedLegacyGuardian {
     }
 
     /// Called after both the synthetic runtime and the recovering broker join.
-    /// Occupied Legacy slots may refuse idle shutdown. Native teardown still
-    /// requires the same attested fixture process on the retained endpoint.
+    /// The original must still be live before requesting its shutdown.
     pub(super) async fn close(&self) -> Result<&'static str> {
         self.require_runtime_closed().await?;
-        self.revalidate()?;
-        let Some(mut stream) = self.cleanup_peer().await? else {
-            return Ok("original_exit_observed");
-        };
+        let mut stream = self.checked_peer().await?;
         let reply = self
             .rpc(&mut stream, json!({"kind":"shutdown_if_idle"}))
             .await;

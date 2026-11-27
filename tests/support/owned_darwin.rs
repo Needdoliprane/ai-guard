@@ -17,6 +17,7 @@ use std::{
     },
     path::{Path, PathBuf},
     ptr,
+    sync::Mutex,
     time::{Duration, Instant},
 };
 use tokio::net::UnixStream;
@@ -224,6 +225,7 @@ fn require_broker_executable(broker: libc::pid_t, expected: &Path) -> Result<()>
 struct ExitObservation {
     queue: OwnedFd,
     pid: libc::pid_t,
+    observed: Mutex<bool>,
 }
 
 impl ExitObservation {
@@ -256,10 +258,23 @@ impl ExitObservation {
             )
         };
         ensure!(rc == 0, "category=guardian_exit_watch_setup");
-        Ok(Self { queue, pid })
+        Ok(Self {
+            queue,
+            pid,
+            observed: Mutex::new(false),
+        })
     }
 
     fn exited(&self) -> Result<bool> {
+        // A successful poll consumes the one-shot event. Keep its proof for
+        // every reader and serialize polling with recording the observation.
+        let mut observed = self
+            .observed
+            .lock()
+            .map_err(|_| anyhow::anyhow!("category=guardian_exit_watch_failed"))?;
+        if *observed {
+            return Ok(true);
+        }
         let mut event = MaybeUninit::<libc::kevent>::uninit();
         let immediate = libc::timespec {
             tv_sec: 0,
@@ -295,6 +310,7 @@ impl ExitObservation {
                 && notes & libc::NOTE_EXIT != 0,
             "category=guardian_exit_event_unexpected"
         );
+        *observed = true;
         Ok(true)
     }
 

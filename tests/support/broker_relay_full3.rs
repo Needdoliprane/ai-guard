@@ -2206,7 +2206,7 @@ impl Fixture {
         };
         let (broker_reaped, broker_closed, read_closed_journal) = if (!self.fresh_start_attempted
             || guardian_closed)
-            && legacy_ready
+            && (!legacy_started || engine_closed)
         {
             match self.broker.as_mut() {
                 Some(owner) => {
@@ -2248,7 +2248,7 @@ impl Fixture {
             (false, false, false)
         };
         failed |= !broker_closed;
-        if legacy_started && broker_reaped {
+        if legacy_started && broker_reaped && legacy_ready {
             // Do not expose guardian exit to a broker watcher that could
             // recreate the role. The native identity survives reparenting.
             let closed = match self.legacy_guardian.as_ref() {
@@ -2269,6 +2269,7 @@ impl Fixture {
                 failed = true;
             }
         } else if legacy_started {
+            println!("phase=fixture_legacy_guardian_close category=reconciliation_required");
             failed = true;
         }
         if read_closed_journal && let Some(check_journal) = check_journal {

@@ -928,13 +928,14 @@ impl Fixture {
                 return Ok::<_, anyhow::Error>(());
             }
             ensure!(engine_closed, "fixture runtime closure unconfirmed");
-            let owner = self
-                .legacy_guardian
-                .as_ref()
-                .context("original fixture Legacy guardian custody unavailable")?;
-            owner.require_cleanup_ready().await?;
-            // A live broker can restart its guardian on EOF. Reap the exact
-            // owned broker before allowing the original guardian to exit.
+            let guardian = match self.legacy_guardian.as_ref() {
+                Some(owner) => owner.require_cleanup_ready().await.map(|()| owner),
+                None => Err(anyhow::anyhow!(
+                    "original fixture Legacy guardian custody unavailable"
+                )),
+            };
+            // Reap the owned broker even if guardian custody is unconfirmed.
+            // A live broker can restart its guardian on EOF.
             if let Some(broker) = self.broker.as_mut() {
                 if broker.try_wait()?.is_none() {
                     broker.start_kill()?;
@@ -942,6 +943,7 @@ impl Fixture {
                 timeout(Duration::from_secs(5), broker.wait()).await??;
             }
             self.broker = None;
+            let owner = guardian.context("fixture Legacy guardian pre-stop proof unavailable")?;
             let category = timeout(Duration::from_secs(15), owner.close())
                 .await
                 .context("fixture Legacy guardian closure timeout")??;
