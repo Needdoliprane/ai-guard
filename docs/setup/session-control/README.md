@@ -46,6 +46,8 @@ The Legacy CLI uses a local named account and a personal context with `launch_se
 
    The JSON receipt returns `target_id`, `target_revision`, `audit_seq` and `audit_hash`. Reusing the same target file and revision returns the same audit receipt with `replayed: true`. Give the named user the target ID and revision. Resume the Legacy gateway for the human requests below.
 
+   A new active target and a new preparation require the grant's current workload credential to belong to the selected broker and incarnation and remain valid. After a revocation, restore a valid broker binding. Publish a new target revision when the grant revision changes.
+
 ### Named request and replay
 
 Use the Legacy gateway origin in `gateway` and your private local `credential_file`. Keep the credential and request files under a private directory in regular files owned by the invoking account with mode `0600`. HTTP is available on loopback. For HTTPS with a private CA, pass `--gateway-ca-file` with the approved public CA bundle to each command.

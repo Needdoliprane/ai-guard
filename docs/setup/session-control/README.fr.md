@@ -46,6 +46,8 @@ Le CLI Legacy utilise un compte local nominatif et un contexte personnel doté d
 
    Le reçu JSON contient `target_id`, `target_revision`, `audit_seq` et `audit_hash`. Réutiliser le même fichier de cible et la même révision restitue le reçu d’audit d’origine avec `replayed: true`. Transmettez l’identifiant et la révision de la cible à l’utilisateur nominatif. Remettez le gateway Legacy en service pour les demandes humaines ci-dessous.
 
+   Une nouvelle cible active et une nouvelle préparation exigent que le credential workload courant du grant appartienne au broker et à l’incarnation sélectionnés et reste valable. Après une révocation, rétablissez un binding de broker valide. Publiez une nouvelle révision de cible si la révision du grant change.
+
 ### Demande nominative et rejeu
 
 Indiquez l’origine du gateway Legacy dans `gateway` et votre fichier privé de credential local dans `credential_file`. Conservez le credential et les demandes dans des fichiers réguliers de mode `0600` appartenant au compte qui exécute le CLI, dans un répertoire privé. HTTP est disponible sur loopback. Pour HTTPS avec une AC privée, passez `--gateway-ca-file` avec la chaîne publique d’AC approuvée à chaque commande.
