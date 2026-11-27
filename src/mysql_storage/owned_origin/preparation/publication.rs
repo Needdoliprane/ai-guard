@@ -36,6 +36,7 @@ pub(super) async fn publish(
     redactor: &Redactor,
 ) -> Result<AuditHead> {
     let CheckedEmptyTarget { conn, lock } = target;
+    draft.require_locked_target(lock)?;
     ensure!(
         matches!(version, 14 | 15),
         "invalid MySQL owned audit format"
@@ -120,6 +121,7 @@ pub(super) async fn verify_published(
     lock: &OwnedAuditLock,
     draft: &FreshAnchorDraft<'_>,
 ) -> Result<AuditHead> {
+    draft.require_locked_target(lock)?;
     let request = draft.request();
     let version = request.schema_version;
     let namespace = request.namespace_id.to_string();

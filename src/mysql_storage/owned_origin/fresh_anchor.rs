@@ -159,6 +159,16 @@ impl FreshAnchorDraft<'_> {
         self.request
     }
 
+    /// Bind the drafted origin to the physical target recorded by the lock.
+    /// The caller still verifies ownership on its exact SQL connection.
+    pub(super) fn require_locked_target(&self, lock: &OwnedAuditLock) -> Result<()> {
+        ensure!(
+            lock.server == self.request.server_uuid && lock.schema == self.request.schema,
+            "MySQL fresh anchor request differs from the locked target"
+        );
+        Ok(())
+    }
+
     /// Check a historical row under the observed server, schema and session
     /// lock. The caller's refusal to prepare a nonempty target still applies.
     pub(super) async fn reject_divergence(
@@ -166,10 +176,7 @@ impl FreshAnchorDraft<'_> {
         conn: &mut Conn,
         lock: &OwnedAuditLock,
     ) -> Result<()> {
-        ensure!(
-            lock.server == self.request.server_uuid && lock.schema == self.request.schema,
-            "MySQL fresh anchor request differs from the locked target"
-        );
+        self.require_locked_target(lock)?;
         let mut options = TxOpts::new();
         options
             .with_readonly(true)
@@ -452,6 +459,30 @@ mod contract_tests {
                     .is_err()
             );
         }
+        Ok(())
+    }
+
+    #[test]
+    fn fresh_anchor_requires_its_locked_physical_target() -> Result<()> {
+        let request = request();
+        let draft = plan(&request)?;
+        let mut lock = OwnedAuditLock {
+            name: "synthetic-lock".into(),
+            session: 42,
+            server: request.server_uuid,
+            schema: request.schema.clone(),
+        };
+        draft.require_locked_target(&lock)?;
+
+        lock.server = Uuid::from_u128(9);
+        assert!(draft.require_locked_target(&lock).is_err());
+
+        lock.server = request.server_uuid;
+        lock.schema = "qa_other".into();
+        assert!(draft.require_locked_target(&lock).is_err());
+
+        lock.schema = request.schema.to_ascii_uppercase();
+        assert!(draft.require_locked_target(&lock).is_err());
         Ok(())
     }
 
