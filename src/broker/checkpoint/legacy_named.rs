@@ -952,6 +952,55 @@ mod tests {
     use sha2::{Digest, Sha256};
     use std::{os::unix::fs::PermissionsExt, time::Duration};
 
+    fn import_observation_fixture(
+        plan: &LegacyConfirmedPlanV1,
+        claim: &LegacyNamedImportClaimRequestV1,
+        claim_receipt: &MutationReceiptV1,
+        arm: &ArmResultV1,
+        phase: LegacyNamedImportObservationPhaseV1,
+        started_at: &str,
+        observed_at: &str,
+        finished_at: Option<&str>,
+    ) -> LegacyNamedImportObservationRequestV1 {
+        let (status, running, exit_code) = match phase {
+            LegacyNamedImportObservationPhaseV1::Started => {
+                (RuntimeStatusV1::Running, Some(true), None)
+            }
+            LegacyNamedImportObservationPhaseV1::Terminal => {
+                (RuntimeStatusV1::Exited, Some(false), Some(0))
+            }
+        };
+        LegacyNamedImportObservationRequestV1 {
+            version: 1,
+            binding_ref: plan.binding_ref,
+            namespace: plan.control_namespace_uuid.clone(),
+            phase,
+            claim_receipt: claim_receipt.clone(),
+            observation: HelperObservationV1 {
+                version: 1,
+                operation_id: LegacyNamedImportObservationRequestV1::operation_id(
+                    plan.binding_ref,
+                    uuid(&claim.claim.operation_id).unwrap(),
+                    phase,
+                ),
+                helper_id: claim.claim.helper_id.clone(),
+                arm_receipt: arm.receipt.clone(),
+                observation: RuntimeObservationV1 {
+                    inspection: arm.arm.inspection.clone(),
+                    observed_at: observed_at.to_owned(),
+                    status,
+                    running,
+                    started_at: Some(started_at.to_owned()),
+                    finished_at: finished_at.map(str::to_owned),
+                    exit_code,
+                    oom_killed: Some(false),
+                    restart_count: Some(0),
+                },
+                verification: None,
+            },
+        }
+    }
+
     #[tokio::test]
     async fn explicit_named_admission_requires_an_immutable_archive_digest() -> anyhow::Result<()> {
         let temporary = tempfile::Builder::new()
@@ -1525,7 +1574,9 @@ mod tests {
                 .with_import_owned(&authority, owned.clone()),
             Err(JournalError::Conflict)
         ));
-        let other_latch = accepted.with_import_creation(Uuid::new_v4(), &authority)?;
+        let other_latch = accepted
+            .clone()
+            .with_import_creation(Uuid::new_v4(), &authority)?;
         assert!(matches!(
             other_latch
                 .clone()
@@ -2043,6 +2094,213 @@ mod tests {
         );
         deliver_named_import_stop_from_legacy_root(fixture.root(), &recovered).await?;
         fixture.finish().await;
+
+        // Persist exact Import observations independently of the native
+        // guardian. Exercise write-before-send, Started -> Terminal, exact
+        // replay, divergence refusal, and ACK CAS after a concurrent STOP.
+        let observation_writer = start_admitted_writer("import-observation-race").await?;
+        let creation = observation_writer
+            .record_legacy_named_import_creation(&plan, &digest, helper_id, &authority)
+            .await?;
+        observation_writer
+            .acknowledge_legacy_named_import_creation(&plan, &digest, &authority, owned.clone())
+            .await?;
+        let recorded_arm = observation_writer
+            .record_legacy_named_import_arm(&plan, &digest, arm.clone())
+            .await?;
+        observation_writer
+            .acknowledge_legacy_named_import_arm(
+                operation,
+                recorded_arm.request(),
+                arm_result.clone(),
+            )
+            .await?;
+        observation_writer
+            .record_legacy_named_import_claim(&plan, claim.clone())
+            .await?;
+        observation_writer
+            .acknowledge_legacy_named_import_claim(operation, &claim, claim_receipt.clone())
+            .await?;
+        assert!(
+            observation_writer
+                .load(operation)
+                .await?
+                .unwrap()
+                .head()
+                .revision()
+                > creation.job().head().revision()
+        );
+
+        let now = chrono::Utc::now();
+        let started_at = (now - chrono::Duration::seconds(2)).to_rfc3339();
+        let started_seen = (now - chrono::Duration::seconds(1)).to_rfc3339();
+        let terminal_seen = (now + chrono::Duration::seconds(2)).to_rfc3339();
+        let finished_at = (now + chrono::Duration::seconds(1)).to_rfc3339();
+        let started_request = import_observation_fixture(
+            &plan,
+            &claim,
+            &claim_receipt,
+            &arm_result,
+            LegacyNamedImportObservationPhaseV1::Started,
+            &started_at,
+            &started_seen,
+            None,
+        );
+        let observation_base = accepted
+            .clone()
+            .with_import_creation(helper_id, &authority)?
+            .with_import_owned(&authority, owned.clone())?
+            .with_import_arm(arm.clone())?
+            .acknowledge_import_arm(arm_result.clone())?
+            .with_import_claim(claim.clone())?
+            .acknowledge_import_claim(claim_receipt.clone())?;
+        let mut created_started = started_request.clone();
+        created_started.observation.observation.status = RuntimeStatusV1::Created;
+        created_started.observation.observation.running = Some(false);
+        assert!(matches!(
+            observation_base
+                .clone()
+                .with_import_observation(created_started),
+            Err(JournalError::Conflict)
+        ));
+        let started_pending = observation_writer
+            .record_legacy_named_import_observation(&plan, started_request.clone())
+            .await?;
+        assert!(started_pending.receipt().is_none());
+        assert!(equal(started_pending.request(), &started_request)?);
+        let head_before_divergence = observation_writer.load(operation).await?.unwrap().head();
+        let mut divergent_started = started_request.clone();
+        divergent_started.observation.observation.observed_at =
+            (now + chrono::Duration::seconds(1)).to_rfc3339();
+        assert!(matches!(
+            observation_writer
+                .record_legacy_named_import_observation(&plan, divergent_started)
+                .await,
+            Err(JournalError::Conflict)
+        ));
+        assert_eq!(
+            observation_writer.load(operation).await?.unwrap().head(),
+            head_before_divergence
+        );
+
+        let started_receipt = MutationReceiptV1 {
+            operation_id: started_request.observation.operation_id.clone(),
+            worker_id: Some(arm.worker_id.clone()),
+            revision: None,
+            input_hash: started_request.input_hash()?,
+            audit_seq: claim_receipt.audit_seq + 1,
+            audit_hash: "d".repeat(64),
+        };
+        let pause = observation_writer.pause_for_test().await?;
+        let acknowledgement = observation_writer.acknowledge_legacy_named_import_observation(
+            operation,
+            &started_request,
+            started_receipt.clone(),
+        );
+        tokio::pin!(acknowledgement);
+        assert!(futures_util::poll!(&mut acknowledgement).is_pending());
+        let stops = observation_writer.stops();
+        let stop_id = Uuid::new_v4();
+        let cancellation = stops.append_cancel(CancelInputV1::new(operation, stop_id)?);
+        tokio::pin!(cancellation);
+        assert!(futures_util::poll!(&mut cancellation).is_pending());
+        assert!(pause.is_paused());
+        drop(pause);
+        let stopped = cancellation.await.map_err(|failure| failure.error())?;
+        assert!(stopped.incomplete());
+        let stopped_job = observation_writer.load(operation).await?.unwrap();
+        acknowledgement.await?;
+        let after_started_ack = observation_writer.load(operation).await?.unwrap();
+        assert_eq!(
+            after_started_ack
+                .broker_checkpoint_v2()
+                .unwrap()
+                .supervision()
+                .legacy_named_admission()
+                .unwrap()
+                .import_observation(LegacyNamedImportObservationPhaseV1::Started)
+                .unwrap()
+                .1,
+            Some(&started_receipt)
+        );
+        assert!(equal(
+            &after_started_ack.broker_checkpoint_v3().unwrap().commands(),
+            &stopped_job.broker_checkpoint_v3().unwrap().commands()
+        )?);
+
+        let terminal_request = import_observation_fixture(
+            &plan,
+            &claim,
+            &claim_receipt,
+            &arm_result,
+            LegacyNamedImportObservationPhaseV1::Terminal,
+            &started_at,
+            &terminal_seen,
+            Some(&finished_at),
+        );
+        let terminal_first = observation_base
+            .clone()
+            .with_import_observation(terminal_request.clone())?;
+        assert!(
+            terminal_first
+                .import_observation(LegacyNamedImportObservationPhaseV1::Terminal)
+                .is_some()
+        );
+        assert!(matches!(
+            terminal_first.with_import_observation(started_request.clone()),
+            Err(JournalError::Conflict)
+        ));
+        let terminal_pending = observation_writer
+            .record_legacy_named_import_observation(&plan, terminal_request.clone())
+            .await?;
+        assert!(terminal_pending.receipt().is_none());
+        let terminal_receipt = MutationReceiptV1 {
+            operation_id: terminal_request.observation.operation_id.clone(),
+            worker_id: Some(arm.worker_id.clone()),
+            revision: None,
+            input_hash: terminal_request.input_hash()?,
+            audit_seq: claim_receipt.audit_seq + 2,
+            audit_hash: "e".repeat(64),
+        };
+        observation_writer
+            .acknowledge_legacy_named_import_observation(
+                operation,
+                &terminal_request,
+                terminal_receipt.clone(),
+            )
+            .await?;
+        let replay = observation_writer
+            .record_legacy_named_import_observation(&plan, started_request.clone())
+            .await?;
+        assert_eq!(replay.receipt(), Some(&started_receipt));
+        observation_writer
+            .acknowledge_legacy_named_import_observation(
+                operation,
+                &terminal_request,
+                terminal_receipt.clone(),
+            )
+            .await?;
+        let mut different_ack = terminal_receipt.clone();
+        different_ack.audit_hash = "f".repeat(64);
+        assert!(matches!(
+            observation_writer
+                .acknowledge_legacy_named_import_observation(
+                    operation,
+                    &terminal_request,
+                    different_ack,
+                )
+                .await,
+            Err(JournalError::Conflict)
+        ));
+        let retained = observation_writer
+            .load_legacy_named_import_observation(
+                operation,
+                LegacyNamedImportObservationPhaseV1::Terminal,
+            )
+            .await?
+            .unwrap();
+        assert!(equal(retained.request(), &terminal_request)?);
+        assert_eq!(retained.receipt(), Some(&terminal_receipt));
 
         let writer = start_admitted_writer("import-creation").await?;
         let before_creation = writer.load(operation).await?.unwrap();
