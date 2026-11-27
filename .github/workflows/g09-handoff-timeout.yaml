@@ -1,0 +1,86 @@
+name: G09 Handoff timeout diagnostic
+
+# The diagnostic branch carries this workflow. The recipe comes from the
+# separate, pinned instrumentation commit.
+'on':
+  push:
+    branches: [codex/g09-handoff-diagnostic-4914-20261127]
+    paths: [.github/workflows/g09-handoff-timeout.yaml]
+
+permissions:
+  contents: read
+
+env:
+  HANDOFF_SOURCE_SHA: 4f5617bb8ac5b8154e863f834cde453d8143bc9d
+  HANDOFF_ORACLE: software_broker_missing_receipt_expires_under_original_arm_without_exec
+
+jobs:
+  handoff:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      CARGO_BUILD_JOBS: '1'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      CARGO_TERM_COLOR: never
+      RUST_MIN_STACK: '8388608'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.HANDOFF_SOURCE_SHA }}
+          persist-credentials: false
+      - name: Run the exact Handoff expiry oracle
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$HANDOFF_SOURCE_SHA"
+          export AI_GUARD_BUILD_REVISION="$HANDOFF_SOURCE_SHA"
+          export TMPDIR="$(mktemp -d /tmp/aig.XXXXXX)"
+          handoff_log=$(mktemp "${RUNNER_TEMP:?}/g09-handoff.XXXXXX")
+          trap 'rm -f -- "$handoff_log"' EXIT
+
+          printf 'source_sha=%s oracle=%s\n' "$HANDOFF_SOURCE_SHA" "$HANDOFF_ORACLE"
+          if ! cargo fetch --locked --target host-tuple >"$handoff_log" 2>&1; then
+            printf 'result=NOT_RUN phase=fetch_dependencies\n'
+            exit 1
+          fi
+
+          handoff_status=0
+          cargo test --locked --offline --test broker_relay_handoff "$HANDOFF_ORACLE" -- \
+            --exact --test-threads=1 >"$handoff_log" 2>&1 || handoff_status=$?
+
+          if grep -Fxq 'running 1 test' "$handoff_log"; then
+            if (( handoff_status == 0 )) && grep -Fxq "test $HANDOFF_ORACLE ... ok" "$handoff_log"; then
+              printf 'result=PASS\n'
+              exit 0
+            fi
+            if (( handoff_status != 0 )) && grep -Fxq "test $HANDOFF_ORACLE ... FAILED" "$handoff_log"; then
+              printf 'result=FAIL\n'
+              # Publish only the closed categories from the pinned oracle.
+              phase='phase=handoff_(wait_endpoint|worker_terminal)'
+              flag='(true|false)'
+              number='[0-9]{1,20}'
+              code='(Unauthorized|Forbidden|Unavailable|IncompatibleControl|Busy|InvalidInput|Conflict|Interrupted|LimitExceeded|NeedsReconciliation)'
+              job_state='(Absent|ReservedInProcess|Interrupted|Rejected|Accepted)'
+              worker_state='(Reserved|Preparing|Created|StartIssued|Running|Stopping|Terminal|InDoubt|Cancelled)'
+              relay_phase='(AwaitingIssuedWorkload|Admitted|Unknown|Closed)'
+              core_state='(Reserved|CancelledBeforeClaim|KnownRefusedBeforeSpawn|AcceptedBeforeExec|Ready|Closing|Unknown|Closed)'
+              relay_error='(Unavailable|InvalidMaterial|Scope|Expired|Clock|Cancelled|Capacity|Unknown)'
+              relay_view="configured=${flag} freshness=(RetainedAtLastObservation|NotObserved) attachment_phase=(None|Some\(${relay_phase}\)) endpoint_present=${flag} core_state=(None|Some\(${core_state}\)) last_error=(None|Some\(${relay_error}\)) reconciliation_required=${flag}"
+              job_view="state=${job_state} head_revision=(None|Some\(${number}\)) pending_rpcs=(None|Some\(${number}\)) failure_count=${number} worker_state=(None|Some\(${worker_state}\)) quota_held=(None|Some\(${flag}\)) executor_running=${flag} executor_error=(None|Some\(${code}\))"
+
+              grep -E \
+                -e "^${phase} category=(timeout|error)$" \
+                -e "^${phase} view=(relay_status|job_status) category=(request_error|probe_timeout|unexpected_reply|broker_refusal refusal=${code})$" \
+                -e "^${phase} view=relay_status category=observed ${relay_view}$" \
+                -e "^${phase} view=job_status category=observed ${job_view}$" \
+                -e "^${phase} view=worker category=(endpoint_unavailable|identity_unconfirmed|absent|read_error|observed state=${worker_state} quota_held=${flag})$" \
+                -e '^phase=fixture_legacy_guardian_close category=(original_exit_observed|idle_acknowledged_exit|exact_fixture_signal_exit|exact_fixture_signal_exit_idle_unconfirmed)$' \
+                "$handoff_log" | sed -n '1,8p' || true
+              exit "$handoff_status"
+            fi
+          fi
+
+          printf 'result=UNCONFIRMED cargo_exit=%s\n' "$handoff_status"
+          exit 1
