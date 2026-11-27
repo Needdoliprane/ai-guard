@@ -873,6 +873,32 @@ fn publish_revision(
     bytes: &[u8],
     resources: PublicationResources<'_>,
 ) -> JournalResult<()> {
+    publish_revision_observing(
+        core,
+        operation_id,
+        intent_hash,
+        expected,
+        head,
+        bytes,
+        resources,
+        || {},
+    )
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "same publication inputs and an optional caller observation"
+)]
+fn publish_revision_observing(
+    core: &Inner,
+    operation_id: Uuid,
+    intent_hash: &str,
+    expected: &RevisionRefV1,
+    head: &RevisionRefV1,
+    bytes: &[u8],
+    resources: PublicationResources<'_>,
+    on_publication_attempt: impl FnOnce(),
+) -> JournalResult<()> {
     let PublicationResources {
         mut usage,
         budget: publication,
@@ -917,6 +943,9 @@ fn publish_revision(
         &publication,
         &writer.floors,
     )?;
+    // From the first filesystem write onward, a later error may leave durable
+    // data relevant to reconciliation, including on the strict postload.
+    on_publication_attempt();
     let file = io(job.persistent_create(&revision_name(head.revision), bytes))?;
     stage!(RevisionWritten);
     io(file.persistent_sync())?;
@@ -1748,6 +1777,16 @@ impl Journal {
         expected: RevisionRefV1,
         next: &BrokerCheckpointV3,
     ) -> JournalResult<CheckpointReceiptV1> {
+        self.advance_lifecycle_observing_publication(operation_id, expected, next, || {})
+    }
+
+    pub(in crate::broker) fn advance_lifecycle_observing_publication(
+        &self,
+        operation_id: Uuid,
+        expected: RevisionRefV1,
+        next: &BrokerCheckpointV3,
+        on_publication_attempt: impl FnOnce(),
+    ) -> JournalResult<CheckpointReceiptV1> {
         if operation_id.is_nil() {
             return Err(JournalError::InvalidInput);
         }
@@ -1792,7 +1831,14 @@ impl Journal {
         // Preserve the writer adapter's ordering: load and V4 head/ID checks
         // precede the expected-hash validation of the ordinary advance path.
         valid_hash(&expected.hash)?;
-        self.advance_loaded_checkpoint(operation_id, expected, next, loaded, &mut writer)
+        self.advance_loaded_checkpoint_observing(
+            operation_id,
+            expected,
+            next,
+            loaded,
+            &mut writer,
+            on_publication_attempt,
+        )
     }
     fn advance_checkpoint(
         &self,
@@ -1818,6 +1864,25 @@ impl Journal {
         next: LoadedCheckpoint,
         loaded: AcceptedJobV1,
         writer: &mut Writer,
+    ) -> JournalResult<CheckpointReceiptV1> {
+        self.advance_loaded_checkpoint_observing(
+            operation_id,
+            expected,
+            next,
+            loaded,
+            writer,
+            || {},
+        )
+    }
+
+    fn advance_loaded_checkpoint_observing(
+        &self,
+        operation_id: Uuid,
+        expected: RevisionRefV1,
+        next: LoadedCheckpoint,
+        loaded: AcceptedJobV1,
+        writer: &mut Writer,
+        on_publication_attempt: impl FnOnce(),
     ) -> JournalResult<CheckpointReceiptV1> {
         if (matches!(next, LoadedCheckpoint::V1(_)) && loaded.broker_checkpoint_v2().is_some())
             || (next.lifecycle().is_none() && loaded.broker_checkpoint_v3().is_some())
@@ -1861,7 +1926,7 @@ impl Journal {
             loaded.0.last_cancel_operations,
         )?;
         let usage = self.usage(Some(&operation_id.to_string()))?;
-        publish_revision(
+        publish_revision_observing(
             &self.0,
             operation_id,
             &loaded.0.intent_hash,
@@ -1873,6 +1938,7 @@ impl Journal {
                 budget: retirement::PublicationBudget::NewAllocation,
                 writer,
             },
+            on_publication_attempt,
         )?;
         // The CAS and directory barrier committed this head even when a later
         // business credential recheck fails. Preserve the conservative floor.

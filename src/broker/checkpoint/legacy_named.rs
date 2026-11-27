@@ -582,7 +582,7 @@ mod tests {
         broker::{
             journal::{ControlSecrets, FsExclusions, Journal, JournalLimitsV1, ReserveResult},
             lifecycle::BrokerCheckpointV3,
-            writer::{CancelInputV1, WriterClient},
+            writer::{CancelInputV1, NamedImportArmWriteFailure, WriterClient},
         },
         control::session_control::{LegacyConfirmedLaunchSpecV1, LegacyNamedInitialDecisionV1},
         control_fs::Directory,
@@ -1248,6 +1248,46 @@ mod tests {
                 .acknowledge_legacy_named_import_creation(&plan, &digest, &authority, owned.clone())
                 .await?;
             let before_arm = writer.load(operation).await?.unwrap();
+            // Let the attempt's read complete, then fill the paused Writer
+            // before polling the attempt far enough to enqueue its advance.
+            let before_read = writer.pause_for_test().await?;
+            let attempt =
+                writer.record_legacy_named_import_arm_diagnosed(&plan, &digest, arm.clone());
+            tokio::pin!(attempt);
+            assert!(futures_util::poll!(&mut attempt).is_pending());
+            let pause_after_read = writer.pause_for_test();
+            tokio::pin!(pause_after_read);
+            assert!(futures_util::poll!(&mut pause_after_read).is_pending());
+            assert!(before_read.is_paused());
+            drop(before_read);
+            let after_read = pause_after_read.await?;
+            let mut queued = (0..8)
+                .map(|_| Box::pin(writer.status(operation)))
+                .collect::<Vec<_>>();
+            for read in &mut queued {
+                assert!(futures_util::poll!(read.as_mut()).is_pending());
+            }
+            assert!(after_read.is_paused());
+            assert!(matches!(
+                attempt.await,
+                Err(NamedImportArmWriteFailure::BeforePublication(
+                    JournalError::Busy
+                ))
+            ));
+            drop(after_read);
+            for read in queued {
+                assert!(read.await?.is_some());
+            }
+            assert_eq!(
+                writer.load(operation).await?.unwrap().head(),
+                before_arm.head()
+            );
+            assert!(
+                writer
+                    .load_legacy_named_import_arm(operation)
+                    .await?
+                    .is_none()
+            );
             let mut different_container = arm.clone();
             different_container.inspection.container_id = "a".repeat(64);
             assert!(matches!(

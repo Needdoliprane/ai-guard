@@ -44,6 +44,11 @@ use uuid::Uuid;
 
 mod cold_audit;
 mod legacy_named_admission;
+#[allow(
+    unused_imports,
+    reason = "the named Presence caller is composed separately"
+)]
+pub(in crate::broker) use legacy_named_admission::NamedImportArmWriteFailure;
 mod queue;
 mod retirement_owners;
 mod status_cache;
@@ -90,6 +95,32 @@ impl fmt::Display for WriterCallFailure {
             Self::Unavailable => "writer call is unavailable",
             Self::Actor(_) => "writer returned a journal error",
         })
+    }
+}
+
+enum WriterDispatchFailure {
+    NotQueued(WriterCallFailure),
+    Queued(WriterCallFailure),
+}
+
+impl WriterDispatchFailure {
+    fn cause(self) -> WriterCallFailure {
+        match self {
+            Self::NotQueued(cause) | Self::Queued(cause) => cause,
+        }
+    }
+}
+
+enum LifecycleWriteFailure {
+    BeforePublication(JournalError),
+    PublicationUnconfirmed(JournalError),
+}
+
+impl LifecycleWriteFailure {
+    fn journal_error(self) -> JournalError {
+        match self {
+            Self::BeforePublication(error) | Self::PublicationUnconfirmed(error) => error,
+        }
     }
 }
 
@@ -298,6 +329,7 @@ enum Command {
         operation_id: Uuid,
         expected: RevisionRefV1,
         next: Box<BrokerCheckpointV3>,
+        publication_attempted: Option<Arc<AtomicBool>>,
         reply: Reply<CheckpointReceiptV1>,
     },
     AppendLocal {
@@ -443,7 +475,17 @@ impl ClientState {
         &self,
         command: impl FnOnce(Reply<T>) -> Command + Send,
     ) -> Result<T, WriterCallFailure> {
-        tokio::runtime::Handle::try_current().map_err(|_| WriterCallFailure::Unavailable)?;
+        self.call_tracking_enqueue(command)
+            .await
+            .map_err(WriterDispatchFailure::cause)
+    }
+
+    async fn call_tracking_enqueue<T: Send + 'static>(
+        &self,
+        command: impl FnOnce(Reply<T>) -> Command + Send,
+    ) -> Result<T, WriterDispatchFailure> {
+        tokio::runtime::Handle::try_current()
+            .map_err(|_| WriterDispatchFailure::NotQueued(WriterCallFailure::Unavailable))?;
         let (reply, receive) = oneshot::channel();
         let command = command(reply);
         // These commands inspect durable state. The actor applies its
@@ -472,7 +514,7 @@ impl ClientState {
             mpsc::TrySendError::Full(_) => WriterCallFailure::QueueFull,
             mpsc::TrySendError::Disconnected(_) => WriterCallFailure::Unavailable,
         });
-        sent?;
+        sent.map_err(WriterDispatchFailure::NotQueued)?;
         #[cfg(test)]
         if let Some(cost) = &cost {
             cost.sent();
@@ -489,7 +531,7 @@ impl ClientState {
         if let Some(cost) = cost {
             cost.finish(received, result.is_ok());
         }
-        result
+        result.map_err(WriterDispatchFailure::Queued)
     }
 
     async fn receive<T>(&self, receive: oneshot::Receiver<JournalResult<T>>) -> JournalResult<T> {
@@ -1515,11 +1557,56 @@ impl WriterClient {
         expected: RevisionRefV1,
         next: BrokerCheckpointV3,
     ) -> Result<CheckpointReceiptV1, WriterCallFailure> {
+        self.send_lifecycle_advance(operation_id, expected, next, None)
+            .await
+            .map_err(WriterDispatchFailure::cause)
+    }
+
+    async fn advance_lifecycle_with_publication(
+        &self,
+        operation_id: Uuid,
+        expected: RevisionRefV1,
+        next: BrokerCheckpointV3,
+    ) -> Result<CheckpointReceiptV1, LifecycleWriteFailure> {
+        let publication_attempted = Arc::new(AtomicBool::new(false));
+        match self
+            .send_lifecycle_advance(
+                operation_id,
+                expected,
+                next,
+                Some(Arc::clone(&publication_attempted)),
+            )
+            .await
+        {
+            Ok(receipt) => Ok(receipt),
+            Err(WriterDispatchFailure::NotQueued(cause)) => Err(
+                LifecycleWriteFailure::BeforePublication(cause.journal_error()),
+            ),
+            Err(WriterDispatchFailure::Queued(WriterCallFailure::Actor(error)))
+                if !publication_attempted.load(Ordering::Acquire) =>
+            {
+                Err(LifecycleWriteFailure::BeforePublication(error))
+            }
+            // A queued command with a missing reply can still publish later.
+            Err(WriterDispatchFailure::Queued(cause)) => Err(
+                LifecycleWriteFailure::PublicationUnconfirmed(cause.journal_error()),
+            ),
+        }
+    }
+
+    async fn send_lifecycle_advance(
+        &self,
+        operation_id: Uuid,
+        expected: RevisionRefV1,
+        next: BrokerCheckpointV3,
+        publication_attempted: Option<Arc<AtomicBool>>,
+    ) -> Result<CheckpointReceiptV1, WriterDispatchFailure> {
         self.0
-            .call_diagnosed(move |reply| Command::AdvanceLifecycle {
+            .call_tracking_enqueue(move |reply| Command::AdvanceLifecycle {
                 operation_id,
                 expected,
                 next: Box::new(next),
+                publication_attempted,
                 reply,
             })
             .await
@@ -2052,6 +2139,7 @@ fn serve_backend(
                 operation_id,
                 expected,
                 next,
+                publication_attempted,
                 reply,
             } => {
                 #[cfg(test)]
@@ -2087,7 +2175,15 @@ fn serve_backend(
                 }
                 let result = backend
                     .full()
-                    .and_then(|journal| advance_lifecycle(journal, operation_id, expected, &next));
+                    .and_then(|journal| match publication_attempted {
+                        Some(attempted) => journal.advance_lifecycle_observing_publication(
+                            operation_id,
+                            expected,
+                            &next,
+                            || attempted.store(true, Ordering::Release),
+                        ),
+                        None => advance_lifecycle(journal, operation_id, expected, &next),
+                    });
                 #[cfg(test)]
                 {
                     drop(durable_observer);

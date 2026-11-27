@@ -2,7 +2,7 @@
 //! named admission. A loaded pending request authorizes reconciliation only.
 
 use super::{
-    BrokerCheckpointV2, BrokerCheckpointV3, JournalError, JournalResult, WriterCallFailure,
+    BrokerCheckpointV2, BrokerCheckpointV3, JournalError, JournalResult, LifecycleWriteFailure,
     WriterClient,
 };
 use crate::{
@@ -62,6 +62,40 @@ pub(in crate::broker) struct RecordedLegacyNamedImportArm(LegacyNamedImportArmRe
 impl RecordedLegacyNamedImportArm {
     pub(in crate::broker) fn into_request(self) -> LegacyNamedImportArmRequestV1 {
         self.0
+    }
+}
+
+#[derive(Debug)]
+pub(in crate::broker) enum NamedImportArmWriteFailure {
+    BeforePublication(JournalError),
+    PublicationUnconfirmed(JournalError),
+    ReloadAfterPublication(JournalError),
+}
+
+impl NamedImportArmWriteFailure {
+    fn journal_error(self) -> JournalError {
+        match self {
+            Self::BeforePublication(error)
+            | Self::PublicationUnconfirmed(error)
+            | Self::ReloadAfterPublication(error) => error,
+        }
+    }
+}
+
+impl From<JournalError> for NamedImportArmWriteFailure {
+    fn from(error: JournalError) -> Self {
+        Self::BeforePublication(error)
+    }
+}
+
+impl From<LifecycleWriteFailure> for NamedImportArmWriteFailure {
+    fn from(failure: LifecycleWriteFailure) -> Self {
+        match failure {
+            LifecycleWriteFailure::BeforePublication(error) => Self::BeforePublication(error),
+            LifecycleWriteFailure::PublicationUnconfirmed(error) => {
+                Self::PublicationUnconfirmed(error)
+            }
+        }
     }
 }
 
@@ -265,11 +299,11 @@ impl WriterClient {
             // STOP can advance the head between this read and the CAS. Rebuild
             // from the latest prefix with the same inspected snapshot.
             match self
-                .advance_lifecycle_diagnosed(job.operation_id(), job.head().clone(), next)
+                .advance_lifecycle_with_publication(job.operation_id(), job.head().clone(), next)
                 .await
             {
                 Ok(_) => return Ok(()),
-                Err(WriterCallFailure::Actor(JournalError::Conflict)) => continue,
+                Err(LifecycleWriteFailure::BeforePublication(JournalError::Conflict)) => continue,
                 Err(failure) => return Err(failure.journal_error()),
             }
         }
@@ -282,6 +316,17 @@ impl WriterClient {
         archive_digest: &str,
         arm: ArmV1,
     ) -> JournalResult<RecordedLegacyNamedImportArm> {
+        self.record_legacy_named_import_arm_diagnosed(plan, archive_digest, arm)
+            .await
+            .map_err(NamedImportArmWriteFailure::journal_error)
+    }
+
+    pub(in crate::broker) async fn record_legacy_named_import_arm_diagnosed(
+        &self,
+        plan: &LegacyConfirmedPlanV1,
+        archive_digest: &str,
+        arm: ArmV1,
+    ) -> Result<RecordedLegacyNamedImportArm, NamedImportArmWriteFailure> {
         let job = self.load_named_job(plan).await?;
         let current = super::lifecycle(&job)?;
         require_open(&current)?;
@@ -292,36 +337,42 @@ impl WriterClient {
                 .and_then(|prep| prep.owned())
                 .is_none()
         {
-            return Err(JournalError::Conflict);
+            return Err(NamedImportArmWriteFailure::BeforePublication(
+                JournalError::Conflict,
+            ));
         }
         let pending = retained.clone().with_import_arm(arm)?;
         let request = pending.import_arm_request().ok_or(JournalError::Conflict)?;
         let receipt = self
-            .advance_lifecycle(
+            .advance_lifecycle_with_publication(
                 job.operation_id(),
                 job.head().clone(),
                 with_admission(&current, pending)?,
             )
             .await?;
-        let saved = self
-            .load(job.operation_id())
-            .await?
-            .ok_or(JournalError::Corrupt)?;
-        let confirmed = retained_admission(&saved)?;
-        let confirmed_request = confirmed
-            .import_arm_request()
-            .ok_or(JournalError::Conflict)?;
-        if saved.head() != receipt.head()
-            || confirmed.plan() != plan
-            || confirmed.archive_digest() != Some(archive_digest)
-            || confirmed
-                .import_arm()
-                .is_none_or(|arm| arm.receipt().is_some())
-            || canonical(&confirmed_request)? != canonical(&request)?
-        {
-            return Err(JournalError::Conflict);
+        async {
+            let saved = self
+                .load(job.operation_id())
+                .await?
+                .ok_or(JournalError::Corrupt)?;
+            let confirmed = retained_admission(&saved)?;
+            let confirmed_request = confirmed
+                .import_arm_request()
+                .ok_or(JournalError::Conflict)?;
+            if saved.head() != receipt.head()
+                || confirmed.plan() != plan
+                || confirmed.archive_digest() != Some(archive_digest)
+                || confirmed
+                    .import_arm()
+                    .is_none_or(|arm| arm.receipt().is_some())
+                || canonical(&confirmed_request)? != canonical(&request)?
+            {
+                return Err(JournalError::Conflict);
+            }
+            Ok(RecordedLegacyNamedImportArm(confirmed_request))
         }
-        Ok(RecordedLegacyNamedImportArm(confirmed_request))
+        .await
+        .map_err(NamedImportArmWriteFailure::ReloadAfterPublication)
     }
 
     /// A reloaded request is for reconciliation. Only the original CAS
@@ -373,11 +424,11 @@ impl WriterClient {
             // A concurrent STOP advances the prefix. Keep the received Arm
             // and rebuild the acknowledgement against the new head.
             match self
-                .advance_lifecycle_diagnosed(operation, job.head().clone(), next)
+                .advance_lifecycle_with_publication(operation, job.head().clone(), next)
                 .await
             {
                 Ok(_) => return Ok(()),
-                Err(WriterCallFailure::Actor(JournalError::Conflict)) => continue,
+                Err(LifecycleWriteFailure::BeforePublication(JournalError::Conflict)) => continue,
                 Err(failure) => return Err(failure.journal_error()),
             }
         }
