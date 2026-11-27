@@ -1737,6 +1737,7 @@ impl ManagedRuntime {
         bootstrap_stdin: bool,
         spawn_guard: Option<GenerationSpawnGuard>,
     ) -> Result<ContainerHandle> {
+        spec.ensure_generic_create_start_allowed()?;
         spec.require_current_creation_policy()?;
         ensure!(
             spec.managed_names.is_some(),
@@ -2087,6 +2088,7 @@ impl ManagedRuntime {
         F: FnMut(ContainerObservation) -> Fut,
         Fut: Future<Output = Result<()>>,
     {
+        spec.ensure_generic_create_start_allowed()?;
         ensure!(
             duration.is_none() || self.binding.docker_launch_profile.is_none(),
             "strict Docker start profile requires the prearmed start port"
@@ -3276,6 +3278,16 @@ mod log_policy_tests {
         }]);
         validate_configuration(&verification, &bytes(&observed), RuntimeKind::Docker).unwrap();
 
+        let mut podman = observed.clone();
+        podman["HostConfig"]["Tmpfs"] = json!({
+            "/tmp": "rw,nosuid,nodev,noexec,size=256m,mode=1777,rprivate,tmpcopyup",
+            "/home/agent": "size=64m,mode=0700,U,nosuid,nodev,rprivate",
+        });
+        podman["HostConfig"]["CapDrop"] = json!(["CAP_CHOWN", "CAP_DAC_OVERRIDE"]);
+        podman["EffectiveCaps"] = json!(null);
+        podman["BoundingCaps"] = json!(null);
+        validate_configuration(&verification, &bytes(&podman), RuntimeKind::Podman).unwrap();
+
         observed["Mounts"][0]["RW"] = json!(true);
         assert!(
             validate_configuration(&verification, &bytes(&observed), RuntimeKind::Docker).is_err()
@@ -3290,6 +3302,20 @@ mod log_policy_tests {
         assert!(
             validate_configuration(&verification, &bytes(&observed), RuntimeKind::Docker).is_err()
         );
+    }
+
+    #[test]
+    fn generic_effect_gate_rejects_named_verification_but_keeps_ordinary_purposes() {
+        let verification = named_import_verification_spec();
+        assert!(verification.ensure_generic_create_start_allowed().is_err());
+
+        for purpose in [
+            ContainerPurpose::Import,
+            ContainerPurpose::Run,
+            ContainerPurpose::Export,
+        ] {
+            assert!(spec(purpose).ensure_generic_create_start_allowed().is_ok());
+        }
     }
 
     #[test]

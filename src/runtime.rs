@@ -429,6 +429,17 @@ impl ContainerSpec {
     pub fn operation_id(&self) -> Uuid {
         self.operation
     }
+    /// Named-only helper purposes need their own durable, typed start path.
+    /// The generic runtime entry points must reject them before emitting an
+    /// engine command, while pure argument construction and inspection remain
+    /// available to the authorization/recovery code.
+    pub(crate) fn ensure_generic_create_start_allowed(&self) -> Result<()> {
+        ensure!(
+            !matches!(self.purpose, ContainerPurpose::ImportVerification),
+            "ImportVerification requires its typed named authorization path"
+        );
+        Ok(())
+    }
     /// Restrict a named ImportVerification helper to reading its retained
     /// workspace volume. This does not grant permission to create or start it.
     pub(crate) fn with_read_only_workspace_volume(mut self) -> Result<Self> {
@@ -1722,6 +1733,8 @@ impl Runtime {
         F: FnMut(RuntimeState) -> Fut,
         Fut: Future<Output = Result<()>>,
     {
+        spec.ensure_generic_create_start_allowed()
+            .map_err(AttemptFailure::unowned)?;
         if spec.security_preset.is_interactive() {
             return Err(AttemptFailure::unowned(anyhow::anyhow!(
                 "interactive execution requires ManagedRuntime and a durable admission; no engine command was emitted"
