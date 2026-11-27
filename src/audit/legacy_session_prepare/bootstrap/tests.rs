@@ -1241,7 +1241,10 @@ async fn legacy_named_import_arm_preserves_its_prefix_and_closes_manual_claims()
     // observation, execution authority or cancellation proof is exercised.
     let arm = ArmV1 {
         version: 1,
-        operation_id: Uuid::new_v4().to_string(),
+        operation_id: LegacyNamedImportArmRequestV1::operation_id(
+            request.binding_ref,
+            Uuid::parse_str(&parent.attempt.attempt_id).unwrap(),
+        ),
         worker_id: parent.worker_id.clone(),
         attempt_id: parent.attempt.attempt_id.clone(),
         expected_revision: parent.revision + 1,
@@ -1348,6 +1351,14 @@ async fn legacy_named_import_arm_preserves_its_prefix_and_closes_manual_claims()
     let mut other_attempt = arm.clone();
     other_attempt.attempt_id = Uuid::new_v4().to_string();
     assert!(write(&store, &namespace, &other_attempt).is_err());
+    let mut other_operation = arm.clone();
+    other_operation.operation_id = Uuid::new_v4().to_string();
+    assert_eq!(
+        write(&store, &namespace, &other_operation)
+            .unwrap_err()
+            .downcast_ref::<ControlFailure>(),
+        Some(&ControlFailure::Conflict)
+    );
     let mut other_intent = arm.clone();
     other_intent.intent_hash = "e".repeat(64);
     assert!(write(&store, &namespace, &other_intent).is_err());

@@ -331,6 +331,12 @@ pub(crate) struct LegacyNamedImportArmRequestV1 {
 }
 
 impl LegacyNamedImportArmRequestV1 {
+    /// Operation identity for the first Import Arm on this retained attempt.
+    pub(crate) fn operation_id(binding_ref: Uuid, attempt_id: Uuid) -> String {
+        let domain = format!("ai-guard:legacy-named-import-arm-operation:v1:{binding_ref}");
+        crate::model::bound_event_id(domain.as_bytes(), attempt_id)
+    }
+
     pub(crate) fn validate(&self) -> anyhow::Result<()> {
         invalid(
             self.version == 1

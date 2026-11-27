@@ -231,8 +231,13 @@ impl LegacyNamedAdmissionCheckpoint {
             .as_ref()
             .ok_or(JournalError::Conflict)?;
         let arm = &saved.arm;
+        let operation_id = LegacyNamedImportArmRequestV1::operation_id(
+            self.plan.binding_ref,
+            uuid(&parent.attempt.attempt_id)?,
+        );
         ensure(
             self.version == 2
+                && arm.operation_id == operation_id
                 && arm.operation_id != self.plan.operation_id.to_string()
                 && arm.intent_hash == self.request.admission.intent_hash
                 && matches!(
@@ -763,7 +768,10 @@ mod tests {
         let helper = helper_execution_policy_v1(&reserved, HelperPurposeV1::Import, helper_id)?;
         let arm = ArmV1 {
             version: 1,
-            operation_id: Uuid::new_v4().to_string(),
+            operation_id: LegacyNamedImportArmRequestV1::operation_id(
+                plan.binding_ref,
+                uuid(&reserved.attempt.attempt_id)?,
+            ),
             worker_id: reserved.worker_id.clone(),
             attempt_id: reserved.attempt.attempt_id.clone(),
             expected_revision: 2,
@@ -891,6 +899,19 @@ mod tests {
                     .await,
                 Err(JournalError::Conflict)
             ));
+            let mut different_operation = arm.clone();
+            different_operation.operation_id =
+                LegacyNamedImportArmRequestV1::operation_id(Uuid::new_v4(), uuid(&arm.attempt_id)?);
+            assert!(matches!(
+                writer
+                    .record_legacy_named_import_arm(&plan, &digest, different_operation)
+                    .await,
+                Err(JournalError::Conflict)
+            ));
+            assert_eq!(
+                writer.load(operation).await?.unwrap().head(),
+                admitted.head()
+            );
             let (first, second) = tokio::join!(
                 writer.record_legacy_named_import_arm(&plan, &digest, arm.clone()),
                 writer.record_legacy_named_import_arm(&plan, &digest, arm.clone()),

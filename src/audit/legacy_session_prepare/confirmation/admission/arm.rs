@@ -72,6 +72,15 @@ impl Store {
         }
 
         let arm = &request.arm;
+        // A retained Arm may predate the derived operation identity. Require
+        // it only when writing the first fact and protect the control ledger.
+        let operation = LegacyNamedImportArmRequestV1::operation_id(
+            request.binding_ref,
+            canonical_uuid(&arm.attempt_id)?,
+        );
+        conflict(
+            arm.operation_id == operation && !named_operation(&tx, canonical_uuid(&operation)?)?,
+        )?;
         let record =
             self.build_legacy_named_import_arm(&tx, broker, request, &clock, &admission)?;
         let worker = record
