@@ -22,6 +22,8 @@ Sur une source SQLite Legacy avec la préparation de session activée, le broker
 
 La réponse prépare la comparaison côté broker. L’admission résout la même confirmation durable et revérifie l’autorisation dans la transaction qui inscrit le grant, la réservation et l’audit. Les anciennes confirmations V1 permettent à l’initiateur autorisé de rejouer le reçu d’origine.
 
+Le même préfixe privé expose `GET …/{binding_ref}/launch-spec` pour le LaunchSpec exact et `POST …/{binding_ref}/initial-decision` avec un corps vide pour la décision Initial. Le gateway dérive la demande du lancement confirmé et garde le reçu sous l’identité broker. Une nouvelle décision renvoie HTTP 201, le rejeu du reçu renvoie HTTP 200. Cette étape consigne aussi les décisions de revue et de refus. L’admission qui réserve le quota relève d’une requête distincte. Le raccord au Writer et au parcours applicatif reste ouvert.
+
 ## Un vrai canal de conversation
 
 [Étude des protocoles et oracles de recette](evidence/2026-11-25/provider-conversation.fr.md).

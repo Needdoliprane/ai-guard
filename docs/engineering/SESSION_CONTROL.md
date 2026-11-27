@@ -22,6 +22,8 @@ On a Legacy SQLite source with session preparation enabled, the broker bound to 
 
 The response prepares the broker's comparison. Admission resolves the same durable confirmation and revalidates authorization inside the transaction that records the grant, reservation and audit. Older V1 confirmations support replay of the original receipt by the authorized initiator.
 
+The same private route prefix exposes `GET …/{binding_ref}/launch-spec` for the exact LaunchSpec and `POST …/{binding_ref}/initial-decision` with an empty body for the Initial decision. The gateway derives the request from the confirmed launch and retains the receipt under broker identity. An initial write returns HTTP 201 and a replay returns HTTP 200. This step also records review and deny decisions. A separate admission request reserves quota. The Writer and application flow still need to be connected.
+
 ## A real conversation channel
 
 [Protocol and test design note in French](evidence/2026-11-25/provider-conversation.fr.md).
