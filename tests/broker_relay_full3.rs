@@ -15,7 +15,9 @@ use agentsandbox::{
     },
 };
 use anyhow::{Context, Result, bail, ensure};
-use harness::{Fixture, Role, exchange, grant, worker_terminal};
+use harness::{
+    Fixture, Role, exchange, grant, report_negative_assignment_progress, worker_terminal,
+};
 use uuid::Uuid;
 
 #[test]
@@ -261,37 +263,63 @@ async fn restored_pair(fixture: &mut Fixture) -> Result<()> {
 
 async fn refused_assignment(fixture: &mut Fixture, original: Role, selected: Role) -> Result<()> {
     let job = fixture.submit("a", 90).await?;
+    report_negative_assignment_progress("awaiting_issued_workload", "submitted");
     // A legacy overflow is a FAILED prerequisite, never a fabricated history.
     let endpoint = fixture.wait_endpoint(job).await.context(
         "real Running/Awaiting prerequisite not reached; no history or capability fabricated",
     )?;
+    report_negative_assignment_progress("original_history", "endpoint_retained");
     let before = fixture.history(job, original).await?;
     fixture.assert_no_relay_effects().await?;
+    report_negative_assignment_progress("restart_existing", "original_history_confirmed");
     fixture.restart(selected).await?;
+    report_negative_assignment_progress("original_arm_deadline", "existing_ready");
     before.require_live()?;
+    report_negative_assignment_progress("resume", "original_arm_live");
     fixture.assert_assignment_refused(job).await?;
+    report_negative_assignment_progress("recovered_history", "refusal_confirmed");
     before.unchanged(&fixture.recovered_history(job, original).await?)?;
+    report_negative_assignment_progress("stop", "recovered_history_confirmed");
     // Return to the original genuine guardian for independent STOP.
     fixture.shutdown_jobs(&[job], original).await?;
+    report_negative_assignment_progress("terminal", "stop_acknowledged");
     worker_terminal(&fixture.a, &endpoint).await?;
+    report_negative_assignment_progress("final_no_effects", "terminal_confirmed");
     fixture.assert_no_relay_effects().await?;
+    report_negative_assignment_progress("done", "exercise_confirmed");
     Ok(())
+}
+
+async fn run_refused_assignment(
+    setup: impl std::future::Future<Output = Result<Fixture>>,
+    original: Role,
+    selected: Role,
+) -> Result<()> {
+    use std::io::{Write as _, stderr};
+
+    report_negative_assignment_progress("fixture_initialization", "none");
+    let mut fixture = setup.await?;
+    report_negative_assignment_progress("submit", "fixture_ready");
+    let exercise = refused_assignment(&mut fixture, original, selected).await;
+    let _ = writeln!(stderr().lock(), "\nfull3_negative_cleanup=started");
+    let cleanup = fixture.close().await;
+    let category = if cleanup.is_ok() {
+        "closed"
+    } else {
+        "unconfirmed"
+    };
+    let _ = writeln!(stderr().lock(), "\nfull3_negative_cleanup={category}");
+    after_cleanup(exercise, cleanup)
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn software_full3_foreign_original_assignment_refuses_before_issue_exec_or_dispatch()
 -> Result<()> {
-    let mut fixture = Fixture::new_fresh().await?;
-    let exercise = refused_assignment(&mut fixture, Role::FullA, Role::FullB).await;
-    let cleanup = fixture.close().await;
-    after_cleanup(exercise, cleanup)
+    run_refused_assignment(Fixture::new_fresh(), Role::FullA, Role::FullB).await
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn software_full3_missing_assignment_refuses_genuine_legacy_history_before_issue_exec_or_dispatch()
 -> Result<()> {
-    let mut fixture = Fixture::new(Role::Legacy).await?;
-    let exercise = refused_assignment(&mut fixture, Role::Legacy, Role::FullA).await;
-    let cleanup = fixture.close().await;
-    after_cleanup(exercise, cleanup)
+    run_refused_assignment(Fixture::new(Role::Legacy), Role::Legacy, Role::FullA).await
 }

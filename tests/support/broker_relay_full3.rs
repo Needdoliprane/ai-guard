@@ -682,6 +682,17 @@ const ARM_SECONDS: u32 = 90;
 // Product Arm deadlines, polling and every acceptance assertion stay unchanged.
 const FULL3_ENDPOINT_OBSERVATION_TIMEOUT: Duration = Duration::from_secs(60);
 
+pub fn report_negative_assignment_progress(current: &'static str, last_completed: &'static str) {
+    use std::io::Write as _;
+
+    // Write the fixed markers immediately, including while libtest captures
+    // ordinary test output. A killed test may never print its error chain.
+    let _ = writeln!(
+        io::stderr().lock(),
+        "\nfull3_negative_progress current={current} last_completed={last_completed}"
+    );
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Role {
     FullA,
@@ -2223,6 +2234,7 @@ impl Fixture {
             ),
             "foreign/missing assignment must explicitly refuse real Resume"
         );
+        report_negative_assignment_progress("relay_status", "resume_refused");
         match service::request(
             &self.broker_root,
             "a",
@@ -2242,6 +2254,7 @@ impl Fixture {
             } => {}
             _ => bail!("unexpected scoped relay refusal"),
         }
+        report_negative_assignment_progress("refusal_effects", "relay_status_checked");
         self.assert_no_relay_effects().await
     }
     pub async fn shutdown_jobs(&mut self, jobs: &[Uuid], role: Role) -> Result<()> {
