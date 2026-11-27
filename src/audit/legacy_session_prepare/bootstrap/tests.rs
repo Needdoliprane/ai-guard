@@ -1162,7 +1162,7 @@ async fn legacy_named_import_arm_preserves_its_prefix_and_closes_manual_claims()
     use crate::{
         api::{GatewayState, TenantGateway, gateway_router},
         control::{
-            ArmResultV1, ClaimDispositionV1,
+            ArmResultV1, ClaimDispositionV1, HelperClaimResultV1,
             session_control::{
                 LEGACY_NAMED_IMPORT_ARM_RECEIPT_NOT_FOUND, LegacyNamedImportArmRequestV1,
                 LegacyNamedImportClaimRequestV1,
@@ -1194,13 +1194,13 @@ async fn legacy_named_import_arm_preserves_its_prefix_and_closes_manual_claims()
             .unwrap(),
         )
     };
-    let post = |path: &str, token: &str, input: &LegacyNamedImportArmRequestV1| {
+    fn post(path: &str, token: &str, input: &impl serde::Serialize) -> Request<Body> {
         Request::post(path)
             .header(header::AUTHORIZATION, format!("Bearer {token}"))
             .header(header::CONTENT_TYPE, "application/json")
             .body(Body::from(serde_json::to_vec(input).unwrap()))
             .unwrap()
-    };
+    }
     let f = Fixture::new();
     let (store, _) = f.provision(f.create().unwrap()).unwrap();
     f.issue_additional_broker(&store, OTHER_BROKER);
@@ -1381,6 +1381,7 @@ async fn legacy_named_import_arm_preserves_its_prefix_and_closes_manual_claims()
     assert!(store.integrity().unwrap().valid);
 
     let response = app
+        .clone()
         .oneshot(post(&private_path, BROKER_TOKEN, &exact))
         .await
         .unwrap();
@@ -1468,17 +1469,78 @@ async fn legacy_named_import_arm_preserves_its_prefix_and_closes_manual_claims()
         namespace: namespace.clone(),
         claim,
     };
+    let claim_public_path = format!(
+        "/api/v1/control/session-confirmations/{}/admission/import-claim",
+        request.binding_ref
+    );
+    let claim_path = format!("/control{claim_public_path}");
+    let claim_reconcile = format!("{claim_path}/reconcile");
+    for (token, code_path, expected_code) in [
+        (
+            BROKER_TOKEN,
+            "/error/code",
+            "legacy_named_import_claim_receipt_not_found",
+        ),
+        (OTHER_BROKER, "/code", "worker_not_found"),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(post(&claim_reconcile, token, &named_claim))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body: Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 1024).await.unwrap()).unwrap();
+        assert_eq!(
+            body.pointer(code_path).and_then(Value::as_str),
+            Some(expected_code)
+        );
+    }
+    for (path, token, status) in [
+        (
+            claim_public_path.as_str(),
+            BROKER_TOKEN,
+            StatusCode::NOT_FOUND,
+        ),
+        (claim_path.as_str(), RUNNER, StatusCode::FORBIDDEN),
+        (claim_path.as_str(), OTHER_BROKER, StatusCode::NOT_FOUND),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(post(path, token, &named_claim))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), status);
+    }
+    let wrong_binding = format!(
+        "/control/api/v1/control/session-confirmations/{}/admission/import-claim",
+        Uuid::new_v4()
+    );
+    let mismatch = app
+        .clone()
+        .oneshot(post(&wrong_binding, BROKER_TOKEN, &named_claim))
+        .await
+        .unwrap();
+    assert_eq!(mismatch.status(), StatusCode::BAD_REQUEST);
+    let mut wrong_namespace = named_claim.clone();
+    wrong_namespace.namespace = Uuid::new_v4().to_string();
+    wrong_namespace.claim.arm_receipt.control_namespace_uuid = wrong_namespace.namespace.clone();
+    let outside_scope = app
+        .clone()
+        .oneshot(post(&claim_reconcile, BROKER_TOKEN, &wrong_namespace))
+        .await
+        .unwrap();
+    assert_eq!(outside_scope.status(), StatusCode::NOT_FOUND);
+    let body: Value =
+        serde_json::from_slice(&to_bytes(outside_scope.into_body(), 1024).await.unwrap()).unwrap();
+    assert_eq!(body["code"], "worker_not_found");
+    assert_eq!(store.head().unwrap(), armed.receipt.audit_seq);
+
     let Some(AuthenticatedWorkload::Broker(other_broker)) =
         store.authenticate_workload_token(OTHER_BROKER).unwrap()
     else {
         panic!("fixture second broker identity");
     };
-    assert!(
-        store
-            .read_legacy_named_import_claim(&broker, &named_claim)
-            .unwrap()
-            .is_none()
-    );
     assert_eq!(
         store
             .claim_legacy_named_import(&other_broker, &named_claim)
@@ -1519,9 +1581,17 @@ async fn legacy_named_import_arm_preserves_its_prefix_and_closes_manual_claims()
             .is_none()
     );
     assert_eq!(store.head().unwrap(), armed.receipt.audit_seq);
-    let committed_claim = store
-        .claim_legacy_named_import(&broker, &named_claim)
+    let response = app
+        .oneshot(post(&claim_path, BROKER_TOKEN, &named_claim))
+        .await
         .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    assert_eq!(
+        response.headers().get(header::CONTENT_TYPE).unwrap(),
+        "application/json"
+    );
+    let committed_claim: HelperClaimResultV1 =
+        serde_json::from_slice(&to_bytes(response.into_body(), 4096).await.unwrap()).unwrap();
     assert!(matches!(
         committed_claim.disposition,
         ClaimDispositionV1::EmitOnce
@@ -1579,15 +1649,16 @@ async fn legacy_named_import_arm_preserves_its_prefix_and_closes_manual_claims()
     drop(store);
 
     let reopened = Arc::new(f.reopen());
-    for replay in [
-        reopened
-            .claim_legacy_named_import(&broker, &named_claim)
-            .unwrap(),
-        reopened
-            .read_legacy_named_import_claim(&broker, &named_claim)
-            .unwrap()
-            .unwrap(),
-    ] {
+    let app = router(Arc::clone(&reopened));
+    for path in [&claim_path, &claim_reconcile] {
+        let response = app
+            .clone()
+            .oneshot(post(path, BROKER_TOKEN, &named_claim))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let replay: HelperClaimResultV1 =
+            serde_json::from_slice(&to_bytes(response.into_body(), 4096).await.unwrap()).unwrap();
         assert!(matches!(
             replay.disposition,
             ClaimDispositionV1::AlreadyConsumed
@@ -1614,7 +1685,6 @@ async fn legacy_named_import_arm_preserves_its_prefix_and_closes_manual_claims()
             .downcast_ref::<WorkloadFailureV1>(),
         Some(&WorkloadFailureV1::Unauthorized)
     );
-    let app = router(Arc::clone(&reopened));
     let foreign = app
         .clone()
         .oneshot(post(&reconcile, OTHER_BROKER, &exact))
