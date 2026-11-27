@@ -168,8 +168,6 @@ pub struct SessionConversationComposerV1<'a> {
     source: &'a OwnedSourceToken,
     read_deadline: Duration,
     sessions: Mutex<BTreeMap<String, Arc<ConversationSlot>>>,
-    /// Serializes bind/rebind/STOP transitions; dispatch never takes this lock.
-    binding_ops: Mutex<()>,
     #[cfg(test)]
     before_write: Mutex<Option<BeforeWritePause>>,
     #[cfg(test)]
@@ -201,7 +199,6 @@ impl<'a> SessionConversationComposerV1<'a> {
             source,
             read_deadline,
             sessions: Mutex::new(BTreeMap::new()),
-            binding_ops: Mutex::new(()),
             #[cfg(test)]
             before_write: Mutex::new(None),
             #[cfg(test)]
@@ -333,20 +330,32 @@ impl<'a> SessionConversationComposerV1<'a> {
         stdio: StdioConversation,
     ) -> anyhow::Result<SessionConversationBindingV1> {
         canonical_uuid(session_id)?;
-        let _binding = self.binding_ops.lock().expect("conversation binding");
-        // A second rotation cannot replace the retained predecessor until its
-        // exact child has been reaped. Same-bind replay follows this path too.
-        if let Some(existing) = self
-            .sessions
-            .lock()
-            .expect("conversation registry")
-            .get(session_id)
-            .cloned()
-        {
-            self.reap_predecessor(&existing)?;
+        // Snapshot the currently published slot while holding the same epoch
+        // used by bind/STOP publishers. Reap outside both publication guards.
+        let observed = {
+            let _epoch = self.write_epoch()?;
+            self.sessions
+                .lock()
+                .expect("conversation registry")
+                .get(session_id)
+                .cloned()
+        };
+        if let Some(existing) = &observed {
+            // A second rotation cannot replace this exact slot until its
+            // predecessor is reaped. Same-bind replay follows this path too.
+            self.reap_predecessor(existing)?;
         }
+
         let epoch = self.write_epoch()?;
         let access = HumanSourceAccess::write(&epoch, self.source)?;
+        let mut sessions = self.sessions.lock().expect("conversation registry");
+        let current_slot = sessions.get(session_id);
+        let same_slot = match (&observed, current_slot) {
+            (None, None) => true,
+            (Some(observed), Some(current)) => Arc::ptr_eq(observed, current),
+            _ => false,
+        };
+        anyhow::ensure!(same_slot, SessionMessageFailureV1::BindingChanged);
         let previous = self
             .store
             .session_conversation_binding_read(&access, session_id)?;
@@ -374,11 +383,7 @@ impl<'a> SessionConversationComposerV1<'a> {
         );
         // A fresh bind advances the epoch. Only a replay leaves it unchanged.
         if previous == binding {
-            let existing = self
-                .sessions
-                .lock()
-                .expect("conversation registry")
-                .get(session_id)
+            let existing = current_slot
                 .cloned()
                 .ok_or(SessionMessageFailureV1::ChannelNotAdmitted)?;
             // The slot's identity is immutable. A replay need not wait for
@@ -387,6 +392,7 @@ impl<'a> SessionConversationComposerV1<'a> {
                 existing.binding == binding,
                 SessionMessageFailureV1::BindingChanged
             );
+            drop(sessions);
             drop(epoch);
             self.reap_predecessor(&existing)?;
             return Ok(binding);
@@ -402,20 +408,17 @@ impl<'a> SessionConversationComposerV1<'a> {
             }),
             predecessor: PendingPredecessor::default(),
         });
-        let replaced = {
-            let mut sessions = self.sessions.lock().expect("conversation registry");
-            let replaced = sessions.get(session_id).cloned();
-            if let Some(previous) = &replaced {
-                slot.predecessor.install(Arc::clone(previous))?;
-            }
-            sessions.insert(session_id.into(), Arc::clone(&slot));
-            replaced
-        };
+        let replaced = current_slot.cloned();
+        if let Some(previous) = &replaced {
+            slot.predecessor.install(Arc::clone(previous))?;
+        }
+        sessions.insert(session_id.into(), Arc::clone(&slot));
         if let Some(replaced) = &replaced {
             // Publish retirement under the same epoch as the durable rebind.
             replaced.retiring.store(true, Ordering::Release);
         }
         // A replaced dispatch can need an epoch while it still owns the slot.
+        drop(sessions);
         drop(epoch);
         if replaced.is_some() {
             // A failed reap leaves the newly installed slot explicitly gated;
@@ -623,7 +626,6 @@ impl<'a> SessionConversationComposerV1<'a> {
         session_id: &str,
     ) -> anyhow::Result<SessionConversationBindingV1> {
         canonical_uuid(session_id)?;
-        let _binding = self.binding_ops.lock().expect("conversation binding");
         let epoch = self.write_epoch()?;
         let binding = self.store.close_session_conversation_scoped(
             &epoch,
@@ -658,7 +660,10 @@ impl<'a> SessionConversationComposerV1<'a> {
             let current_result = bound.channel.close_and_reap();
             predecessor_result?;
             current_result?;
-            // A replay must find this slot until teardown has completed.
+            drop(bound);
+            // Publish removal under the same epoch as admission/STOP. A
+            // concurrent STOP replay can still close durably while reaping.
+            let epoch = self.write_epoch()?;
             let mut sessions = self.sessions.lock().expect("conversation registry");
             if sessions
                 .get(session_id)
@@ -666,6 +671,8 @@ impl<'a> SessionConversationComposerV1<'a> {
             {
                 sessions.remove(session_id);
             }
+            drop(sessions);
+            drop(epoch);
         }
         Ok(binding)
     }
