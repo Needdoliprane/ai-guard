@@ -477,9 +477,9 @@ impl LegacyNamedAdmissionCheckpoint {
         mut self,
         request: LegacyNamedImportObservationRequestV1,
     ) -> JournalResult<Self> {
-        checked(self.validate_import_observation_request(&request))?;
-        if let Some(saved) = self.import_observation(request.phase) {
-            ensure(equal(saved.request(), &request)?)?;
+        self.validate_import_observation_request(&request)?;
+        if let Some((saved, _)) = self.import_observation(request.phase) {
+            ensure(equal(saved, &request)?)?;
             return Ok(self);
         }
         self.import_observations
