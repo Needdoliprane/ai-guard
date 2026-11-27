@@ -12,6 +12,7 @@ pub(crate) mod ledger;
     reason = "the live named STOP dispatch is composed separately"
 )]
 mod legacy_named_stop;
+mod legacy_named_stop_ipc;
 pub(in crate::broker) use legacy_named_stop::NamedImportArmBirthV1;
 mod native_stop_failure;
 mod recovery;
