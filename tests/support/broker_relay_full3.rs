@@ -51,19 +51,11 @@ use owned_darwin::DarwinIdentity;
 #[path = "owned_legacy_guardian.rs"]
 mod owned_legacy_guardian;
 use owned_legacy_guardian::{OwnedLegacyGuardian, require_fresh_role};
-/// The Fresh guardian custody proof uses Darwin audit tokens. Other hosts keep
-/// the pre-started guardian fixtures and refuse a Fresh fixture explicitly.
-#[cfg(not(target_os = "macos"))]
-struct DarwinIdentity;
-#[cfg(not(target_os = "macos"))]
-impl DarwinIdentity {
-    fn capture(_peer: &UnixStream, _broker_pid: u32, _program: &Path) -> Result<Self> {
-        anyhow::bail!("Fresh guardian custody requires Darwin audit tokens")
-    }
-    async fn close(self, _peer: &UnixStream, _broker_pid: u32, _program: &Path) -> Result<()> {
-        anyhow::bail!("Fresh guardian custody requires Darwin audit tokens")
-    }
-}
+#[cfg(target_os = "linux")]
+#[path = "owned_linux.rs"]
+mod owned_linux;
+#[cfg(target_os = "linux")]
+use owned_linux::LinuxIdentity;
 
 pub const BIN: &str = env!("CARGO_BIN_EXE_agentsandbox");
 pub const A_RUNNER: &str = "broker-handoff-a-runner-public-fixture-0123456789";
@@ -830,7 +822,69 @@ impl RetainedFixtureEndpoint {
 
 struct FreshGuardian {
     endpoint: RetainedFixtureEndpoint,
-    identity: DarwinIdentity,
+    identity: FreshGuardianIdentity,
+}
+enum FreshGuardianIdentity {
+    #[cfg(target_os = "macos")]
+    Darwin(DarwinIdentity),
+    #[cfg(target_os = "linux")]
+    Linux(LinuxIdentity),
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    Unsupported,
+}
+impl FreshGuardianIdentity {
+    fn capture(stream: &UnixStream, broker_pid: u32, program: &Path) -> Result<Self> {
+        #[cfg(target_os = "macos")]
+        {
+            return Ok(Self::Darwin(DarwinIdentity::capture(
+                stream, broker_pid, program,
+            )?));
+        }
+        #[cfg(target_os = "linux")]
+        {
+            return Ok(Self::Linux(LinuxIdentity::capture(
+                stream, broker_pid, program,
+            )?));
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        {
+            let _ = (stream, broker_pid, program);
+            anyhow::bail!("Fresh guardian native custody unavailable on this host")
+        }
+    }
+
+    fn exited(&self) -> Result<bool> {
+        match self {
+            #[cfg(target_os = "macos")]
+            Self::Darwin(identity) => identity.exited(),
+            #[cfg(target_os = "linux")]
+            Self::Linux(identity) => identity.exited(),
+            #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+            Self::Unsupported => anyhow::bail!("Fresh guardian native custody unavailable"),
+        }
+    }
+
+    fn signal_retained_peer(&self, stream: &UnixStream) -> Result<()> {
+        match self {
+            #[cfg(target_os = "macos")]
+            Self::Darwin(identity) => identity.signal_retained_peer(stream),
+            #[cfg(target_os = "linux")]
+            Self::Linux(identity) => identity.signal_retained_peer(stream),
+            #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+            Self::Unsupported => anyhow::bail!("Fresh guardian native custody unavailable"),
+        }
+    }
+
+    async fn wait_exit(&self) -> Result<()> {
+        match self {
+            #[cfg(target_os = "macos")]
+            Self::Darwin(identity) => identity.wait_exit().await,
+            #[cfg(target_os = "linux")]
+            Self::Linux(identity) => identity.wait_exit().await,
+            #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+            Self::Unsupported => anyhow::bail!("Fresh guardian native custody unavailable"),
+        }
+    }
 }
 impl FreshGuardian {
     async fn capture(broker_root: &Path, installation: Uuid, broker_pid: u32) -> Result<Self> {
@@ -845,19 +899,21 @@ impl FreshGuardian {
         );
         let endpoint = RetainedFixtureEndpoint::capture(role)?;
         let peer = endpoint.checked_peer().await?;
-        let identity = DarwinIdentity::capture(&peer, broker_pid, Path::new(BIN))?;
+        let identity = FreshGuardianIdentity::capture(&peer, broker_pid, Path::new(BIN))?;
         root.revalidate()?;
         endpoint.revalidate()?;
         Ok(Self { endpoint, identity })
     }
 
-    async fn close(self, broker_pid: u32) -> Result<()> {
-        let peer = self.endpoint.checked_peer().await?;
-        if let Err(error) = self.identity.close(&peer, broker_pid, Path::new(BIN)).await {
-            // The platform module emits closed category strings and numeric
-            // native return codes. Filesystem errors never reach this log.
-            println!("phase=fixture_guardian_native {error}");
-            return Err(error);
+    async fn close(self) -> Result<()> {
+        if !self.identity.exited()? {
+            let peer = self.endpoint.checked_peer().await?;
+            if let Err(error) = self.identity.signal_retained_peer(&peer) {
+                println!("phase=fixture_guardian_native {error}");
+                return Err(error);
+            }
+            drop(peer);
+            self.identity.wait_exit().await?;
         }
         self.endpoint.assert_closed().await
     }
@@ -1301,7 +1357,7 @@ impl Fixture {
                 .join(format!("broker-{}.stderr", self.broker_starts)),
             !fresh && !first_legacy && !self.legacy_start_attempted,
         )?);
-        self.fresh_start_attempted = fresh;
+        self.fresh_start_attempted |= fresh;
         self.legacy_start_attempted |= first_legacy;
         self.selection = role;
         let mut last_list = ("not_attempted", None);
@@ -2179,22 +2235,6 @@ impl Fixture {
         // The guardian may hold an admitted slot even when diagnostics fail
         // before the business ACKs. No process signal is authorized until the
         // dedicated synthetic runtime has been joined and its IPC is gone.
-        let guardian_closed = if self.fresh_start_attempted && engine_closed {
-            self.close_fresh_guardian().await.is_ok()
-        } else {
-            false
-        };
-        if self.fresh_start_attempted {
-            failed |= !guardian_closed;
-            println!(
-                "phase=fixture_guardian_close category={}",
-                if guardian_closed {
-                    "forced_fixture_reaped_ipc_absent"
-                } else {
-                    "not_confirmed"
-                }
-            );
-        }
         let legacy_started = self.legacy_start_attempted;
         let legacy_ready = if legacy_started {
             match self.legacy_guardian.as_ref() {
@@ -2204,9 +2244,8 @@ impl Fixture {
         } else {
             true
         };
-        let (broker_reaped, broker_closed, read_closed_journal) = if (!self.fresh_start_attempted
-            || guardian_closed)
-            && (!legacy_started || engine_closed)
+        let (broker_reaped, broker_closed, read_closed_journal) = if !legacy_started
+            || engine_closed
         {
             match self.broker.as_mut() {
                 Some(owner) => {
@@ -2248,6 +2287,22 @@ impl Fixture {
             (false, false, false)
         };
         failed |= !broker_closed;
+        let guardian_closed = if self.fresh_start_attempted && engine_closed && broker_closed {
+            self.close_fresh_guardian().await.is_ok()
+        } else {
+            false
+        };
+        if self.fresh_start_attempted {
+            failed |= !guardian_closed;
+            println!(
+                "phase=fixture_guardian_close category={}",
+                if guardian_closed {
+                    "retained_native_identity_closed_after_broker"
+                } else {
+                    "not_confirmed"
+                }
+            );
+        }
         if legacy_started && broker_reaped && legacy_ready {
             // Do not expose guardian exit to a broker watcher that could
             // recreate the role. The native identity survives reparenting.
@@ -2329,18 +2384,13 @@ impl Fixture {
             .await
             .context("Fresh guardian identity not attested")?;
         }
-        let broker_pid = self.live_broker_pid()?;
         let guardian = self
             .fresh_guardian
             .take()
             .context("missing Fresh guardian identity")?;
-        timeout(Duration::from_secs(16), guardian.close(broker_pid))
+        timeout(Duration::from_secs(16), guardian.close())
             .await
             .context("Fresh guardian closure timeout")??;
-        ensure!(
-            self.live_broker_pid()? == broker_pid,
-            "fixture broker did not retain reaping custody"
-        );
         Ok(())
     }
 }

@@ -46,7 +46,7 @@ fn after_cleanup(exercise: Result<()>, cleanup: Result<()>) -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn software_full3_restores_original_assignments_before_late_issue_two_endpoints_relay()
 -> Result<()> {
-    let mut fixture = Fixture::new(Role::FullA).await?;
+    let mut fixture = Fixture::new_fresh().await?;
     let exercise = restored_pair(&mut fixture).await;
     let ticket = fixture.timeout_observation_ticket();
     // Report the oracle only after all owned service/guardian/tasks were joined.
@@ -249,7 +249,7 @@ async fn refused_assignment(fixture: &mut Fixture, original: Role, selected: Rol
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn software_full3_foreign_original_assignment_refuses_before_issue_exec_or_dispatch()
 -> Result<()> {
-    let mut fixture = Fixture::new(Role::FullA).await?;
+    let mut fixture = Fixture::new_fresh().await?;
     let exercise = refused_assignment(&mut fixture, Role::FullA, Role::FullB).await;
     let cleanup = fixture.close().await;
     after_cleanup(exercise, cleanup)
