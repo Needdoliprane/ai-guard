@@ -978,6 +978,27 @@ fn run_bound_actor(
     run_actor(Arc::clone(actor), clock, runtime, managed);
 }
 
+fn publish_tick_clock(
+    rail: LegacyProspectiveRailV1,
+    published: &mut Option<HostClockSampleV1>,
+    sample: HostClockSampleV1,
+) {
+    // Prepare may publish a newer sample while the sampled tick waits for
+    // the slot lock. The watchdog evaluates every tick independently.
+    if !matches!(rail, LegacyProspectiveRailV1::Named(_))
+        || published.as_ref().is_none_or(|latest| {
+            latest.method == sample.method
+                && latest.boot_id == sample.boot_id
+                && matches!(
+                    (latest.continuous_ns(), sample.continuous_ns()),
+                    (Ok(latest_ns), Ok(sample_ns)) if sample_ns > latest_ns
+                )
+        })
+    {
+        *published = Some(sample);
+    }
+}
+
 fn run_actor(
     actor: Arc<Actor>,
     clock: Arc<NativeHostClock>,
@@ -1008,7 +1029,7 @@ fn run_actor(
         stopping |= !live || actor.stop.load(Ordering::SeqCst);
         if let Ok(mut value) = actor.state.lock() {
             if let Ok(sample) = sample {
-                value.clock = Some(sample);
+                publish_tick_clock(actor.rail, &mut value.clock, sample);
             }
             value.phase = if stopping {
                 SlotPhaseV1::Stopping
@@ -1069,6 +1090,55 @@ mod tests {
     use super::super::recovery::{RecoveryState, serve_connection as serve_recovery_connection};
     use super::*;
     use serde_json::{Value, json};
+
+    #[test]
+    fn named_import_slots_preserve_prepare_clock_after_delayed_tick() {
+        use crate::control::HostClockMethodV1;
+
+        let sample = |ns: u128| HostClockSampleV1 {
+            version: 1,
+            method: HostClockMethodV1::LinuxBoottimeV1,
+            boot_id: Uuid::from_u128(1).to_string(),
+            continuous_ns_decimal: ns.to_string(),
+            observed_utc: None,
+        };
+        let timestamp = |clock: &Option<HostClockSampleV1>| {
+            clock
+                .as_ref()
+                .and_then(|sample| sample.continuous_ns().ok())
+        };
+        let rail = LegacyProspectiveRailV1::Named(Uuid::from_u128(3));
+        let delayed_tick = sample(99);
+        // Prepare publishes after the native tick sampled, while the tick is
+        // still waiting to acquire the status lock.
+        let mut published = Some(sample(100));
+
+        for tick in [
+            delayed_tick.clone(),
+            HostClockSampleV1 {
+                boot_id: Uuid::from_u128(2).to_string(),
+                ..sample(200)
+            },
+            HostClockSampleV1 {
+                method: HostClockMethodV1::DarwinMachContinuousV1,
+                ..sample(300)
+            },
+        ] {
+            publish_tick_clock(rail, &mut published, tick);
+            assert_eq!(timestamp(&published), Some(100));
+        }
+
+        publish_tick_clock(rail, &mut published, sample(101));
+        assert_eq!(timestamp(&published), Some(101));
+
+        let mut historical = Some(sample(100));
+        publish_tick_clock(
+            LegacyProspectiveRailV1::Historical,
+            &mut historical,
+            delayed_tick,
+        );
+        assert_eq!(timestamp(&historical), Some(99));
+    }
 
     #[tokio::test]
     async fn recovery_auth_offers_stops_only_when_admission_closed() {
