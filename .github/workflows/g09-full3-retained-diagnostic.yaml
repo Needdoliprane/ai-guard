@@ -1,0 +1,150 @@
+name: G09 Full3 retained relay diagnostics
+
+'on':
+  push:
+    branches: [codex/g09-full3-retained-diagnostic-20261127]
+    paths: [.github/workflows/g09-full3-retained-diagnostic.yaml]
+
+permissions:
+  contents: read
+
+jobs:
+  full3-relay:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      SOURCE_SHA: d2e3b46548cef7c5b3639ed226a88631d038b2a9
+      SOURCE_TREE: 1d53e93d1143a12543b597df381b34b232b68e04
+      CARGO_BUILD_JOBS: '1'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      CARGO_TERM_COLOR: never
+      RUST_MIN_STACK: '8388608'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: d2e3b46548cef7c5b3639ed226a88631d038b2a9
+          persist-credentials: false
+
+      - name: Verify the original Full3 assignment through Existing IPC
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          selectors=(
+            software_full3_existing_reads_original_relay_assignment_without_authorizing_execution
+          )
+
+          report_not_run() {
+            local selector
+            for selector in "${selectors[@]}"; do
+              printf 'test=%s status=NOT_RUN\n' "$selector"
+            done
+          }
+
+          if [[ "$(git rev-parse HEAD 2>/dev/null)" != "$SOURCE_SHA" ||
+                "$(git rev-parse 'HEAD^{tree}' 2>/dev/null)" != "$SOURCE_TREE" ]]; then
+            printf 'source=FAIL\n'
+            report_not_run
+            exit 1
+          fi
+          printf 'source=PASS\nsource_sha=%s\nsource_tree=%s\n' "$SOURCE_SHA" "$SOURCE_TREE"
+          export AI_GUARD_BUILD_REVISION="$SOURCE_SHA"
+
+          # Keep fixture paths short for Unix sockets and keep all raw output private.
+          scratch=$(mktemp -d /tmp/aig-g09.XXXXXX)
+          trap 'rm -rf -- "$scratch"' EXIT
+          export TMPDIR="$scratch"
+          export CARGO_TARGET_DIR="$scratch/target"
+          build_json="$scratch/build.jsonl"
+
+          if ! cargo fetch --locked --target host-tuple >"$scratch/fetch.log" 2>&1; then
+            printf 'fetch=FAIL\nbuild=NOT_RUN\n'
+            report_not_run
+            exit 1
+          fi
+          printf 'fetch=PASS\n'
+
+          if ! cargo test --locked --offline --features mysql-storage --test broker_relay_full3 --no-run \
+              --message-format=json >"$build_json" 2>"$scratch/build.stderr"; then
+            printf 'build=FAIL\n'
+            jq -Rr 'fromjson? | objects
+              | select(.reason == "compiler-message" and .message.level == "error")
+              | .message.code.code // empty | strings | select(test("\\AE[0-9]{4}\\z"))
+              | "compiler_error=" + .' "$build_json" 2>/dev/null | sort -u || true
+            report_not_run
+            exit 1
+          fi
+          printf 'build=PASS\n'
+
+          if ! harness=$(jq -ers '[.[] | select(.reason == "compiler-artifact"
+              and .target.name == "broker_relay_full3" and .target.kind == ["test"]
+              and .profile.test == true and (.executable | type) == "string") | .executable]
+              | unique | select(length == 1) | .[0]' "$build_json" 2>/dev/null) ||
+              [[ "$harness" != "$CARGO_TARGET_DIR"/debug/deps/broker_relay_full3-* ||
+                 ! -f "$harness" || ! -x "$harness" || -L "$harness" ]]; then
+            printf 'harness=FAIL\n'
+            report_not_run
+            exit 1
+          fi
+          printf 'harness=PASS\n'
+          if ! cli=$(jq -ers '[.[] | select(.reason == "compiler-artifact"
+              and .target.name == "agentsandbox" and .target.kind == ["bin"]
+              and .profile.test == false and (.executable | type) == "string") | .executable]
+              | unique | select(length == 1) | .[0]' "$build_json" 2>/dev/null) ||
+              [[ "$cli" != "$CARGO_TARGET_DIR/debug/agentsandbox" ||
+                 ! -f "$cli" || ! -x "$cli" || -L "$cli" ]]; then
+            printf 'cli=FAIL\n'
+            report_not_run
+            exit 1
+          fi
+          harness_hash=$(sha256sum -- "$harness")
+          cli_hash=$(sha256sum -- "$cli")
+          printf 'cli=PASS\nharness_sha256=%s\ncli_sha256=%s\n' \
+            "${harness_hash%% *}" "${cli_hash%% *}"
+
+
+          check_selector() {
+            local selector=$1
+            local log="$scratch/test.log"
+            if ! "$harness" --exact "$selector" --test-threads=1 --color never --show-output >"$log" 2>&1; then
+              printf 'FAIL'
+            elif grep -Fqx 'running 0 tests' "$log"; then
+              printf 'NO_TEST'
+            elif grep -Fqx 'running 1 test' "$log" &&
+                grep -Fqx "test $selector ... ok" "$log" &&
+                grep -Fqx 'phase=full3_retained_relay category=confirmed_no_effects' "$log" &&
+                grep -Eq '^test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; [0-9]+ filtered out;' "$log"; then
+              printf 'PASS'
+            else
+              printf 'FAIL'
+            fi
+          }
+
+          failed=0
+          for selector in "${selectors[@]}"; do
+            status=$(check_selector "$selector")
+            grep -E '^(full3_read_stage=(fresh_requested|fresh_ready|submitted|endpoint_retained|history_confirmed|existing_ready)|full3_read_cleanup=(closed|unconfirmed)|phase=full3_retained_relay category=(confirmed_no_effects|authorized_read_refused|unconfirmed_worker_arm reason=(Confirmed|RelayRecordAbsent|StopSnapshotIncomplete|WorkerArmNotFound|SourceHeadNotAncestor|RelayReadUnavailable)))$' "$scratch/test.log" || true
+            printf 'test=%s status=%s\n' "$selector" "$status"
+            if [[ "$status" == PASS ]]; then
+              printf 'retained_relay=confirmed_no_effects\n'
+            else
+              failed=1
+              if grep -Eq '^phase=fixture_broker_ipc_preflight.*category=timeout' "$scratch/test.log"; then
+                category=ipc_preflight_timeout
+              elif grep -Fq 'phase=full3_retained_relay category=unconfirmed_worker_arm' "$scratch/test.log"; then
+                category=unconfirmed_assignment
+              elif grep -Fq 'phase=full3_retained_relay category=authorized_read_refused' "$scratch/test.log"; then
+                category=authorized_read_refused
+              elif grep -q 'deadline has elapsed' "$scratch/test.log"; then
+                category=deadline
+              elif [[ "$status" == NO_TEST ]]; then
+                category=selector
+              else
+                category=unclassified
+              fi
+              printf 'test=%s category=%s\n' "$selector" "$category"
+            fi
+          done
+          exit "$failed"
