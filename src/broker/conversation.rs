@@ -661,9 +661,9 @@ impl<'a> SessionConversationComposerV1<'a> {
             predecessor_result?;
             current_result?;
             drop(bound);
-            // Publish removal under the same epoch as admission/STOP. A
-            // concurrent STOP replay can still close durably while reaping.
-            let epoch = self.write_epoch()?;
+            // Durable Closed was published before teardown and prevents every
+            // later bind. Remove only this exact slot; do not reacquire the
+            // source epoch after ACK cancellation/reap just for local cleanup.
             let mut sessions = self.sessions.lock().expect("conversation registry");
             if sessions
                 .get(session_id)
@@ -671,8 +671,6 @@ impl<'a> SessionConversationComposerV1<'a> {
             {
                 sessions.remove(session_id);
             }
-            drop(sessions);
-            drop(epoch);
         }
         Ok(binding)
     }
