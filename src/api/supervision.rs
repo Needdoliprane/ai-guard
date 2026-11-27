@@ -9,7 +9,9 @@ use crate::control::{
     HelperStartClaimV1, MutationReceiptV1, MutationResultV1, SupervisedAdmissionV1,
     session_control::{
         LEGACY_CONFIRMED_LAUNCH_SPEC_RESPONSE_BYTES, LEGACY_NAMED_ADMISSION_RECEIPT_NOT_FOUND,
-        LEGACY_NAMED_ADMISSION_REQUEST_BYTES, LegacyConfirmedPlanV1, LegacyNamedAdmissionReceiptV1,
+        LEGACY_NAMED_ADMISSION_REQUEST_BYTES, LEGACY_NAMED_IMPORT_ARM_RECEIPT_NOT_FOUND,
+        LEGACY_NAMED_IMPORT_ARM_RESPONSE_BYTES, LegacyConfirmedPlanV1,
+        LegacyNamedAdmissionReceiptV1, LegacyNamedImportArmRequestV1,
         LegacyNamedSupervisedAdmissionV1, canonical_uuid,
     },
 };
@@ -48,6 +50,16 @@ pub(super) fn routes() -> Router<GatewayState> {
         .route(
             "/control/session-confirmations/{binding_ref}/admission/cancel-reserved",
             post(cancel_named_reservation)
+                .layer(DefaultBodyLimit::max(LEGACY_NAMED_ADMISSION_REQUEST_BYTES)),
+        )
+        .route(
+            "/control/session-confirmations/{binding_ref}/admission/import-arm",
+            post(arm_named_import)
+                .layer(DefaultBodyLimit::max(LEGACY_NAMED_ADMISSION_REQUEST_BYTES)),
+        )
+        .route(
+            "/control/session-confirmations/{binding_ref}/admission/import-arm/reconcile",
+            post(reconcile_named_import_arm)
                 .layer(DefaultBodyLimit::max(LEGACY_NAMED_ADMISSION_REQUEST_BYTES)),
         )
         .route("/workers/supervised-reservations", post(reserve))
@@ -448,6 +460,100 @@ async fn cancel_named_reservation(
                     )));
                 }
                 Ok(Json(result))
+            },
+        )
+        .await
+}
+
+fn named_import_arm_request(
+    binding_ref: &str,
+    body: Result<Json<LegacyNamedImportArmRequestV1>, JsonRejection>,
+) -> ApiResult<LegacyNamedImportArmRequestV1> {
+    let binding_ref = canonical_uuid(binding_ref).map_err(control_error)?;
+    let request = parse_json(body)?;
+    if request.binding_ref != binding_ref {
+        return Err(control_error(ControlFailure::InvalidRequest.into()));
+    }
+    Ok(request)
+}
+
+fn named_import_arm_absent() -> (StatusCode, Json<Value>) {
+    workload::response(
+        StatusCode::NOT_FOUND,
+        LEGACY_NAMED_IMPORT_ARM_RECEIPT_NOT_FOUND,
+        "Reçu d’armement d’import introuvable.",
+    )
+}
+
+fn named_import_arm_error(store: &TenantStore, error: anyhow::Error) -> (StatusCode, Json<Value>) {
+    if store.store_healthy()
+        && error.downcast_ref::<ControlFailure>() == Some(&ControlFailure::NotFound)
+    {
+        named_import_arm_absent()
+    } else {
+        named_admission_error(store, error)
+    }
+}
+
+fn named_import_arm_response(result: ArmResultV1, redactor: &Redactor) -> ApiResult<Response> {
+    let status = if result.replayed {
+        StatusCode::OK
+    } else {
+        StatusCode::CREATED
+    };
+    let value = serde_json::to_value(result).map_err(|error| control_error(error.into()))?;
+    if redactor.value_unclipped(&value) != value {
+        return Err(control_error(anyhow::anyhow!(
+            "named import arm receipt requires redaction"
+        )));
+    }
+    let bytes = serde_json::to_vec(&value).map_err(|error| control_error(error.into()))?;
+    if bytes.len() > LEGACY_NAMED_IMPORT_ARM_RESPONSE_BYTES {
+        return Err(control_error(anyhow::anyhow!(
+            "named import arm receipt exceeds its response bound"
+        )));
+    }
+    Ok((status, [(header::CONTENT_TYPE, "application/json")], bytes).into_response())
+}
+
+async fn arm_named_import(
+    _private: PrivateControlTransport,
+    broker: workload::VerifiedBroker,
+    Path(binding_ref): Path<String>,
+    body: Result<Json<LegacyNamedImportArmRequestV1>, JsonRejection>,
+) -> ApiResult<Response> {
+    let request = named_import_arm_request(&binding_ref, body)?;
+    broker
+        .blocking_on(
+            store_io::Lane::Control,
+            move |tenant, identity, redactor| {
+                let store = named_admission_store(&tenant, &redactor)?;
+                let result = store
+                    .arm_legacy_named_import(&identity, &request)
+                    .map_err(|error| named_import_arm_error(&tenant.store, error))?;
+                named_import_arm_response(result, &store.redactor_union(&redactor))
+            },
+        )
+        .await
+}
+
+async fn reconcile_named_import_arm(
+    _private: PrivateControlTransport,
+    broker: workload::VerifiedBroker,
+    Path(binding_ref): Path<String>,
+    body: Result<Json<LegacyNamedImportArmRequestV1>, JsonRejection>,
+) -> ApiResult<Response> {
+    let request = named_import_arm_request(&binding_ref, body)?;
+    broker
+        .blocking_on(
+            store_io::Lane::Control,
+            move |tenant, identity, redactor| {
+                let store = named_admission_store(&tenant, &redactor)?;
+                let result = store
+                    .read_legacy_named_import_arm(&identity, &request)
+                    .map_err(|error| named_import_arm_error(&tenant.store, error))?
+                    .ok_or_else(named_import_arm_absent)?;
+                named_import_arm_response(result, &store.redactor_union(&redactor))
             },
         )
         .await

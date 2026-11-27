@@ -1157,10 +1157,53 @@ async fn legacy_named_cancel_releases_an_unarmed_reservation_after_revocation() 
     assert_eq!(reopened.worker_quota(&quota).unwrap().held_workers, 0);
 }
 
-#[test]
-fn legacy_named_import_arm_preserves_its_prefix_and_closes_manual_claims() {
+#[tokio::test]
+async fn legacy_named_import_arm_preserves_its_prefix_and_closes_manual_claims() {
+    use crate::{
+        api::{GatewayState, TenantGateway, gateway_router},
+        control::{
+            ArmResultV1,
+            session_control::{
+                LEGACY_NAMED_IMPORT_ARM_RECEIPT_NOT_FOUND, LegacyNamedImportArmRequestV1,
+            },
+        },
+    };
+    use axum::{
+        body::{Body, to_bytes},
+        http::{Request, StatusCode, header},
+    };
+    use std::sync::Arc;
+    use tower::ServiceExt;
+
+    const RUNNER: &str = "synthetic-named-import-arm-runner-fixture";
+    const OTHER_BROKER: &str = "synthetic-named-import-arm-other-broker-fixture";
+    let router = |store: Arc<Store>| {
+        gateway_router(
+            GatewayState::for_tenants(
+                vec![TenantGateway {
+                    tenant_id: TENANT.into(),
+                    store,
+                    runner_token: RUNNER.into(),
+                    viewer_token: "synthetic-named-import-arm-viewer-fixture".into(),
+                }],
+                Policy::default(),
+                None,
+                Redactor::new(vec![]),
+            )
+            .unwrap(),
+        )
+    };
+    let post = |path: &str, token: &str, input: &LegacyNamedImportArmRequestV1| {
+        Request::post(path)
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(serde_json::to_vec(input).unwrap()))
+            .unwrap()
+    };
     let f = Fixture::new();
     let (store, _) = f.provision(f.create().unwrap()).unwrap();
+    f.issue_additional_broker(&store, OTHER_BROKER);
+    let store = Arc::new(store);
     let (request, mut credential) = f.confirmed_request(&store);
     let Some(AuthenticatedWorkload::Broker(broker)) =
         store.authenticate_workload_token(BROKER_TOKEN).unwrap()
@@ -1233,10 +1276,58 @@ fn legacy_named_import_arm_preserves_its_prefix_and_closes_manual_claims() {
         timeout_seconds: 120,
         deadline_ns_decimal: "220000000000".into(),
     };
-    let write = |store: &Store, namespace: &str, given: &ArmV1| {
-        store.arm_legacy_named_import(&broker, request.binding_ref, namespace, given)
+    let input = |namespace: &str, given: &ArmV1| LegacyNamedImportArmRequestV1 {
+        version: 1,
+        binding_ref: request.binding_ref,
+        namespace: namespace.into(),
+        arm: given.clone(),
     };
+    let write = |store: &Store, namespace: &str, given: &ArmV1| {
+        store.arm_legacy_named_import(&broker, &input(namespace, given))
+    };
+    let public_path = format!(
+        "/api/v1/control/session-confirmations/{}/admission/import-arm",
+        request.binding_ref
+    );
+    let private_path = format!("/control{public_path}");
+    let reconcile = format!("{private_path}/reconcile");
+    let exact = input(&namespace, &arm);
+    let app = router(Arc::clone(&store));
     let before = store.head().unwrap();
+    for token in [BROKER_TOKEN, OTHER_BROKER] {
+        let response = app
+            .clone()
+            .oneshot(post(&reconcile, token, &exact))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body: Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 1024).await.unwrap()).unwrap();
+        assert_eq!(
+            body["error"]["code"],
+            LEGACY_NAMED_IMPORT_ARM_RECEIPT_NOT_FOUND
+        );
+    }
+    for (path, token, status) in [
+        (public_path.as_str(), BROKER_TOKEN, StatusCode::NOT_FOUND),
+        (private_path.as_str(), RUNNER, StatusCode::FORBIDDEN),
+        (private_path.as_str(), OTHER_BROKER, StatusCode::NOT_FOUND),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(post(path, token, &exact))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), status);
+    }
+    let mut non_import = exact.clone();
+    non_import.arm.subject = ArmSubjectV1::Worker;
+    let refused = app
+        .clone()
+        .oneshot(post(&private_path, BROKER_TOKEN, &non_import))
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
     assert!(write(&store, &Uuid::new_v4().to_string(), &arm).is_err());
     let mut wrong_receipt = arm.clone();
     let ArmSubjectV1::Helper { permission, .. } = &mut wrong_receipt.subject else {
@@ -1270,7 +1361,13 @@ fn legacy_named_import_arm_preserves_its_prefix_and_closes_manual_claims() {
     );
     assert!(store.integrity().unwrap().valid);
 
-    let armed = write(&store, &namespace, &arm).unwrap();
+    let response = app
+        .oneshot(post(&private_path, BROKER_TOKEN, &exact))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let armed: ArmResultV1 =
+        serde_json::from_slice(&to_bytes(response.into_body(), 128 * 1024).await.unwrap()).unwrap();
     assert!(!armed.replayed);
     assert_eq!(armed.receipt.control_namespace_uuid, namespace);
     armed.receipt.validate_for_arm(&arm).unwrap();
@@ -1358,7 +1455,7 @@ fn legacy_named_import_arm_preserves_its_prefix_and_closes_manual_claims() {
         .unwrap();
     drop(store);
 
-    let reopened = f.reopen();
+    let reopened = Arc::new(f.reopen());
     assert_eq!(
         write(&reopened, &namespace, &wrong_receipt)
             .unwrap_err()
@@ -1372,12 +1469,46 @@ fn legacy_named_import_arm_preserves_its_prefix_and_closes_manual_claims() {
             .downcast_ref::<WorkloadFailureV1>(),
         Some(&WorkloadFailureV1::Unauthorized)
     );
-    let replay = write(&reopened, &namespace, &arm).unwrap();
-    assert!(replay.replayed);
+    let app = router(Arc::clone(&reopened));
+    let foreign = app
+        .clone()
+        .oneshot(post(&reconcile, OTHER_BROKER, &exact))
+        .await
+        .unwrap();
+    assert_eq!(foreign.status(), StatusCode::NOT_FOUND);
+    let foreign: Value =
+        serde_json::from_slice(&to_bytes(foreign.into_body(), 1024).await.unwrap()).unwrap();
     assert_eq!(
-        serde_json::to_value(replay.receipt).unwrap(),
-        serde_json::to_value(&armed.receipt).unwrap()
+        foreign["error"]["code"],
+        LEGACY_NAMED_IMPORT_ARM_RECEIPT_NOT_FOUND
     );
+    for path in [&private_path, &reconcile] {
+        let response = app
+            .clone()
+            .oneshot(post(path, BROKER_TOKEN, &exact))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let replay: ArmResultV1 =
+            serde_json::from_slice(&to_bytes(response.into_body(), 128 * 1024).await.unwrap())
+                .unwrap();
+        assert!(replay.replayed);
+        assert_eq!(
+            serde_json::to_value(&replay.arm).unwrap(),
+            serde_json::to_value(&arm).unwrap()
+        );
+        assert_eq!(
+            serde_json::to_value(replay.receipt).unwrap(),
+            serde_json::to_value(&armed.receipt).unwrap()
+        );
+    }
+    let mut divergent = exact;
+    divergent.arm.configuration_fingerprint = "f".repeat(64);
+    let conflict = app
+        .oneshot(post(&reconcile, BROKER_TOKEN, &divergent))
+        .await
+        .unwrap();
+    assert_eq!(conflict.status(), StatusCode::CONFLICT);
     let retained = reopened
         .worker_operation(&arm.operation_id)
         .unwrap()

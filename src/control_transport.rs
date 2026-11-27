@@ -239,7 +239,18 @@ pub fn control_route(method: &Method, path: &str) -> Option<ControlRouteIdentity
                 "session-confirmations",
                 id,
                 "admission",
-                "reconcile" | "cancel-reserved",
+                "reconcile" | "cancel-reserved" | "import-arm",
+            ],
+        )
+        | (
+            &Method::POST,
+            [
+                "control",
+                "session-confirmations",
+                id,
+                "admission",
+                "import-arm",
+                "reconcile",
             ],
         ) if v1 && canonical_uuid(id) => Some(BrokerSession),
         // Proposed owned broker-supervision targets (`OwnedBrokerOperationV2`).

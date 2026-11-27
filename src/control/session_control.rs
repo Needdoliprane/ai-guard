@@ -218,6 +218,9 @@ pub(crate) const LEGACY_CONFIRMED_LAUNCH_SPEC_RESPONSE_BYTES: usize = 128 * 1024
 pub(crate) const LEGACY_NAMED_ADMISSION_REQUEST_BYTES: usize = 65_536;
 pub(crate) const LEGACY_NAMED_ADMISSION_RECEIPT_NOT_FOUND: &str =
     "named_admission_receipt_not_found";
+pub(crate) const LEGACY_NAMED_IMPORT_ARM_RESPONSE_BYTES: usize = 128 * 1024;
+pub(crate) const LEGACY_NAMED_IMPORT_ARM_RECEIPT_NOT_FOUND: &str =
+    "named_import_arm_receipt_not_found";
 
 /// The exact server-derived policy input and its durable Initial result.
 #[derive(Serialize, Deserialize)]
@@ -314,6 +317,36 @@ pub(crate) struct LegacyNamedAdmissionReceiptV1 {
     pub(crate) grant: Option<IdentityReceiptV1>,
     pub(crate) audit_seq: i64,
     pub(crate) audit_hash: String,
+}
+
+/// Exact first Import Arm for a confirmed Legacy admission. The Store resolves
+/// the authority and a claim remains a distinct operation.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct LegacyNamedImportArmRequestV1 {
+    pub(crate) version: u32,
+    pub(crate) binding_ref: Uuid,
+    pub(crate) namespace: String,
+    pub(crate) arm: super::ArmV1,
+}
+
+impl LegacyNamedImportArmRequestV1 {
+    pub(crate) fn validate(&self) -> anyhow::Result<()> {
+        invalid(
+            self.version == 1
+                && !self.binding_ref.is_nil()
+                && matches!(
+                    &self.arm.subject,
+                    super::ArmSubjectV1::Helper {
+                        purpose: super::HelperPurposeV1::Import,
+                        permission,
+                        ..
+                    } if matches!(permission.as_ref(), super::HelperPermissionV1::Admission { .. })
+                ),
+        )?;
+        canonical_uuid(&self.namespace)?;
+        self.arm.validate()
+    }
 }
 
 /// The exact launch commit of one retained preparation. It names the launch
