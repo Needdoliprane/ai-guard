@@ -229,6 +229,9 @@ pub(super) fn context_checkpoint_with_launch(
     launch: Option<&DockerLaunchProfileBindingV1>,
 ) -> JournalResult<()> {
     context(scope, control, checkpoint.runner(), intent, binding)?;
+    if intent.legacy_named_plan().is_some() && launch.is_some() {
+        return Err(JournalError::Conflict);
+    }
     if let Some(profile) = launch {
         profile.validate().map_err(|_| JournalError::Conflict)?;
         if profile.journal_scope_hash
@@ -291,6 +294,17 @@ pub(super) fn context(
         reqwest::Url::parse(&options.gateway).map_err(|_| JournalError::InvalidInput)?;
     if expected.origin() != configured.origin() {
         return Err(JournalError::Conflict);
+    }
+    if let Some(plan) = intent.legacy_named_plan() {
+        let runner = checkpoint.broker_context();
+        if plan.control_namespace_uuid != scope.control_namespace_uuid().to_string()
+            || plan.broker_profile_id != scope.profile_id()
+            || binding.kind() != BindingKindV1::None
+            || runner.managed
+            || runner.request.human_approved
+        {
+            return Err(JournalError::Conflict);
+        }
     }
     checkpoint.validate_journal_context(
         intent,

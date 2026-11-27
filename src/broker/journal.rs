@@ -1342,6 +1342,9 @@ impl Journal {
             return Err(JournalError::Conflict);
         }
         intent.validate().map_err(|_| JournalError::InvalidInput)?;
+        if intent.legacy_named_plan().is_some() && launch.is_some() {
+            return Err(JournalError::Conflict);
+        }
         let initial = CheckpointPayloadV1::initial(intent)?;
         if initial.canonical_bytes()? != checkpoint0.canonical_bytes()? {
             return Err(JournalError::Conflict);

@@ -404,6 +404,18 @@ impl BrokerCheckpointV2 {
         ensure(self.supervision.control_namespace_uuid == namespace)?;
         let context = self.runner.broker_context();
         ensure(!context.legacy_pending && !context.legacy_import)?;
+        if let Some(plan) = intent.legacy_named_plan() {
+            ensure(
+                self.supervision.helpers.is_empty()
+                    && self.supervision.operations.iter().all(|operation| {
+                        matches!(operation, SupervisionOperationV1::Decision { .. })
+                    })
+                    && self
+                        .supervision
+                        .legacy_named_admission()
+                        .is_none_or(|named| named.plan() == plan),
+            )?;
+        }
         if !self.supervision.helpers.is_empty()
             || context.owned.is_some()
             || self

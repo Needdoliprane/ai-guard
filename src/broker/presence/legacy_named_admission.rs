@@ -3,7 +3,7 @@
 use super::*;
 use crate::{
     broker::presence::http::{Client, Limits},
-    control::{AdmissionRefusalV1, RuntimeKindV1, hash, session_control::*},
+    control::{AdmissionRefusalV1, RuntimeKindV1, session_control::*},
 };
 use reqwest::{Method, StatusCode};
 
@@ -352,18 +352,10 @@ fn validate_plan_scope(
     binding_ref: uuid::Uuid,
     plan: &LegacyConfirmedPlanV1,
 ) -> Result<()> {
-    if plan.version != 1
+    if plan.validate().is_err()
         || plan.binding_ref != binding_ref
         || plan.control_namespace_uuid != expected_namespace
-        || expected_broker_profile_id.is_empty()
-        || expected_broker_profile_id.len() > 128
         || plan.broker_profile_id != expected_broker_profile_id
-        || plan.operation_id.is_nil()
-        || plan.session_id.is_nil()
-        || plan.launch_target_id.is_nil()
-        || !(1..=i64::MAX as u64).contains(&plan.target_revision)
-        || plan.expires_at.timestamp() <= 0
-        || hash(&plan.launch_spec_hash).is_err()
     {
         return Err(PresenceError::Forbidden);
     }

@@ -11,7 +11,7 @@ use crate::{
         intent::ExecutionIntentV1,
         journal::{AcceptedJobV1, BindingInputs, BindingKindV1, JournalError, JournalResult},
     },
-    control::EgressLaunchV1,
+    control::{EgressLaunchV1, session_control::LegacyConfirmedLaunchSpecV1},
     control_fs::{Directory, PrivateFile},
     model::DecisionRequest,
 };
@@ -94,6 +94,28 @@ impl fmt::Debug for PreparedSubmission {
 }
 
 impl PreparedSubmission {
+    #[allow(
+        dead_code,
+        reason = "the named launch caller is being composed with source selection"
+    )]
+    pub(crate) fn from_legacy_named_launch(
+        options: RunOptions,
+        config: Directory,
+        launch: &LegacyConfirmedLaunchSpecV1,
+    ) -> Result<Self> {
+        ensure!(
+            options.config_dir == config.path(),
+            "broker configuration changed"
+        );
+        config.revalidate()?;
+        Ok(Self {
+            intent: ExecutionIntentV1::from_legacy_named_launch(options, launch)?,
+            binding: PreparedBinding::None,
+            config,
+            launch: None,
+        })
+    }
+
     pub(crate) fn select_minimal_docker_start_profile(
         &mut self,
         runtime: &crate::runtime::Runtime,

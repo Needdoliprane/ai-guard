@@ -144,6 +144,20 @@ pub(crate) struct LegacyConfirmedPlanV1 {
 }
 
 impl LegacyConfirmedPlanV1 {
+    pub(crate) fn validate(&self) -> anyhow::Result<()> {
+        canonical_uuid(&self.control_namespace_uuid)?;
+        bounded(&self.broker_profile_id, 128)?;
+        hash(&self.launch_spec_hash)?;
+        SessionLaunchTargetSelectionV1::new(self.launch_target_id, self.target_revision)?;
+        invalid(
+            self.version == 1
+                && !self.binding_ref.is_nil()
+                && !self.operation_id.is_nil()
+                && !self.session_id.is_nil()
+                && self.expires_at.timestamp() > 0,
+        )
+    }
+
     /// Derive the policy input that the broker and Store must bind to this launch.
     pub(crate) fn initial_decision_request(
         &self,
@@ -171,7 +185,7 @@ impl LegacyConfirmedPlanV1 {
 
 /// Private projection of the exact sandbox launch prepared for this broker.
 /// This carries no host source locator, credential or runtime permission.
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct LegacyConfirmedLaunchSpecV1 {
     pub version: u32,
@@ -181,11 +195,11 @@ pub(crate) struct LegacyConfirmedLaunchSpecV1 {
 
 impl LegacyConfirmedLaunchSpecV1 {
     pub(crate) fn validate(&self) -> anyhow::Result<()> {
+        self.plan.validate()?;
         self.launch.validate()?;
         self.launch.validate_supervised()?;
         invalid(
             self.version == 1
-                && self.plan.version == 1
                 && self.launch.credential_binding_id.is_none()
                 && self.launch.provider_resolution.is_none()
                 && self.launch.egress.is_none(),

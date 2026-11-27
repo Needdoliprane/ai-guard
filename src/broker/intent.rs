@@ -1,6 +1,9 @@
 //! Private immutable invocation metadata, never an execution authorization.
 use crate::{
-    control::EgressLaunchV1,
+    control::{
+        EgressLaunchV1, NetworkV1, RuntimeKindV1,
+        session_control::{LegacyConfirmedLaunchSpecV1, LegacyConfirmedPlanV1},
+    },
     model::DecisionRequest,
     provider::{AuthPreference, ClientKind},
     runner::RunOptions,
@@ -336,6 +339,8 @@ pub struct ExecutionIntentV1 {
     provider_credential: Option<ProviderCredentialRefV1>,
     #[serde(skip_serializing_if = "Option::is_none")]
     egress: Option<EgressLaunchV1>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    legacy_named_launch: Option<Box<LegacyConfirmedLaunchSpecV1>>,
 }
 impl fmt::Debug for ExecutionIntentV1 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -355,6 +360,8 @@ struct IntentWire {
     provider_credential: Option<ProviderCredentialRefV1>,
     #[serde(default)]
     egress: Option<EgressLaunchV1>,
+    #[serde(default)]
+    legacy_named_launch: Option<Box<LegacyConfirmedLaunchSpecV1>>,
 }
 impl<'de> Deserialize<'de> for ExecutionIntentV1 {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
@@ -371,6 +378,7 @@ impl<'de> Deserialize<'de> for ExecutionIntentV1 {
             provider_input: v.provider_input,
             provider_credential: v.provider_credential,
             egress: v.egress,
+            legacy_named_launch: v.legacy_named_launch,
         };
         intent
             .validate()
@@ -419,6 +427,30 @@ impl ExecutionIntentV1 {
                 })
             }),
             egress,
+            legacy_named_launch: None,
+        };
+        intent.validate()?;
+        Ok(intent)
+    }
+    pub(crate) fn from_legacy_named_launch(
+        options: RunOptions,
+        launch: &LegacyConfirmedLaunchSpecV1,
+    ) -> IntentResult<Self> {
+        let request = launch
+            .plan
+            .initial_decision_request(&launch.launch)
+            .map_err(|_| IntentError::InvalidIntent)?;
+        let intent = Self {
+            version: 3,
+            plan_version: 2,
+            operation_id: launch.plan.operation_id,
+            session: launch.plan.session_id,
+            initial_options: options.into(),
+            initial_request: InitialRequestV1(request),
+            provider_input: None,
+            provider_credential: None,
+            egress: None,
+            legacy_named_launch: Some(Box::new(launch.clone())),
         };
         intent.validate()?;
         Ok(intent)
@@ -463,6 +495,9 @@ impl ExecutionIntentV1 {
     pub fn egress(&self) -> Option<&EgressLaunchV1> {
         self.egress.as_ref()
     }
+    pub(crate) fn legacy_named_plan(&self) -> Option<&LegacyConfirmedPlanV1> {
+        self.legacy_named_launch.as_ref().map(|launch| &launch.plan)
+    }
     pub(crate) fn request_data(&self) -> &DecisionRequest {
         &self.initial_request.0
     }
@@ -476,10 +511,53 @@ impl ExecutionIntentV1 {
         }
         Ok(bytes)
     }
+    fn validate_legacy_named_launch(
+        &self,
+        confirmed: &LegacyConfirmedLaunchSpecV1,
+    ) -> IntentResult<()> {
+        confirmed
+            .validate()
+            .map_err(|_| IntentError::InvalidIntent)?;
+        let options = &self.initial_options.0;
+        let launch = &confirmed.launch;
+        let runtime = match options.runtime {
+            RuntimeKind::Docker => RuntimeKindV1::Docker,
+            RuntimeKind::Podman => RuntimeKindV1::Podman,
+        };
+        let expected = confirmed
+            .plan
+            .initial_decision_request(launch)
+            .map_err(|_| IntentError::InvalidIntent)?;
+        require(
+            self.plan_version == 2
+                && self.operation_id == confirmed.plan.operation_id
+                && self.session == confirmed.plan.session_id
+                && options.project.is_absolute()
+                && options.config_dir.is_absolute()
+                && options.secret_env_file.is_none()
+                && options.image == launch.image_ref
+                && options.provider == launch.provider
+                && options.capture_output == launch.capture_output
+                && options.timeout == u64::from(launch.timeout_seconds)
+                && !options.interactive
+                && !launch.security_preset.is_interactive()
+                && launch.provider == "generic"
+                && launch.runtime_kind == runtime
+                && launch.network == NetworkV1::None
+                && options.network == NetworkMode::None
+                && crate::policy::request_hash(self.request_data())
+                    == crate::policy::request_hash(&expected),
+        )
+    }
+
     fn validate_shape(&self) -> IntentResult<()> {
         if !matches!(
-            (self.version, self.egress.is_some()),
-            (1, false) | (2, true)
+            (
+                self.version,
+                self.egress.is_some(),
+                self.legacy_named_launch.is_some()
+            ),
+            (1, false, false) | (2, true, false) | (3, false, true)
         ) || !(1..=3).contains(&self.plan_version)
         {
             return Err(IntentError::UnsupportedVersion);
@@ -525,6 +603,9 @@ impl ExecutionIntentV1 {
         )?;
         if let Some(credential) = &self.provider_credential {
             credential.validate()?;
+        }
+        if let Some(confirmed) = &self.legacy_named_launch {
+            self.validate_legacy_named_launch(confirmed)?;
         }
         crate::runner::validate_execution_intent_provider(self)?;
         if self.plan_version != 3 {

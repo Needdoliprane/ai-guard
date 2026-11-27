@@ -519,9 +519,11 @@ impl AcceptedJobV1 {
         self.0.checkpoint.supervised()
     }
     pub(crate) fn requires_legacy_named_execution(&self) -> bool {
-        self.broker_checkpoint_v2()
-            .and_then(|checkpoint| checkpoint.supervision().legacy_named_admission())
-            .is_some()
+        self.intent().legacy_named_plan().is_some()
+            || self
+                .broker_checkpoint_v2()
+                .and_then(|checkpoint| checkpoint.supervision().legacy_named_admission())
+                .is_some()
     }
     pub fn broker_checkpoint_v3(&self) -> Option<&BrokerCheckpointV3> {
         self.0.checkpoint.lifecycle()

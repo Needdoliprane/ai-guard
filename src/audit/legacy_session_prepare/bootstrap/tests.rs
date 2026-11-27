@@ -1486,6 +1486,113 @@ async fn legacy_named_admission_route_replays_the_committed_receipt_after_reopen
     assert_eq!(reopened.head().unwrap(), receipt.audit_seq);
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn legacy_named_writer_retains_confirmed_intent_before_decision() {
+    use crate::{
+        broker::{
+            journal::{
+                ControlSecrets, FsExclusions, Journal, JournalError, JournalLimitsV1,
+                JournalScopeV1, ReserveResult,
+            },
+            writer::WriterClient,
+        },
+        control_fs::Directory,
+        runner::broker::PreparedSubmission,
+    };
+    use std::time::Duration;
+
+    let fixture = Fixture::new();
+    let (store, _) = fixture.provision(fixture.create().unwrap()).unwrap();
+    let (confirmation, _) = fixture.confirm_target(&store);
+    let Some(AuthenticatedWorkload::Broker(broker)) =
+        store.authenticate_workload_token(BROKER_TOKEN).unwrap()
+    else {
+        panic!("fixture broker identity");
+    };
+    let binding_ref = Uuid::parse_str(&confirmation.binding_ref).unwrap();
+    let root = fixture._directory.path().canonicalize().unwrap();
+    let config = Directory::open_existing(&root).unwrap();
+    let gateway = "http://127.0.0.1:8787";
+    let (prepared, plan) = store
+        .prepare_legacy_confirmed_launch_spec(&broker, binding_ref, |material| {
+            let launch = &material.launch;
+            let options = serde_json::from_value(json!({
+                "project": root,
+                "config_dir": root,
+                "gateway": gateway,
+                "runtime": "docker",
+                "image": launch.image_ref,
+                "profile": launch.profile,
+                "network": "none",
+                "allow_rootful_runtime": false,
+                "timeout": launch.timeout_seconds,
+                "provider": launch.provider,
+                "capture_output": launch.capture_output,
+                "argv": launch.command.argv
+            }))?;
+            Ok((
+                PreparedSubmission::from_legacy_named_launch(options, config.clone(), material)?,
+                material.plan.clone(),
+            ))
+        })
+        .unwrap();
+    let store_head = store.head().unwrap();
+    let scope = JournalScopeV1::new(
+        Uuid::new_v4(),
+        TENANT,
+        gateway,
+        Uuid::parse_str(&plan.control_namespace_uuid).unwrap(),
+        &plan.broker_profile_id,
+    )
+    .unwrap();
+    let open = || {
+        Journal::open(
+            &config,
+            scope.clone(),
+            &FsExclusions::new(),
+            JournalLimitsV1::default(),
+            ControlSecrets::new(vec![]).unwrap(),
+        )
+    };
+    let writer = WriterClient::start(open().unwrap(), 8, Duration::from_secs(10)).unwrap();
+    let operation = confirmation.operation_id;
+    let submit = serde_json::to_vec(&json!({"confirmed_binding": binding_ref})).unwrap();
+    let ReserveResult::New(ticket) = writer.reserve(operation, submit.clone()).await.unwrap()
+    else {
+        panic!("fresh confirmation fixture");
+    };
+    let accepted = writer
+        .accept_prepared(ticket, prepared)
+        .await
+        .ok()
+        .expect("the writer retains the confirmed intent");
+    assert_eq!(accepted.head().revision(), 0);
+    assert!(accepted.requires_legacy_named_execution());
+    assert_eq!(accepted.intent().legacy_named_plan(), Some(&plan));
+    assert!(accepted.broker_checkpoint_v2().is_none());
+    assert_eq!(store.head().unwrap(), store_head);
+    drop(writer);
+
+    let reopened = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            match open() {
+                Err(JournalError::Busy) => tokio::time::sleep(Duration::from_millis(10)).await,
+                result => break result.unwrap(),
+            }
+        }
+    })
+    .await
+    .expect("writer releases the journal after its last handle is dropped");
+    let ReserveResult::Accepted(replayed) = reopened.reserve(operation, &submit).unwrap() else {
+        panic!("the same confirmed binding must replay its acceptance");
+    };
+    assert_eq!(replayed.head(), accepted.head());
+    assert_eq!(replayed.intent_hash(), accepted.intent_hash());
+    assert!(replayed.requires_legacy_named_execution());
+    assert_eq!(replayed.intent().legacy_named_plan(), Some(&plan));
+    assert_eq!(store.head().unwrap(), store_head);
+}
+
 #[test]
 fn legacy_named_checkpoint_retains_the_exact_store_admission_after_reopen() {
     use crate::{
