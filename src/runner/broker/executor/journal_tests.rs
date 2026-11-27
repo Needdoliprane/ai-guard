@@ -16,7 +16,7 @@ use crate::{
     broker::{
         clock::NativeHostClock,
         discovery::{RoleLease, load_endpoint},
-        enforcer::{EnforcerClient, run_internal_legacy_fresh},
+        enforcer::{EnforcerClient, run_internal_enforcer, run_internal_legacy_fresh},
         intent::ExecutionIntentV1,
         journal::{
             BindingInputs, ControlSecrets, FsExclusions, Journal, JournalLimitsV1, ReserveResult,
@@ -549,6 +549,20 @@ impl Drop for EgressPeerChild {
 }
 const FRESH_PEER_PARENT: &str = "AI_GUARD_TEST_RECOVERY_FRESH_PEER_PARENT";
 const FRESH_PEER_NONCE: &str = "AI_GUARD_TEST_RECOVERY_FRESH_PEER_NONCE";
+const COLD_PEER_ROOT: &str = "AI_GUARD_TEST_RECOVERY_COLD_PEER_ROOT";
+
+#[test]
+#[ignore = "only launched by the retained journal fixture"]
+fn native_cold_recovery_peer_child() {
+    let path = PathBuf::from(std::env::var_os(COLD_PEER_ROOT).expect("private test role root"));
+    let root = Directory::open_existing(&path).unwrap();
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(run_internal_enforcer(&root, 8))
+        .unwrap();
+}
 
 #[test]
 #[ignore = "only launched by the cancelled recovery fixture"]
@@ -642,10 +656,10 @@ impl NativePeer {
             command
                 .args([
                     "--exact",
-                    "broker::enforcer::client::retained_cancel_tests::native_cancel_server_child",
+                    "runner::broker::executor::journal::tests::native_cold_recovery_peer_child",
                     "--ignored",
                 ])
-                .env("AI_GUARD_TEST_RETAINED_CANCEL_PARENT", root.path());
+                .env(COLD_PEER_ROOT, root.path());
         }
         let egress_stop = egress_stop_budget.map(|budget| {
             // SAFETY: getpgrp only reads the libtest process group inherited
