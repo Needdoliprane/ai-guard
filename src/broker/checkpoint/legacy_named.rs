@@ -246,7 +246,11 @@ impl LegacyNamedAdmissionCheckpoint {
             .ok_or(JournalError::Conflict)?;
         let preparation = &creation.preparation;
         if let Some(previous) = preparation.owned() {
-            ensure(equal(previous, &owned)?)?;
+            // A new inspection captures its own wall time. Preserve the
+            // first observation and reject every difference in its facts.
+            let mut repeated = owned;
+            repeated.observation.observed_at = previous.observation.observed_at;
+            ensure(equal(previous, &repeated)?)?;
             return Ok(self);
         }
         ensure(self.import_arm.is_none())?;
@@ -1515,8 +1519,10 @@ mod tests {
             &owned
         )?);
         assert!(retained.import_arm().is_none());
+        let mut reinspected = owned.clone();
+        reinspected.observation.observed_at += chrono::TimeDelta::seconds(1);
         writer
-            .acknowledge_legacy_named_import_creation(&plan, &digest, &authority, owned.clone())
+            .acknowledge_legacy_named_import_creation(&plan, &digest, &authority, reinspected)
             .await?;
         assert_eq!(
             writer.load(operation).await?.unwrap().head(),

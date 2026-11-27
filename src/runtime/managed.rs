@@ -1311,7 +1311,7 @@ impl ManagedRuntime {
         &self,
         spec: &ContainerSpec,
     ) -> Result<Option<OwnedContainerSnapshot>> {
-        self.lookup_created_with_binding(spec, None).await
+        self.lookup_created_with_binding(spec, None, false).await
     }
 
     /// Recover only a helper proved to be Created and never started.
@@ -1325,11 +1325,7 @@ impl ManagedRuntime {
             matches!(spec.purpose, ContainerPurpose::Import),
             "named import recovery requires an import helper"
         );
-        let found = self.lookup_created(spec).await?;
-        if let Some(snapshot) = &found {
-            validate_created(spec, &snapshot.observation)?;
-        }
-        Ok(found)
+        self.lookup_created_with_binding(spec, None, true).await
     }
 
     /// Read-only recovery lookup for the exact held worker. A returned
@@ -1343,13 +1339,15 @@ impl ManagedRuntime {
         let held = self
             .checked_held_bootstrap_for(spec, true)?
             .context("held bootstrap worker binding is missing")?;
-        self.lookup_created_with_binding(spec, Some(held)).await
+        self.lookup_created_with_binding(spec, Some(held), false)
+            .await
     }
 
     async fn lookup_created_with_binding(
         &self,
         spec: &ContainerSpec,
         held: Option<&HeldBootstrapBinding>,
+        require_never_started: bool,
     ) -> Result<Option<OwnedContainerSnapshot>> {
         ensure!(
             spec.managed_names.is_some(),
@@ -1412,6 +1410,10 @@ impl ManagedRuntime {
         } else {
             validate_authorized_identity(spec, &observed)?;
             validate_configuration(spec, &facts.bytes, self.binding.kind)?;
+        }
+        if require_never_started {
+            validate_created(spec, &observed)?;
+            validate_unstarted_process_timestamps(&facts.bytes)?;
         }
         let handle = ContainerHandle {
             authority_fingerprint: self.binding.fingerprint(),
@@ -1811,7 +1813,9 @@ impl ManagedRuntime {
                 }),
             )
             .await?;
-        let observation = scoped.inspect_created(spec, handle.id(), None).await?;
+        let observation = scoped
+            .inspect_created(spec, handle.id(), None, true)
+            .await?;
         ensure!(
             observation.configuration_fingerprint.is_some(),
             "created import helper lacks a configuration fingerprint"
@@ -1827,6 +1831,7 @@ impl ManagedRuntime {
         spec: &ContainerSpec,
         id: &str,
         held_bootstrap: Option<&HeldBootstrapBinding>,
+        require_never_started: bool,
     ) -> Result<ContainerObservation> {
         let facts = if held_bootstrap.is_some() {
             self.inspect_bootstrap_facts(id).await?
@@ -1843,6 +1848,9 @@ impl ManagedRuntime {
             "runtime inspected a different immutable instance"
         );
         validate_created(spec, &observation)?;
+        if require_never_started {
+            validate_unstarted_process_timestamps(&facts.bytes)?;
+        }
         validate_configuration_for(spec, &facts.bytes, self.binding.kind, held_bootstrap)?;
         Ok(observation)
     }
@@ -2110,7 +2118,9 @@ impl ManagedRuntime {
             observation: observation.clone(),
         });
         let result: Result<OwnedExecutionOutcome> = async {
-            let observation = self.inspect_created(spec, &id, held_bootstrap).await?;
+            let observation = self
+                .inspect_created(spec, &id, held_bootstrap, false)
+                .await?;
             ensure!(
                 !input.is_bootstrap() || observation.configuration_fingerprint.is_some(),
                 "retained bootstrap lacks its created confinement fingerprint"
@@ -2510,6 +2520,21 @@ fn validate_created(spec: &ContainerSpec, observed: &ContainerObservation) -> Re
     ensure!(
         observed.process.started_at.is_none(),
         "created instance already has a process start"
+    );
+    Ok(())
+}
+
+fn validate_unstarted_process_timestamps(bytes: &[u8]) -> Result<()> {
+    let facts: super::InspectFacts = serde_json::from_slice(bytes)
+        .map_err(|_| anyhow::anyhow!("runtime returned malformed inspection facts"))?;
+    let zero = chrono::DateTime::parse_from_rfc3339("0001-01-01T00:00:00Z")?;
+    ensure!(
+        [facts.state.started_at, facts.state.finished_at]
+            .into_iter()
+            .all(|value| value.as_deref().is_some_and(|timestamp| {
+                chrono::DateTime::parse_from_rfc3339(timestamp).is_ok_and(|time| time == zero)
+            })),
+        "runtime did not explicitly report the import process as never started or finished"
     );
     Ok(())
 }

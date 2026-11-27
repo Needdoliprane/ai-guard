@@ -214,6 +214,12 @@ async fn import_creation_orders_native_mutations_with_stop() -> anyhow::Result<(
         recovered.observation.configuration_fingerprint,
         created.observation.configuration_fingerprint
     );
+    for marker in ["omit_started_at", "contradict_finished_at"] {
+        let path = temporary.path().join(marker);
+        fs::write(&path, "")?;
+        assert!(managed.lookup_never_started_import(&spec).await.is_err());
+        fs::remove_file(&path)?;
+    }
     fs::write(temporary.path().join("state"), "exited")?;
     assert!(managed.lookup_created(&spec).await?.is_some());
     assert!(managed.lookup_never_started_import(&spec).await.is_err());

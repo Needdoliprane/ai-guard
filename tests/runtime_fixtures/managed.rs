@@ -209,6 +209,16 @@ fn main() {
             let state_json = format!(
                 r#"{{"Status":"{state}","Running":{running},"StartedAt":"{started}","FinishedAt":"{finished}","ExitCode":0,"OOMKilled":false}}"#
             );
+            let state_json = if root.join("omit_started_at").exists() {
+                state_json.replace(&format!("\"StartedAt\":\"{started}\","), "")
+            } else if root.join("contradict_finished_at").exists() {
+                state_json.replace(
+                    &format!("\"FinishedAt\":\"{finished}\""),
+                    "\"FinishedAt\":\"2026-10-29T12:00:01Z\"",
+                )
+            } else {
+                state_json
+            };
             let state_json = if case == "missing_oom" {
                 state_json.replace(",\"OOMKilled\":false", "")
             } else {
