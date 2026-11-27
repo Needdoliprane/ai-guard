@@ -780,14 +780,14 @@ impl Service {
             let LegacyNamedProspectiveBind::Bound(acknowledgement) = bound else {
                 return Err(BrokerErrorCodeV1::NeedsReconciliation);
             };
-            Ok(BoundLegacyNamedImport {
-                created,
-                acknowledgement,
-            })
+            Ok(acknowledgement)
         }
         .await;
         job.result(result.as_ref().err().copied());
-        result
+        Ok(BoundLegacyNamedImport {
+            created,
+            acknowledgement: result?,
+        })
     }
 
     /// Settle a lost creation result from the original Writer intent. The
