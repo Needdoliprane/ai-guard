@@ -34,6 +34,10 @@ pub(super) fn record_runtime_rejection() {
 pub(super) fn after_runtime_invalidation() {
     tests::after_runtime_invalidation();
 }
+#[cfg(test)]
+pub(super) fn hold_ready_tick(arm_id: &str) {
+    tests::hold_ready_tick(arm_id);
+}
 
 pub(super) struct LegacyAdmission {
     pub(super) generation: u64,
@@ -875,6 +879,7 @@ impl State {
                     _lease: Arc::clone(&self._lease),
                     registration,
                     digest: digest.clone(),
+                    rail: pending.rail,
                     state: Mutex::new(EnforcerSlotStatusV1 {
                         arm_id: reservation.arm_id.clone(),
                         registration_hash: digest,

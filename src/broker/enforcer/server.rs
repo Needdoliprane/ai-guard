@@ -68,6 +68,7 @@ struct Actor {
     _lease: Arc<RoleLease>,
     registration: RegistrationV1,
     digest: String,
+    rail: LegacyProspectiveRailV1,
     state: Mutex<EnforcerSlotStatusV1>,
     usable: AtomicBool,
     stop: AtomicBool,
@@ -591,12 +592,17 @@ async fn dispatch(
             {
                 return Err(EnforcerError::InvalidInput);
             }
-            let slots = state.slots.lock().map_err(|_| EnforcerError::Unhealthy)?;
-            let mut values = Vec::with_capacity(arm_ids.len());
-            for arm_id in arm_ids {
-                let actor = slots.get(&arm_id).ok_or(EnforcerError::Conflict)?;
-                values.push(actor.snapshot()?);
-            }
+            let actors = {
+                let slots = state.slots.lock().map_err(|_| EnforcerError::Unhealthy)?;
+                arm_ids
+                    .iter()
+                    .map(|arm_id| slots.get(arm_id).cloned())
+                    .collect::<Vec<_>>()
+            };
+            let values = actors
+                .into_iter()
+                .map(|actor| actor.ok_or(EnforcerError::Conflict)?.snapshot_for_slots())
+                .collect::<EnforcerResult<Vec<_>>>()?;
             Ok(Response::Slots { values })
         }
         Request::Register {
@@ -706,6 +712,18 @@ impl Actor {
             .map(|value| value.clone())
             .map_err(|_| EnforcerError::Unhealthy)
     }
+
+    fn snapshot_for_slots(&self) -> EnforcerResult<EnforcerSlotStatusV1> {
+        let mut status = self.snapshot()?;
+        if matches!(self.rail, LegacyProspectiveRailV1::Named(_))
+            && status.phase == SlotPhaseV1::Ready
+            && self.stop.load(Ordering::SeqCst)
+        {
+            // Publish the latch ahead of the driver's next runtime observation.
+            status.phase = SlotPhaseV1::Stopping;
+        }
+        Ok(status)
+    }
 }
 
 fn check_runtime_installed(actor: &Actor) -> EnforcerResult<()> {
@@ -789,6 +807,7 @@ async fn register(
                 }),
                 registration,
                 digest,
+                rail: LegacyProspectiveRailV1::Historical,
                 usable: AtomicBool::new(false),
                 stop: AtomicBool::new(true),
                 runtime_installed: Arc::new(AtomicBool::new(false)),
@@ -1036,6 +1055,8 @@ fn run_actor(
             // CID must remain targeted against an older start arriving later.
             std::thread::sleep(Duration::from_millis(250));
         } else {
+            #[cfg(test)]
+            prospective::hold_ready_tick(actor.registration.arm_id());
             std::thread::sleep(Duration::from_millis(25));
         }
     }

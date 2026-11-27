@@ -28,6 +28,26 @@ static PAUSE_RESERVE_ACK: AtomicBool = AtomicBool::new(false);
 static PAUSE_FAILURE_PUBLICATION: AtomicBool = AtomicBool::new(false);
 static INVALIDATION_REACHED: AtomicBool = AtomicBool::new(false);
 static RUNTIME_REJECTIONS: AtomicU64 = AtomicU64::new(0);
+static READY_TICK_HOLD: Mutex<Option<ReadyTickHold>> = Mutex::new(None);
+
+struct ReadyTickHold {
+    arm_id: String,
+    reached: tokio::sync::oneshot::Sender<()>,
+    resume: std::sync::mpsc::Receiver<()>,
+}
+
+pub(super) fn hold_ready_tick(arm_id: &str) {
+    let hold = {
+        let mut next = READY_TICK_HOLD.lock().unwrap();
+        if next.as_ref().is_none_or(|hold| hold.arm_id != arm_id) {
+            return;
+        }
+        next.take().expect("selected ready tick")
+    };
+    let _ = hold.reached.send(());
+    let _ = hold.resume.recv_timeout(WAIT);
+}
+
 pub(super) fn record_runtime_rejection() {
     RUNTIME_REJECTIONS.fetch_add(1, Ordering::SeqCst);
 }
@@ -1177,6 +1197,17 @@ async fn exercise(mode: &str, parent: &Directory) {
 
         // A successful Prepare never owns or delays STOP. The exact original
         // guardian still accepts the separately authenticated STOP command.
+        let (reached, ready_tick) = tokio::sync::oneshot::channel();
+        let (resume_tick, resume) = std::sync::mpsc::channel();
+        *READY_TICK_HOLD.lock().unwrap() = Some(ReadyTickHold {
+            arm_id: registration.arm_id().into(),
+            reached,
+            resume,
+        });
+        tokio::time::timeout(WAIT, ready_tick)
+            .await
+            .unwrap()
+            .unwrap();
         let facts = pending
             .named_stop_anchor
             .as_ref()
@@ -1185,12 +1216,29 @@ async fn exercise(mode: &str, parent: &Directory) {
         let endpoint = NamedImportStopEndpoint::pin(&root, None).unwrap();
         let key = capability(&root, false).unwrap();
         endpoint.exchange(&facts, &key, || Ok(())).await.unwrap();
-        let guarded = pending.state.lock().unwrap();
-        assert!(guarded.stop_reserved);
-        let bound = guarded.bound.as_ref().unwrap();
+        let bound = {
+            let guarded = pending.state.lock().unwrap();
+            assert!(guarded.stop_reserved);
+            Arc::clone(guarded.bound.as_ref().unwrap())
+        };
         assert!(bound.stop.load(Ordering::SeqCst));
-        assert!(bound.state.lock().unwrap().prepared_once);
-        drop(guarded);
+        let Response::Slots { values } = rpc(
+            &root,
+            Request::Slots {
+                arm_ids: vec![registration.arm_id().into()],
+            },
+        )
+        .await
+        else {
+            panic!("expected the original named slot");
+        };
+        let mut retained = bound.snapshot().unwrap();
+        assert_eq!(retained.phase, SlotPhaseV1::Ready);
+        assert!(retained.prepared_once);
+        assert!(retained.observation.is_none());
+        retained.phase = SlotPhaseV1::Stopping;
+        assert_eq!(serde_json::to_value(values).unwrap(), json!([retained]));
+        drop(resume_tick);
         let key = pending.fixture_exit_key();
         wait_for(|| native.owners.keyed_finished(key)).await;
         server.abort();
