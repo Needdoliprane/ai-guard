@@ -174,6 +174,13 @@ fn conversation_fixture_child() {
                 // without any reconcilable response.
                 std::process::exit(0);
             }
+            "unterminated" => {
+                let mut stdout = std::io::stdout().lock();
+                writeln!(stdout, "\nfixture received the request").unwrap();
+                serde_json::to_writer(&mut stdout, &response(rpc_id, "incomplete-turn")).unwrap();
+                stdout.flush().unwrap();
+                std::process::exit(0);
+            }
             "discordant" => {
                 println!(
                     "{}",
@@ -354,6 +361,37 @@ fn stdio_cut_after_possible_emission_keeps_delivery_unknown() {
         std::io::ErrorKind::UnexpectedEof
     );
     assert!(adapter.pending().unwrap().acknowledged_turn_id.is_none());
+    child.close();
+}
+
+#[test]
+fn stdio_requires_a_delimiter_before_delivering_a_response() {
+    let mut child = spawn_fixture("unterminated");
+    let mut adapter = ConversationAdapterV1::new();
+    let request = adapter
+        .issue_turn(uuid::Uuid::new_v4(), "thread-1", "instruction")
+        .unwrap();
+    child.write_frame(&request.frame().unwrap()).unwrap();
+
+    let deadline = Duration::from_secs(10);
+    let mut received_request = false;
+    loop {
+        match child.read_line(deadline) {
+            Ok(line) => {
+                assert!(line.ends_with('\n'));
+                received_request |= line == "fixture received the request\n";
+            }
+            Err(error) => {
+                assert_eq!(error.kind(), io::ErrorKind::UnexpectedEof);
+                assert_eq!(
+                    error.to_string(),
+                    "conversation response ended before the frame delimiter"
+                );
+                break;
+            }
+        }
+    }
+    assert!(received_request);
     child.close();
 }
 

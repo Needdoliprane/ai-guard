@@ -358,6 +358,13 @@ impl StdioConversation {
                             )));
                             break;
                         }
+                        if !line.ends_with('\n') {
+                            let _ = sender.send(Err(io::Error::new(
+                                io::ErrorKind::UnexpectedEof,
+                                "conversation response ended before the frame delimiter",
+                            )));
+                            break;
+                        }
                         if sender.send(Ok(line)).is_err() {
                             break;
                         }
