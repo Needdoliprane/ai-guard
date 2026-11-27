@@ -19,6 +19,7 @@ use crate::{
             LegacyNamedInitialDecisionV1, LegacyNamedSupervisedAdmissionV1,
         },
     },
+    runtime::{OwnedContainerSnapshot, RuntimeAuthority},
 };
 use uuid::Uuid;
 
@@ -194,6 +195,7 @@ impl WriterClient {
         plan: &LegacyConfirmedPlanV1,
         archive_digest: &str,
         helper_id: Uuid,
+        binding: &RuntimeAuthority,
     ) -> JournalResult<RecordedLegacyNamedImportCreation> {
         let job = self.load_named_job(plan).await?;
         let current = super::lifecycle(&job)?;
@@ -202,7 +204,7 @@ impl WriterClient {
         if retained.archive_digest() != Some(archive_digest) {
             return Err(JournalError::Conflict);
         }
-        let pending = retained.clone().with_import_creation(helper_id)?;
+        let pending = retained.clone().with_import_creation(helper_id, binding)?;
         let expected = pending
             .import_creation()
             .ok_or(JournalError::Corrupt)?
@@ -231,6 +233,32 @@ impl WriterClient {
         Ok(RecordedLegacyNamedImportCreation(saved))
     }
 
+    /// Append the first exact Created observation to an existing intent.
+    /// An observation already made may be retained after STOP.
+    #[allow(dead_code, reason = "the named create caller is composed separately")]
+    pub(in crate::broker) async fn acknowledge_legacy_named_import_creation(
+        &self,
+        plan: &LegacyConfirmedPlanV1,
+        archive_digest: &str,
+        binding: &RuntimeAuthority,
+        owned: OwnedContainerSnapshot,
+    ) -> JournalResult<()> {
+        let job = self.load_named_job(plan).await?;
+        let retained = retained_admission(&job)?;
+        if retained.archive_digest() != Some(archive_digest) {
+            return Err(JournalError::Conflict);
+        }
+        let preparation = retained.import_creation().ok_or(JournalError::Conflict)?;
+        let acknowledged = retained.clone().with_import_owned(binding, owned)?;
+        if preparation.owned().is_none() {
+            let current = super::lifecycle(&job)?;
+            let next = with_admission(&current, acknowledged)?;
+            self.advance_lifecycle(job.operation_id(), job.head().clone(), next)
+                .await?;
+        }
+        Ok(())
+    }
+
     pub(in crate::broker) async fn record_legacy_named_import_arm(
         &self,
         plan: &LegacyConfirmedPlanV1,
@@ -241,7 +269,11 @@ impl WriterClient {
         let current = super::lifecycle(&job)?;
         require_open(&current)?;
         let retained = retained_admission(&job)?;
-        if retained.archive_digest() != Some(archive_digest) || retained.import_creation().is_none()
+        if retained.archive_digest() != Some(archive_digest)
+            || retained
+                .import_creation()
+                .and_then(|prep| prep.owned())
+                .is_none()
         {
             return Err(JournalError::Conflict);
         }

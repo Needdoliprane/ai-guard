@@ -335,6 +335,50 @@ fn owned_context(
                 .is_some_and(|v| u32::try_from(v).ok() == Some(inspection.pids_limit)),
     )
 }
+pub(super) fn helper_owned_context(
+    owned: &OwnedContainerSnapshot,
+    policy: &HelperExecutionPolicyV1,
+    session: Uuid,
+    authority_fingerprint: &str,
+) -> JournalResult<()> {
+    let observation = &owned.observation;
+    ensure(
+        owned.handle.session_id() == session
+            && owned.handle.operation_id().to_string() == policy.helper_id
+            && owned.handle.name() == policy.stable_name
+            && owned.handle.authority_fingerprint() == authority_fingerprint
+            && observation.id.as_deref() == Some(owned.handle.id())
+            && observation.name == policy.stable_name,
+    )?;
+    hash(owned.handle.id())?;
+    ensure(
+        observation.image_id.as_deref() == Some(policy.image_id.as_str())
+            && owned.handle.fingerprint_version()
+                == policy.security_preset.configuration_fingerprint_version()
+            && observation.configuration_fingerprint_version.unwrap_or(1)
+                == owned.handle.fingerprint_version()
+            && observation.allocation.memory_bytes == Some(policy.memory_bytes)
+            && observation.allocation.pids_limit == Some(u64::from(policy.pids_limit)),
+    )?;
+    hash(
+        observation
+            .configuration_fingerprint
+            .as_deref()
+            .ok_or(JournalError::Conflict)?,
+    )?;
+    let cpu = observation
+        .allocation
+        .cpu
+        .as_ref()
+        .ok_or(JournalError::Conflict)?;
+    ensure(
+        cpu.period > 0
+            && u128::from(cpu.quota) * 1000
+                == u128::from(policy.cpu_millis) * u128::from(cpu.period),
+    )?;
+    checked(observation.validate_identity_allocation(observation))
+}
+
 fn admission_context(
     request: &SupervisedAdmissionV1,
     intent: &ExecutionIntentV1,
@@ -852,55 +896,11 @@ impl BrokerCheckpointV2 {
                 parent,
             )?;
             if let Some(owned) = &helper.owned {
-                ensure(
-                    owned.handle.session_id() == intent.session()
-                        && owned.handle.operation_id().to_string() == helper.policy.helper_id
-                        && owned.handle.name() == helper.policy.stable_name
-                        && owned.handle.authority_fingerprint()
-                            == context.binding.ok_or(JournalError::Conflict)?.fingerprint()
-                        && owned.observation.id.as_deref() == Some(owned.handle.id())
-                        && owned.observation.name == helper.policy.stable_name,
-                )?;
-                hash(owned.handle.id())?;
-                ensure(
-                    owned.observation.image_id.as_deref() == Some(helper.policy.image_id.as_str())
-                        && owned.handle.fingerprint_version()
-                            == helper
-                                .policy
-                                .security_preset
-                                .configuration_fingerprint_version()
-                        && owned
-                            .observation
-                            .configuration_fingerprint_version
-                            .unwrap_or(1)
-                            == owned.handle.fingerprint_version()
-                        && owned.observation.allocation.memory_bytes
-                            == Some(helper.policy.memory_bytes)
-                        && owned.observation.allocation.pids_limit
-                            == Some(u64::from(helper.policy.pids_limit)),
-                )?;
-                hash(
-                    owned
-                        .observation
-                        .configuration_fingerprint
-                        .as_deref()
-                        .ok_or(JournalError::Conflict)?,
-                )?;
-                let cpu = owned
-                    .observation
-                    .allocation
-                    .cpu
-                    .as_ref()
-                    .ok_or(JournalError::Conflict)?;
-                ensure(
-                    cpu.period > 0
-                        && u128::from(cpu.quota) * 1000
-                            == u128::from(helper.policy.cpu_millis) * u128::from(cpu.period),
-                )?;
-                checked(
-                    owned
-                        .observation
-                        .validate_identity_allocation(&owned.observation),
+                helper_owned_context(
+                    owned,
+                    &helper.policy,
+                    intent.session(),
+                    &context.binding.ok_or(JournalError::Conflict)?.fingerprint(),
                 )?;
             }
         }
