@@ -1,5 +1,36 @@
 # Validation courante
 
+## 27 novembre 2026 — CI e1f24fa5 et garde durable des ACK
+
+Sur `e1f24fa5`, la CI réussit le front et signale 37 échecs Rust
+sur 10 cibles. La comparaison avec `16dd21b9` retrouve 36 cas
+communs. Un cas de fenêtre OIDC apparaît et le cas de réserve
+workload disparaît de la liste des échecs.
+[CI du gel](https://github.com/Needdoliprane/ai-guard/actions/runs/45907054605)
+et manifeste privé
+`ac9420dc3cc4bc1fd39bfef8b4c934e096e5955ce62d10e923bcddc8edb2d4b8`.
+
+La fixture d’alias attendait 503 sur le GET de protocole réservé.
+Le chemin exact exige des identifiants et retourne 401 sans eux.
+`c5044bed` aligne l’attente sans changer les routes. Deux tests
+existants sur le gel `0662d993` vérifient les refus avant Store et
+les limites de GET public, HEAD et des mutations. Le tableau
+modifié attend un rejeu sur la nouvelle candidate.
+Manifeste `3870b0c10a86d49b6fbc7df278b060c80d94a9e7d2228a00b6a2ae3576384ba1`.
+
+Les deux cas Store14 et Store15 reproduisent sur `e50a37d1` un
+nouvel ACK accepté après STOP ou rebind durable. Sur `0662d993`,
+ils passent avec les 17 tests de composition. Un reçu déjà committé
+reste rejouable et un nouvel ACK doit correspondre à la liaison
+active et à son epoch. Les deux patches sont repris par `96e05970`
+et `34d547b4`. Ces oracles séparent la mutation durable de la
+notification du composeur. L’injection d’un retour `EpochExpired`
+après COMMIT et le reap du canal remplacé gardent leurs preuves
+propres. Manifestes RED
+`8aaff7df5755676e70a0c78431d43316162ee7e29370ba2aa25d314b7d40d888`
+et GREEN
+`e73c07b300b1d94632ae994c85eec2cd0db09450ff6b74d8155dd7ede4a607d7`.
+
 ## 27 novembre 2026 — régressions ciblées conversation et enforcer
 
 Le libtest de `63fe6a03` (arbre `1b6776e5`) compile. La famille
