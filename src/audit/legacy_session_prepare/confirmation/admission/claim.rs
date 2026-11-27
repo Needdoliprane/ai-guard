@@ -8,6 +8,9 @@ use crate::{
     },
 };
 
+#[path = "observation.rs"]
+mod observation;
+
 pub(in crate::audit) const LEGACY_NAMED_IMPORT_CLAIM_KIND: &str =
     "control.execution.helper_claim.legacy_named";
 

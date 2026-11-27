@@ -8,6 +8,7 @@ use crate::audit::{
     supervision_admission::{self as admission_codec, Binding, receipt_for},
     supervision_genesis,
 };
+use crate::control::session_control::LegacyNamedImportObservationRequestV1;
 use std::collections::BTreeSet;
 
 pub(in crate::audit) const SCHEMA: [(&str, &str, &str); 6] = [
@@ -89,9 +90,35 @@ pub(crate) enum Input {
     HelperClaim(Box<HelperStartClaimV1>),
     LegacyNamedImportClaim(Box<LegacyNamedImportClaimV1>),
     HelperObservation(Box<HelperObservationV1>),
+    LegacyNamedImportObservation(Box<LegacyNamedImportObservationV1>),
     HelperCleanup(Box<HelperCleanupV1>),
     Export(Box<ExportRequestV1>),
 }
+
+const LEGACY_NAMED_IMPORT_OBSERVATION_KIND: &str =
+    "control.execution.helper_observation.legacy_named";
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct LegacyNamedImportObservationV1 {
+    pub(in crate::audit) version: u32,
+    pub(in crate::audit) request: LegacyNamedImportObservationRequestV1,
+    pub(in crate::audit) session_id: String,
+    pub(in crate::audit) authorized_at: chrono::DateTime<chrono::Utc>,
+}
+
+impl LegacyNamedImportObservationV1 {
+    fn input_hash(&self) -> anyhow::Result<String> {
+        invalid(
+            self.version == 1
+                && super::workload::canonical_control_time(self.authorized_at)?
+                    == self.authorized_at,
+        )?;
+        uuid(&self.session_id)?;
+        self.request.input_hash()
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Record {
@@ -123,6 +150,7 @@ impl Input {
             Self::HelperClaim(r) => &r.operation_id,
             Self::LegacyNamedImportClaim(r) => &r.request.claim.operation_id,
             Self::HelperObservation(r) => &r.operation_id,
+            Self::LegacyNamedImportObservation(r) => &r.request.observation.operation_id,
             Self::HelperCleanup(r) => &r.operation_id,
             Self::Export(r) => &r.operation_id,
         }
@@ -137,7 +165,7 @@ impl Input {
             Self::LegacyNamedCancel(_) => "cancel_reserved",
             Self::WorkerClaim(_) => "armed_start_claim",
             Self::HelperClaim(_) | Self::LegacyNamedImportClaim(_) => "helper_start_claim",
-            Self::HelperObservation(_) => "helper_observe",
+            Self::HelperObservation(_) | Self::LegacyNamedImportObservation(_) => "helper_observe",
             Self::HelperCleanup(_) => "helper_cleanup",
             Self::Export(_) => "export_request",
         }
@@ -147,6 +175,7 @@ impl Input {
             Self::Arm(_) => "control.execution.arm",
             Self::LegacyNamedArm(_) => LEGACY_NAMED_ARM_KIND,
             Self::LegacyNamedImportClaim(_) => LEGACY_NAMED_IMPORT_CLAIM_KIND,
+            Self::LegacyNamedImportObservation(_) => LEGACY_NAMED_IMPORT_OBSERVATION_KIND,
             _ => admission_codec::KIND,
         }
     }
@@ -161,6 +190,7 @@ impl Input {
             Self::HelperClaim(r) => r.input_hash(),
             Self::LegacyNamedImportClaim(r) => r.input_hash(),
             Self::HelperObservation(r) => r.input_hash(),
+            Self::LegacyNamedImportObservation(r) => r.input_hash(),
             Self::HelperCleanup(r) => r.input_hash(),
             Self::Export(r) => r.input_hash(),
         }
@@ -180,6 +210,9 @@ impl Input {
             Self::HelperClaim(r) => Some(&r.arm_receipt.worker_id),
             Self::LegacyNamedImportClaim(r) => Some(&r.request.claim.arm_receipt.worker_id),
             Self::HelperObservation(r) => Some(&r.arm_receipt.worker_id),
+            Self::LegacyNamedImportObservation(r) => {
+                Some(&r.request.observation.arm_receipt.worker_id)
+            }
             Self::HelperCleanup(r) => Some(&r.arm_receipt.worker_id),
             Self::Export(r) => Some(&r.worker_id),
         }
@@ -212,6 +245,7 @@ pub(in crate::audit) fn load_record(
                 "control.execution.arm"
                     | LEGACY_NAMED_ARM_KIND
                     | LEGACY_NAMED_IMPORT_CLAIM_KIND
+                    | LEGACY_NAMED_IMPORT_OBSERVATION_KIND
                     | "control.supervision.transition"
             ))?;
             let record: Record = serde_json::from_value(stored.event.data.clone())?;
@@ -718,6 +752,75 @@ impl Replay {
         Ok(())
     }
 
+    fn record_helper_observation(
+        &mut self,
+        stored: &StoredEvent,
+        request: &HelperObservationV1,
+    ) -> anyhow::Result<()> {
+        let claim = self
+            .claims
+            .get(&request.helper_id)
+            .ok_or(ControlFailure::Conflict)?;
+        invalid(
+            serde_json::to_value(&claim.arm_receipt)?
+                == serde_json::to_value(&request.arm_receipt)?,
+        )?;
+        let entry = self.checked_arm(&request.arm_receipt)?;
+        invalid(request.observation.inspection == entry.request.inspection)?;
+        if let Some(previous) = self.terminals.get(&request.helper_id) {
+            let mut expected = previous.observation.clone();
+            expected.observed_at = request.observation.observed_at.clone();
+            conflict(
+                expected == request.observation
+                    && (previous.verification.is_none()
+                        || serde_json::to_value(&previous.verification)?
+                            == serde_json::to_value(&request.verification)?),
+            )?;
+        }
+        if let Some(report) = &request.verification {
+            let ArmSubjectV1::Helper {
+                purpose: HelperPurposeV1::ImportVerification,
+                permission,
+                ..
+            } = &entry.request.subject
+            else {
+                return Err(ControlFailure::InvalidRequest.into());
+            };
+            let HelperPermissionV1::ImportVerification {
+                import_helper_id,
+                manifest_digest,
+                ..
+            } = permission.as_ref()
+            else {
+                return Err(ControlFailure::InvalidRequest.into());
+            };
+            invalid(
+                &report.import_helper_id == import_helper_id
+                    && &report.expected_manifest_digest == manifest_digest
+                    && terminal_helper(&request.observation),
+            )?;
+        }
+        if terminal_helper(&request.observation) {
+            self.terminals
+                .insert(request.helper_id.clone(), request.clone());
+        }
+        self.expected
+            .get_mut("helper_observations")
+            .context("missing table")?
+            .insert(
+                request.operation_id.clone(),
+                vec![
+                    sql_text(&request.operation_id),
+                    sql_text(&request.helper_id),
+                    sql_text(serde_json::to_string(request)?),
+                    rusqlite::types::Value::Integer(stored.seq),
+                ],
+            );
+        self.observations
+            .insert(request.operation_id.clone(), request.clone());
+        Ok(())
+    }
+
     pub(super) fn apply(
         &mut self,
         db: &Connection,
@@ -842,67 +945,12 @@ impl Replay {
             }
             Input::HelperObservation(request) => {
                 invalid(record.worker_record.is_none())?;
-                let claim = self
-                    .claims
-                    .get(&request.helper_id)
-                    .ok_or(ControlFailure::Conflict)?;
-                invalid(
-                    serde_json::to_value(&claim.arm_receipt)?
-                        == serde_json::to_value(&request.arm_receipt)?,
-                )?;
-                let entry = self.checked_arm(&request.arm_receipt)?;
-                invalid(request.observation.inspection == entry.request.inspection)?;
-                if let Some(previous) = self.terminals.get(&request.helper_id) {
-                    let mut expected = previous.observation.clone();
-                    expected.observed_at = request.observation.observed_at.clone();
-                    conflict(
-                        expected == request.observation
-                            && (previous.verification.is_none()
-                                || serde_json::to_value(&previous.verification)?
-                                    == serde_json::to_value(&request.verification)?),
-                    )?;
-                }
-                if let Some(report) = &request.verification {
-                    let ArmSubjectV1::Helper {
-                        purpose: HelperPurposeV1::ImportVerification,
-                        permission,
-                        ..
-                    } = &entry.request.subject
-                    else {
-                        return Err(ControlFailure::InvalidRequest.into());
-                    };
-                    let HelperPermissionV1::ImportVerification {
-                        import_helper_id,
-                        manifest_digest,
-                        ..
-                    } = permission.as_ref()
-                    else {
-                        return Err(ControlFailure::InvalidRequest.into());
-                    };
-                    invalid(
-                        &report.import_helper_id == import_helper_id
-                            && &report.expected_manifest_digest == manifest_digest
-                            && terminal_helper(&request.observation),
-                    )?;
-                }
-                if terminal_helper(&request.observation) {
-                    self.terminals
-                        .insert(request.helper_id.clone(), request.as_ref().clone());
-                }
-                self.expected
-                    .get_mut("helper_observations")
-                    .context("missing table")?
-                    .insert(
-                        request.operation_id.clone(),
-                        vec![
-                            sql_text(&request.operation_id),
-                            sql_text(&request.helper_id),
-                            sql_text(serde_json::to_string(request)?),
-                            rusqlite::types::Value::Integer(stored.seq),
-                        ],
-                    );
-                self.observations
-                    .insert(request.operation_id.clone(), request.as_ref().clone());
+                self.record_helper_observation(stored, request)?;
+            }
+            Input::LegacyNamedImportObservation(named) => {
+                invalid(record.worker_record.is_none())?;
+                Store::validate_named_import_observation_predecessor(db, stored, named)?;
+                self.record_helper_observation(stored, &named.request.observation)?;
             }
             Input::HelperCleanup(request) => {
                 invalid(record.worker_record.is_none())?;
@@ -1192,12 +1240,13 @@ impl Store {
         {
             return Err(ControlFailure::SupervisionInactive.into());
         }
-        let claim_arm = match &input {
+        let manual_arm = match &input {
             Input::WorkerClaim(request) => Some(&request.arm_receipt.arm_id),
             Input::HelperClaim(request) => Some(&request.arm_receipt.arm_id),
+            Input::HelperObservation(request) => Some(&request.arm_receipt.arm_id),
             _ => None,
         };
-        if let Some(id) = claim_arm {
+        if let Some(id) = manual_arm {
             let named: bool = tx.query_row(
                 "SELECT EXISTS(SELECT 1 FROM worker_mutations m JOIN events e ON e.seq=m.event_seq
                  WHERE m.operation_id=?1 AND e.kind=?2)",

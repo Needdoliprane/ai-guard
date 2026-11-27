@@ -1162,10 +1162,13 @@ async fn legacy_named_import_arm_preserves_its_prefix_and_closes_manual_claims()
     use crate::{
         api::{GatewayState, TenantGateway, gateway_router},
         control::{
-            ArmResultV1, ClaimDispositionV1, HelperClaimResultV1,
+            ArmResultV1, ClaimDispositionV1, HelperClaimResultV1, HelperObservationV1,
+            MutationReceiptV1, RuntimeObservationV1, RuntimeStatusV1,
             session_control::{
-                LEGACY_NAMED_IMPORT_ARM_RECEIPT_NOT_FOUND, LegacyNamedImportArmRequestV1,
-                LegacyNamedImportClaimRequestV1,
+                LEGACY_NAMED_IMPORT_ARM_RECEIPT_NOT_FOUND,
+                LEGACY_NAMED_IMPORT_OBSERVATION_RECEIPT_NOT_FOUND, LegacyNamedImportArmRequestV1,
+                LegacyNamedImportClaimRequestV1, LegacyNamedImportObservationPhaseV1,
+                LegacyNamedImportObservationRequestV1,
             },
         },
     };
@@ -1238,8 +1241,7 @@ async fn legacy_named_import_arm_preserves_its_prefix_and_closes_manual_claims()
         continuous_ns_decimal: "100000000000".into(),
         observed_utc: None,
     };
-    // The inspection describes a synthetic Created helper. No runtime
-    // observation, execution authority or cancellation proof is exercised.
+    // All inspections and times describe synthetic facts for this dry fixture.
     let arm = ArmV1 {
         version: 1,
         operation_id: LegacyNamedImportArmRequestV1::operation_id(
@@ -1582,6 +1584,7 @@ async fn legacy_named_import_arm_preserves_its_prefix_and_closes_manual_claims()
     );
     assert_eq!(store.head().unwrap(), armed.receipt.audit_seq);
     let response = app
+        .clone()
         .oneshot(post(&claim_path, BROKER_TOKEN, &named_claim))
         .await
         .unwrap();
@@ -1633,6 +1636,122 @@ async fn legacy_named_import_arm_preserves_its_prefix_and_closes_manual_claims()
     );
     assert_eq!(store.head().unwrap(), committed_claim.receipt.audit_seq);
 
+    let operation_id = |phase| {
+        LegacyNamedImportObservationRequestV1::operation_id(
+            request.binding_ref,
+            Uuid::parse_str(&named_claim.claim.operation_id).unwrap(),
+            phase,
+        )
+    };
+    let started = LegacyNamedImportObservationRequestV1 {
+        version: 1,
+        binding_ref: request.binding_ref,
+        namespace: namespace.clone(),
+        phase: LegacyNamedImportObservationPhaseV1::Started,
+        claim_receipt: committed_claim.receipt.clone(),
+        observation: HelperObservationV1 {
+            version: 1,
+            operation_id: operation_id(LegacyNamedImportObservationPhaseV1::Started),
+            helper_id: helper_id.to_string(),
+            arm_receipt: armed.receipt.clone(),
+            observation: RuntimeObservationV1 {
+                inspection: arm.inspection.clone(),
+                observed_at: "2026-11-27T12:00:01Z".into(),
+                status: RuntimeStatusV1::Running,
+                running: Some(true),
+                started_at: Some("2026-11-27T12:00:00Z".into()),
+                finished_at: None,
+                exit_code: None,
+                oom_killed: Some(false),
+                restart_count: Some(0),
+            },
+            verification: None,
+        },
+    };
+    let observation_public = format!(
+        "/api/v1/control/session-confirmations/{}/admission/import-observation",
+        request.binding_ref
+    );
+    let observation_path = format!("/control{observation_public}");
+    let observation_reconcile = format!("{observation_path}/reconcile");
+    for (token, pointer, code) in [
+        (
+            BROKER_TOKEN,
+            "/error/code",
+            LEGACY_NAMED_IMPORT_OBSERVATION_RECEIPT_NOT_FOUND,
+        ),
+        (OTHER_BROKER, "/code", "worker_not_found"),
+    ] {
+        let missing = app
+            .clone()
+            .oneshot(post(&observation_reconcile, token, &started))
+            .await
+            .unwrap();
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+        let body: Value =
+            serde_json::from_slice(&to_bytes(missing.into_body(), 1024).await.unwrap()).unwrap();
+        assert_eq!(body.pointer(pointer).and_then(Value::as_str), Some(code));
+    }
+    for (path, token, status) in [
+        (
+            observation_public.as_str(),
+            BROKER_TOKEN,
+            StatusCode::NOT_FOUND,
+        ),
+        (observation_path.as_str(), RUNNER, StatusCode::FORBIDDEN),
+        (
+            observation_path.as_str(),
+            OTHER_BROKER,
+            StatusCode::NOT_FOUND,
+        ),
+    ] {
+        let refused = app
+            .clone()
+            .oneshot(post(path, token, &started))
+            .await
+            .unwrap();
+        assert_eq!(refused.status(), status);
+    }
+    assert_eq!(
+        store
+            .observe_helper(&started.observation)
+            .unwrap_err()
+            .downcast_ref::<ControlFailure>(),
+        Some(&ControlFailure::Conflict)
+    );
+    let mut wrong_claim = started.clone();
+    wrong_claim.claim_receipt.audit_hash = "e".repeat(64);
+    let mut wrong_helper = started.clone();
+    wrong_helper.observation.observation.inspection.container_id = "e".repeat(64);
+    for invalid in [&wrong_claim, &wrong_helper] {
+        let refused = app
+            .clone()
+            .oneshot(post(&observation_path, BROKER_TOKEN, invalid))
+            .await
+            .unwrap();
+        assert_eq!(refused.status(), StatusCode::CONFLICT);
+    }
+    let mut created_only = started.clone();
+    created_only.observation.observation.status = RuntimeStatusV1::Created;
+    created_only.observation.observation.running = Some(false);
+    created_only.observation.observation.started_at = None;
+    let refused = app
+        .clone()
+        .oneshot(post(&observation_path, BROKER_TOKEN, &created_only))
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(store.head().unwrap(), committed_claim.receipt.audit_seq);
+    let response = app
+        .oneshot(post(&observation_path, BROKER_TOKEN, &started))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let observed: MutationReceiptV1 =
+        serde_json::from_slice(&to_bytes(response.into_body(), 4096).await.unwrap()).unwrap();
+    started.validate_receipt(&observed).unwrap();
+    assert_eq!(observed.audit_seq, committed_claim.receipt.audit_seq + 1);
+
     credential.active = false;
     credential.revision += 1;
     let revoked = store
@@ -1650,6 +1769,40 @@ async fn legacy_named_import_arm_preserves_its_prefix_and_closes_manual_claims()
 
     let reopened = Arc::new(f.reopen());
     let app = router(Arc::clone(&reopened));
+    for path in [&observation_path, &observation_reconcile] {
+        let response = app
+            .clone()
+            .oneshot(post(path, BROKER_TOKEN, &started))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let receipt: MutationReceiptV1 =
+            serde_json::from_slice(&to_bytes(response.into_body(), 4096).await.unwrap()).unwrap();
+        assert_eq!(receipt, observed);
+    }
+    let mut divergent_observation = started.clone();
+    divergent_observation.observation.observation.observed_at = "2026-11-27T12:00:02Z".into();
+    let refused = app
+        .clone()
+        .oneshot(post(
+            &observation_reconcile,
+            BROKER_TOKEN,
+            &divergent_observation,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), StatusCode::CONFLICT);
+    let foreign = app
+        .clone()
+        .oneshot(post(&observation_reconcile, OTHER_BROKER, &started))
+        .await
+        .unwrap();
+    assert_eq!(foreign.status(), StatusCode::NOT_FOUND);
+    let foreign: Value =
+        serde_json::from_slice(&to_bytes(foreign.into_body(), 1024).await.unwrap()).unwrap();
+    assert_eq!(foreign["code"], "worker_not_found");
+    assert_eq!(reopened.head().unwrap(), revoked.audit_seq);
+
     for path in [&claim_path, &claim_reconcile] {
         let response = app
             .clone()
@@ -1717,6 +1870,7 @@ async fn legacy_named_import_arm_preserves_its_prefix_and_closes_manual_claims()
     let mut divergent = exact;
     divergent.arm.configuration_fingerprint = "f".repeat(64);
     let conflict = app
+        .clone()
         .oneshot(post(&reconcile, BROKER_TOKEN, &divergent))
         .await
         .unwrap();
@@ -1730,6 +1884,44 @@ async fn legacy_named_import_arm_preserves_its_prefix_and_closes_manual_claims()
     assert!(reopened.execution_arm(&arm.operation_id).unwrap().is_none());
     assert!(reopened.integrity().unwrap().valid);
     assert_eq!(reopened.head().unwrap(), revoked.audit_seq);
+    assert_eq!(reopened.worker_quota(&quota).unwrap().held_workers, 1);
+
+    // An already consumed claim may produce a later terminal fact after human revocation.
+    let mut terminal = started;
+    terminal.phase = LegacyNamedImportObservationPhaseV1::Terminal;
+    terminal.observation.operation_id = operation_id(terminal.phase);
+    let snapshot = &mut terminal.observation.observation;
+    snapshot.status = RuntimeStatusV1::Exited;
+    snapshot.running = Some(false);
+    snapshot.finished_at = Some("2026-11-27T12:00:02Z".into());
+    snapshot.observed_at = "2026-11-27T12:00:03Z".into();
+    snapshot.exit_code = Some(0);
+    let mut contradictory_terminal = terminal.clone();
+    contradictory_terminal.observation.observation.started_at = Some("2026-11-27T12:00:01Z".into());
+    let refused = app
+        .clone()
+        .oneshot(post(
+            &observation_path,
+            BROKER_TOKEN,
+            &contradictory_terminal,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), StatusCode::CONFLICT);
+    let response = app
+        .oneshot(post(&observation_path, BROKER_TOKEN, &terminal))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let ended: MutationReceiptV1 =
+        serde_json::from_slice(&to_bytes(response.into_body(), 4096).await.unwrap()).unwrap();
+    terminal.validate_receipt(&ended).unwrap();
+    assert_eq!(ended.audit_seq, revoked.audit_seq + 1);
+    assert!(reopened.integrity().unwrap().valid);
+    assert_eq!(
+        serde_json::to_value(reopened.worker(&prepared.worker_id).unwrap().unwrap()).unwrap(),
+        serde_json::to_value(prepared).unwrap(),
+    );
     assert_eq!(reopened.worker_quota(&quota).unwrap().held_workers, 1);
 }
 

@@ -260,7 +260,7 @@ pub fn control_route(method: &Method, path: &str) -> Option<ControlRouteIdentity
                 "session-confirmations",
                 id,
                 "admission",
-                "import-claim",
+                "import-claim" | "import-observation",
             ],
         )
         | (
@@ -270,7 +270,7 @@ pub fn control_route(method: &Method, path: &str) -> Option<ControlRouteIdentity
                 "session-confirmations",
                 id,
                 "admission",
-                "import-claim",
+                "import-claim" | "import-observation",
                 "reconcile",
             ],
         ) if v1
@@ -308,9 +308,17 @@ mod reconciliation_tests {
 
     #[test]
     fn named_import_claim_routes_require_broker_session_and_exact_scope_path() {
+        assert_named_import_routes_require_broker_session("import-claim");
+    }
+
+    #[test]
+    fn named_import_observation_routes_require_broker_session_and_exact_scope_path() {
+        assert_named_import_routes_require_broker_session("import-observation");
+    }
+
+    fn assert_named_import_routes_require_broker_session(operation: &str) {
         let binding = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
-        let base =
-            format!("/api/v1/control/session-confirmations/{binding}/admission/import-claim");
+        let base = format!("/api/v1/control/session-confirmations/{binding}/admission/{operation}");
         for path in [base.clone(), format!("{base}/reconcile")] {
             assert_eq!(
                 control_route(&Method::POST, &path),
