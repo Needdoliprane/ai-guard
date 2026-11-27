@@ -71,7 +71,6 @@ fn require_cancel_predecessor(
     fact: &AdmissionFact,
     request: &LegacyNamedCancelReservationV1,
     parent: &WorkerV1,
-    before_seq: i64,
 ) -> anyhow::Result<()> {
     let mutation = &request.mutation;
     conflict(
@@ -89,16 +88,7 @@ fn require_cancel_predecessor(
         .worker
         .as_ref()
         .ok_or(ControlFailure::NotFound)?;
-    conflict(serde_json::to_value(admitted)? == serde_json::to_value(parent)?)?;
-
-    let effect_permitted: bool = db.query_row(
-        "SELECT EXISTS(SELECT 1 FROM execution_arms WHERE worker_id=?1 AND event_seq<?2)
-         OR EXISTS(SELECT 1 FROM worker_mutations WHERE worker_id=?1 AND event_seq<?2
-                   AND action IN ('start_claim','armed_start_claim','helper_start_claim'))",
-        params![parent.worker_id, before_seq],
-        |row| row.get(0),
-    )?;
-    conflict(!effect_permitted)
+    conflict(serde_json::to_value(admitted)? == serde_json::to_value(parent)?)
 }
 
 pub(in crate::audit) fn validate_legacy_named_cancel(
@@ -118,7 +108,7 @@ pub(in crate::audit) fn validate_legacy_named_cancel(
             && transition.operation_id == cancel.request.mutation.operation_id,
     )?;
     let fact = cancellation_admission(db, cancel.request.binding_ref, stored.seq)?;
-    require_cancel_predecessor(db, &fact, &cancel.request, parent, stored.seq)?;
+    require_cancel_predecessor(db, &fact, &cancel.request, parent)?;
     workload::validate_broker_identity_at(
         db,
         &fact.actor.historical_identity()?,
@@ -147,6 +137,8 @@ fn cancellation_result(
 impl Store {
     /// Release the original untouched reservation on explicit broker abandon,
     /// including after human authority was withdrawn or supervision reopened.
+    /// The Store establishes the absence of a durable arm or claim. The broker
+    /// must independently establish that no runtime work preceded this boundary.
     #[allow(dead_code, reason = "private named cancellation transport is pending")]
     pub(crate) fn cancel_legacy_named_reservation(
         &self,
@@ -186,7 +178,7 @@ impl Store {
             anyhow::ensure!(fact.actor.matches_binding(broker), ControlFailure::NotFound);
             let parent = control_store::worker_at(&tx, &request.mutation.worker_id, before_seq)?
                 .ok_or(ControlFailure::NotFound)?;
-            require_cancel_predecessor(&tx, &fact, request, &parent, before_seq)?;
+            require_cancel_predecessor(&tx, &fact, request, &parent)?;
             let mutation = &request.mutation;
             let hash = worker_transition::validate_input(mutation, &self.redactor)?;
             let transition = worker_transition::build_record(parent, mutation, hash)?;

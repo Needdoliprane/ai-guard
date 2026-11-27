@@ -5,6 +5,7 @@ use crate::audit::{
     supervision_admission::{self as admission_codec, Binding, receipt_for},
     supervision_genesis,
 };
+use std::collections::BTreeSet;
 
 pub(in crate::audit) const SCHEMA: [(&str, &str, &str); 6] = [
     (
@@ -330,6 +331,7 @@ pub(super) struct Replay {
     seen_genesis: bool,
     bindings: BTreeMap<String, Binding>,
     arms: BTreeMap<String, ArmEntry>,
+    armed_workers: BTreeSet<String>,
     claims: BTreeMap<String, HelperStartClaimV1>,
     observations: BTreeMap<String, HelperObservationV1>,
     terminals: BTreeMap<String, HelperObservationV1>,
@@ -351,6 +353,7 @@ impl Replay {
         for row in stmt.query_map([], |r| r.get::<_, String>(0))? {
             let id = row?;
             let entry = arm_entry(db, &id)?.ok_or(ControlFailure::NotFound)?;
+            state.armed_workers.insert(entry.request.worker_id.clone());
             state.arms.insert(id, entry);
         }
         let mut stmt = db.prepare("SELECT payload_json FROM helper_claims ORDER BY helper_id")?;
@@ -408,6 +411,7 @@ impl Replay {
             seen_genesis: false,
             bindings: BTreeMap::new(),
             arms: BTreeMap::new(),
+            armed_workers: BTreeSet::new(),
             claims: BTreeMap::new(),
             observations: BTreeMap::new(),
             terminals: BTreeMap::new(),
@@ -654,6 +658,7 @@ impl Replay {
                     rusqlite::types::Value::Integer(stored.seq),
                 ],
             );
+        self.armed_workers.insert(request.worker_id.clone());
         self.arms.insert(
             request.operation_id.clone(),
             ArmEntry {
@@ -767,6 +772,9 @@ impl Replay {
             }
             Input::LegacyNamedCancel(cancel) => {
                 let parent = self.parent(workers, &cancel.request.mutation.worker_id)?;
+                // Every supervised claim resolves an earlier arm. The immutable
+                // original Reserved snapshot also excludes a legacy start.
+                conflict(!self.armed_workers.contains(&parent.worker_id))?;
                 let transition = record
                     .worker_record
                     .as_ref()
