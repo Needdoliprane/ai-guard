@@ -13,6 +13,7 @@ use agentsandbox::{
     policy::{self, Policy},
     redaction::Redactor,
     runtime::capture_stream,
+    workload_cli::WorkloadCliError,
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -139,14 +140,49 @@ fn no_secret(output: &Output, secret: &str) {
     );
 }
 
+fn workload_error_category(stderr: &[u8]) -> Option<WorkloadCliError> {
+    use WorkloadCliError as Error;
+
+    // Report only a known public category, never the captured child output.
+    let stderr = std::str::from_utf8(stderr).ok()?;
+    [
+        Error::InvalidInput,
+        Error::InputDeadline,
+        Error::InvalidControl,
+        Error::UnsafeState,
+        Error::IncompletePreparation,
+        Error::Busy,
+        Error::ScopeMismatch,
+        Error::Transport,
+        Error::Protocol,
+        Error::Authentication,
+        Error::Forbidden,
+        Error::Conflict,
+        Error::Capacity,
+        Error::Clock,
+        Error::Unavailable,
+        Error::Output,
+    ]
+    .into_iter()
+    .find(|category| {
+        let message = category.to_string();
+        stderr
+            .lines()
+            .filter_map(|line| line.strip_prefix("Error: "))
+            .any(|line| line == message)
+    })
+}
+
+#[track_caller]
 fn success(output: &Output) -> Value {
-    assert!(
-        output.status.success(),
-        "workload CLI operation must succeed; exit={:?}",
-        output.status.code()
-    );
     no_secret(output, RUNNER);
     no_secret(output, VIEWER);
+    assert!(
+        output.status.success(),
+        "workload CLI operation must succeed; exit={:?}, category={:?}",
+        output.status.code(),
+        workload_error_category(&output.stderr)
+    );
     serde_json::from_slice(&output.stdout).unwrap()
 }
 
@@ -1475,11 +1511,18 @@ async fn worker_binding_cli_authenticates_only_its_authorized_software_attempt()
         })
     };
     prepare_named(root, "worker-a", &manifest(&a), &control).await;
-    let applied = run(operation_command("apply", &operation, Some(&control)), root).await;
-    assert_eq!(success(&applied)["status"], "operation_recorded");
     let key = fs::read_to_string(operation.join("credential")).unwrap();
     let key = key.trim_end_matches('\n');
+    let applied = run(operation_command("apply", &operation, Some(&control)), root).await;
     no_secret(&applied, key);
+    if !applied.status.success() {
+        eprintln!(
+            "worker binding apply: scope_present={}, issue_requests={}",
+            operation.join("scope").is_dir(),
+            gateway.posts.load(Ordering::SeqCst)
+        );
+    }
+    assert_eq!(success(&applied)["status"], "operation_recorded");
     let inbox = reqwest::Client::builder()
         .no_proxy()
         .build()
