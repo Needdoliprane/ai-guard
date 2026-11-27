@@ -9,20 +9,55 @@ use crate::{
     },
     control::{
         ArmSubjectV1, HelperPermissionV1, HelperPurposeV1, content_hash,
-        session_control::{LegacyNamedImportArmRequestV1, canonical_uuid},
+        session_control::{LegacyConfirmedPlanV1, LegacyNamedImportArmRequestV1, canonical_uuid},
     },
 };
-use serde::{Deserialize, Deserializer, de::Error as _};
+use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
+
+/// The immutable, journal-bound part of the first named reservation.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(in crate::broker) struct NamedImportArmBirthV1 {
+    scope: JournalScopeV1,
+    operation_id: Uuid,
+    binding_ref: Uuid,
+    session_id: Uuid,
+    arm_pending_head: RevisionRefV1,
+}
+
+impl NamedImportArmBirthV1 {
+    pub(in crate::broker) fn from_plan(
+        scope: &JournalScopeV1,
+        plan: &LegacyConfirmedPlanV1,
+        arm_pending_head: &RevisionRefV1,
+    ) -> EnforcerResult<Self> {
+        plan.validate().map_err(|_| EnforcerError::InvalidInput)?;
+        if scope.profile_id() != plan.broker_profile_id
+            || scope.control_namespace_uuid().to_string() != plan.control_namespace_uuid
+        {
+            return Err(EnforcerError::Conflict);
+        }
+        Ok(Self {
+            scope: scope.clone(),
+            operation_id: plan.operation_id,
+            binding_ref: plan.binding_ref,
+            session_id: plan.session_id,
+            arm_pending_head: arm_pending_head.clone(),
+        })
+    }
+
+    pub(super) fn matches(&self, other: &Self) -> EnforcerResult<bool> {
+        let invalid = |_| EnforcerError::InvalidInput;
+        Ok(canonical(self).map_err(invalid)? == canonical(other).map_err(invalid)?)
+    }
+}
 
 /// Context fixed at the first named Reserve from its confirmed Writer birth.
 /// This value is private to the living guardian and cannot be decoded.
 pub(super) struct NamedImportStopAnchorV1 {
-    scope: JournalScopeV1,
-    operation_id: Uuid,
-    binding_ref: Uuid,
-    arm_pending_head: RevisionRefV1,
+    birth: NamedImportArmBirthV1,
     prospective_hash: String,
     arm_input_hash: String,
     owned_snapshot_hash: String,
@@ -53,18 +88,14 @@ pub(super) struct NamedImportStopFactsV1 {
 
 impl NamedImportStopAnchorV1 {
     pub(super) fn new(
-        scope: &JournalScopeV1,
-        operation_id: Uuid,
-        binding_ref: Uuid,
-        session_id: Uuid,
-        arm_pending_head: &RevisionRefV1,
+        birth: NamedImportArmBirthV1,
         target: &ProspectiveRegistrationV1,
     ) -> EnforcerResult<Self> {
         let invalid = |_| EnforcerError::InvalidInput;
-        if operation_id.is_nil()
-            || binding_ref.is_nil()
-            || session_id.is_nil()
-            || arm_pending_head.revision() == 0
+        if birth.operation_id.is_nil()
+            || birth.binding_ref.is_nil()
+            || birth.session_id.is_nil()
+            || birth.arm_pending_head.revision() == 0
         {
             return Err(EnforcerError::InvalidInput);
         }
@@ -82,14 +113,15 @@ impl NamedImportStopAnchorV1 {
         let HelperPermissionV1::Admission { receipt } = permission.as_ref() else {
             return Err(EnforcerError::InvalidInput);
         };
-        if target.tenant_id() != scope.tenant_id()
+        if target.tenant_id() != birth.scope.tenant_id()
             || target.control_origin_hash()
-                != hex::encode(Sha256::digest(scope.gateway_origin().as_bytes()))
-            || target.owned().handle.session_id() != session_id
+                != hex::encode(Sha256::digest(birth.scope.gateway_origin().as_bytes()))
+            || target.owned().handle.session_id() != birth.session_id
             || attempt.is_nil()
-            || arm.operation_id != LegacyNamedImportArmRequestV1::operation_id(binding_ref, attempt)
+            || arm.operation_id
+                != LegacyNamedImportArmRequestV1::operation_id(birth.binding_ref, attempt)
             || arm.operation_id == receipt.operation_id
-            || receipt.operation_id != operation_id.to_string()
+            || receipt.operation_id != birth.operation_id.to_string()
             || receipt.worker_id.as_deref() != Some(arm.worker_id.as_str())
             || !receipt.revision.is_some_and(|revision| {
                 revision > 0 && revision.checked_add(1) == Some(arm.expected_revision)
@@ -101,10 +133,7 @@ impl NamedImportStopAnchorV1 {
             return Err(EnforcerError::Conflict);
         }
         Ok(Self {
-            scope: scope.clone(),
-            operation_id,
-            binding_ref,
-            arm_pending_head: arm_pending_head.clone(),
+            birth,
             prospective_hash,
             arm_input_hash: arm.input_hash().map_err(invalid)?,
             owned_snapshot_hash: named_import_stop_owned_hash(target.owned())
@@ -117,6 +146,14 @@ impl NamedImportStopAnchorV1 {
         })
     }
 
+    pub(super) fn matches_birth(&self, other: &Self) -> EnforcerResult<bool> {
+        self.birth.matches(&other.birth)
+    }
+
+    pub(super) fn prospective_hash(&self) -> &str {
+        &self.prospective_hash
+    }
+
     pub(super) fn require_facts(
         &self,
         facts: &NamedImportStopFactsV1,
@@ -126,23 +163,23 @@ impl NamedImportStopAnchorV1 {
             return Err(EnforcerError::InvalidInput);
         }
         let invalid = |_| EnforcerError::InvalidInput;
-        if facts.operation_id != self.operation_id
-            || facts.binding_ref != self.binding_ref
-            || facts.arm_pending_head != self.arm_pending_head
-            || facts.stop_head.revision() <= self.arm_pending_head.revision()
-            || facts.stop_head.hash() == self.arm_pending_head.hash()
+        if facts.operation_id != self.birth.operation_id
+            || facts.binding_ref != self.birth.binding_ref
+            || facts.arm_pending_head != self.birth.arm_pending_head
+            || facts.stop_head.revision() <= self.birth.arm_pending_head.revision()
+            || facts.stop_head.hash() == self.birth.arm_pending_head.hash()
             || facts.arm_id != target.arm_id()
             || facts.arm_input_hash != self.arm_input_hash
             || facts.owned_snapshot_hash != self.owned_snapshot_hash
             || facts.runtime_binding_hash != self.runtime_binding_hash
             || canonical(&facts.scope).map_err(invalid)?
-                != canonical(&self.scope).map_err(invalid)?
+                != canonical(&self.birth.scope).map_err(invalid)?
             || target.digest()? != self.prospective_hash
         {
             return Err(EnforcerError::Conflict);
         }
         let command = LocalCommandV1::new(
-            self.operation_id,
+            self.birth.operation_id,
             &target.arm().intent_hash,
             facts.command_id,
             LocalCommandRequestV1::CancelRequested,

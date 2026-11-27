@@ -5,7 +5,9 @@
 //! compatibility boundary and the absence of any resend or extra effect.
 use super::*;
 use crate::broker::clock::checked_deadline;
-use crate::broker::enforcer::server::test_support::{LegacyIpcFixture, registration};
+use crate::broker::enforcer::server::test_support::{
+    LegacyIpcFixture, named_import_registration, registration,
+};
 use serde_json::json;
 
 async fn connect(fixture: &LegacyIpcFixture, s: u32, w: u32) -> EnforcerClient {
@@ -557,7 +559,8 @@ fn motif_wire_is_closed_and_historical_decoders_reject_unknown_frames() {
 #[test]
 fn named_reservation_wire_does_not_decode_as_a_historical_reservation() {
     let root = tempfile::tempdir().unwrap();
-    let prospective = registration(root.path()).prospective().unwrap();
+    let (registration, birth) = named_import_registration(root.path());
+    let prospective = registration.prospective().unwrap();
     let historical = serde_json::to_value(Request::ReserveProspective {
         prospective: Box::new(prospective.clone()),
         generation: 4,
@@ -580,6 +583,7 @@ fn named_reservation_wire_does_not_decode_as_a_historical_reservation() {
         prospective: Box::new(prospective),
         generation: 4,
         custody_nonce,
+        birth: Box::new(birth),
     })
     .unwrap();
     assert_eq!(named["kind"], "reserve_named_prospective");

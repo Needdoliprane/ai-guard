@@ -438,8 +438,7 @@ async fn dispatch(
                 .reserve_prospective(
                     *prospective,
                     generation,
-                    replay_only,
-                    LegacyProspectiveRailV1::Historical,
+                    prospective::LegacyProspectiveSource::Historical { replay_only },
                 )
                 .await
             {
@@ -451,13 +450,16 @@ async fn dispatch(
             prospective,
             generation,
             custody_nonce,
+            birth,
         } => {
             match state
                 .reserve_prospective(
                     *prospective,
                     generation,
-                    false,
-                    LegacyProspectiveRailV1::Named(custody_nonce),
+                    prospective::LegacyProspectiveSource::Named {
+                        custody_nonce,
+                        birth,
+                    },
                 )
                 .await
             {

@@ -3,10 +3,12 @@
 //! executable; the named reconnect case uses the existing Rust runtime fixture.
 //! Native threads/contexts and IPC are real.
 use super::*;
+use crate::broker::journal::{JournalScopeV1, RevisionRefV1};
 use crate::broker::{clock::checked_deadline, discovery::load_endpoint};
 use crate::control::{
     ArmReceiptV1, ArmSubjectV1, ArmV1, NetworkV1, RestartPolicyV1, RuntimeInspectionV1,
     RuntimeKindV1, SecurityPresetV1,
+    session_control::{LegacyConfirmedPlanV1, LegacyNamedImportArmRequestV1},
 };
 use serde_json::json;
 use std::{
@@ -210,15 +212,46 @@ fn registration_with_authority(authority: crate::runtime::RuntimeAuthority) -> R
     .unwrap()
 }
 
-pub(super) fn named_import_registration(root: &Path) -> RegistrationV1 {
+pub(super) fn named_import_registration(root: &Path) -> (RegistrationV1, NamedImportArmBirthV1) {
     named_import_from(registration(root))
 }
 
-fn named_import_from(base: RegistrationV1) -> RegistrationV1 {
+fn named_import_from(base: RegistrationV1) -> (RegistrationV1, NamedImportArmBirthV1) {
+    let scope = JournalScopeV1::new(
+        Uuid::new_v4(),
+        &base.tenant_id,
+        "https://broker-fixture.invalid",
+        Uuid::new_v4(),
+        "fixture",
+    )
+    .unwrap();
+    let plan = LegacyConfirmedPlanV1 {
+        version: 1,
+        binding_ref: Uuid::new_v4(),
+        control_namespace_uuid: scope.control_namespace_uuid().to_string(),
+        operation_id: Uuid::new_v4(),
+        session_id: base.owned.handle.session_id(),
+        launch_target_id: Uuid::new_v4(),
+        target_revision: 1,
+        broker_profile_id: scope.profile_id().to_owned(),
+        launch_spec_hash: "4".repeat(64),
+        expires_at: chrono::Utc::now() + chrono::Duration::minutes(5),
+    };
+    let birth = NamedImportArmBirthV1::from_plan(
+        &scope,
+        &plan,
+        &RevisionRefV1::new(4, &"5".repeat(64)).unwrap(),
+    )
+    .unwrap();
     let helper_id = base.owned.handle.operation_id().to_string();
     let mut arm = base.arm.clone();
+    arm.operation_id = LegacyNamedImportArmRequestV1::operation_id(
+        plan.binding_ref,
+        arm.attempt_id.parse().unwrap(),
+    );
+    arm.expected_revision = 2;
     let admission_receipt = crate::control::MutationReceiptV1 {
-        operation_id: Uuid::new_v4().to_string(),
+        operation_id: plan.operation_id.to_string(),
         worker_id: Some(arm.worker_id.clone()),
         revision: Some(1),
         input_hash: "1".repeat(64),
@@ -244,19 +277,20 @@ fn named_import_from(base: RegistrationV1) -> RegistrationV1 {
         worker_id: arm.worker_id.clone(),
         attempt_id: arm.attempt_id.clone(),
         input_hash: arm.input_hash().unwrap(),
-        control_namespace_uuid: Uuid::new_v4().to_string(),
+        control_namespace_uuid: plan.control_namespace_uuid,
         audit_seq: 2,
         audit_hash: "3".repeat(64),
     };
-    RegistrationV1::new(
-        base.control_origin_hash,
+    let registration = RegistrationV1::new(
+        hex::encode(Sha256::digest(scope.gateway_origin().as_bytes())),
         base.tenant_id,
         arm,
         receipt,
         base.authority,
         base.owned,
     )
-    .unwrap()
+    .unwrap();
+    (registration, birth)
 }
 
 async fn exercise(mode: &str, parent: &Directory) {
@@ -570,7 +604,8 @@ async fn exercise(mode: &str, parent: &Directory) {
         )
         .await
         .unwrap();
-        let first = named_import_from(registration_with_authority(managed.binding().clone()));
+        let (first, birth) =
+            named_import_from(registration_with_authority(managed.binding().clone()));
         let custody_a = Uuid::new_v4();
         let custody_b = Uuid::new_v4();
         let reserved = match rpc(
@@ -579,6 +614,7 @@ async fn exercise(mode: &str, parent: &Directory) {
                 prospective: Box::new(first.prospective().unwrap()),
                 generation: 0,
                 custody_nonce: custody_a,
+                birth: Box::new(birth.clone()),
             },
         )
         .await
@@ -602,6 +638,22 @@ async fn exercise(mode: &str, parent: &Directory) {
                     prospective: Box::new(first.prospective().unwrap()),
                     generation: 0,
                     custody_nonce: custody_b,
+                    birth: Box::new(birth.clone()),
+                },
+            )
+            .await,
+            EnforcerError::Conflict,
+        );
+        let mut replaced_birth = serde_json::to_value(&birth).unwrap();
+        replaced_birth["arm_pending_head"]["hash"] = json!("6".repeat(64));
+        expect_error(
+            rpc(
+                &root,
+                Request::ReserveNamedProspective {
+                    prospective: Box::new(first.prospective().unwrap()),
+                    generation: 0,
+                    custody_nonce: custody_a,
+                    birth: Box::new(serde_json::from_value(replaced_birth).unwrap()),
                 },
             )
             .await,

@@ -1,6 +1,7 @@
 //! Legacy native admission. DATA can rediscover an owner, never manufacture
 //! one. Every prospective, bound or restored target consumes this ONE registry.
 //! The real native thread/runtime/key and failure custody survive Bind.
+use super::super::legacy_named_stop::NamedImportStopAnchorV1;
 use super::*;
 use lifetime::ActorKey;
 use std::sync::Condvar;
@@ -20,7 +21,9 @@ pub(super) fn fixture_registration(root: &std::path::Path) -> RegistrationV1 {
     tests::registration(root)
 }
 #[cfg(test)]
-pub(super) fn fixture_named_import_registration(root: &std::path::Path) -> RegistrationV1 {
+pub(super) fn fixture_named_import_registration(
+    root: &std::path::Path,
+) -> (RegistrationV1, NamedImportArmBirthV1) {
     tests::named_import_registration(root)
 }
 #[cfg(test)]
@@ -35,6 +38,16 @@ pub(super) fn after_runtime_invalidation() {
 pub(super) struct LegacyAdmission {
     pub(super) generation: u64,
     pub(super) entries: BTreeSet<String>,
+}
+
+pub(super) enum LegacyProspectiveSource {
+    Historical {
+        replay_only: bool,
+    },
+    Named {
+        custody_nonce: Uuid,
+        birth: Box<NamedImportArmBirthV1>,
+    },
 }
 impl LegacyAdmission {
     pub(super) fn new(fresh: bool) -> Self {
@@ -63,6 +76,7 @@ pub(super) struct ProspectiveActor {
     prospective: ProspectiveRegistrationV1,
     reservation: ProspectiveReservationV1,
     rail: LegacyProspectiveRailV1,
+    named_stop_anchor: Option<NamedImportStopAnchorV1>,
     key: ActorKey,
     state: Mutex<PendingState>,
     wake: Condvar,
@@ -443,20 +457,34 @@ impl State {
         self: &Arc<Self>,
         prospective: ProspectiveRegistrationV1,
         generation: u64,
-        replay_only: bool,
-        rail: LegacyProspectiveRailV1,
+        source: LegacyProspectiveSource,
     ) -> Result<ProspectiveReservationV1, LegacyReservationRefusalV1> {
-        prospective.validate()?;
-        if let LegacyProspectiveRailV1::Named(custody_nonce) = rail {
-            if custody_nonce.is_nil() || replay_only {
-                return Err(EnforcerError::InvalidInput.into());
+        let (rail, replay_only, named_stop_anchor) = match source {
+            LegacyProspectiveSource::Historical { replay_only } => {
+                (LegacyProspectiveRailV1::Historical, replay_only, None)
             }
-            prospective.validate_named_import()?;
-        }
+            LegacyProspectiveSource::Named {
+                custody_nonce,
+                birth,
+            } => {
+                if custody_nonce.is_nil() {
+                    return Err(EnforcerError::InvalidInput.into());
+                }
+                let anchor = NamedImportStopAnchorV1::new(*birth, &prospective)?;
+                (
+                    LegacyProspectiveRailV1::Named(custody_nonce),
+                    false,
+                    Some(anchor),
+                )
+            }
+        };
         if generation == u64::MAX && !replay_only {
             return Err(EnforcerError::InvalidInput.into());
         }
-        let digest = prospective.digest()?;
+        let digest = match &named_stop_anchor {
+            Some(anchor) => anchor.prospective_hash().to_owned(),
+            None => prospective.digest()?,
+        };
         let (actor, install) = {
             let mut admission = self
                 .admission
@@ -468,6 +496,15 @@ impl State {
                 .map_err(|_| EnforcerError::Unhealthy)?;
             if let Some(actor) = pending.get(prospective.arm_id()) {
                 actor.require_rail(rail)?;
+                if let Some(anchor) = &named_stop_anchor {
+                    let original = actor
+                        .named_stop_anchor
+                        .as_ref()
+                        .ok_or(EnforcerError::Conflict)?;
+                    if !original.matches_birth(anchor)? {
+                        return Err(EnforcerError::Conflict.into());
+                    }
+                }
                 actor.reservation.validate_for(
                     &prospective,
                     self.epoch,
@@ -530,6 +567,7 @@ impl State {
                     prospective,
                     reservation,
                     rail,
+                    named_stop_anchor,
                     state: Mutex::new(PendingState {
                         bound: None,
                         stop_reserved: false,

@@ -17,7 +17,7 @@ pub(in crate::broker::enforcer) fn registration(root: &std::path::Path) -> Regis
 
 pub(in crate::broker::enforcer) fn named_import_registration(
     root: &std::path::Path,
-) -> RegistrationV1 {
+) -> (RegistrationV1, NamedImportArmBirthV1) {
     prospective::fixture_named_import_registration(root)
 }
 

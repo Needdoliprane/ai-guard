@@ -7,7 +7,7 @@ use crate::{
         checkpoint::LegacyNamedAdmissionCheckpoint,
         enforcer::{
             EnforcerClient, EnforcerError, ExecutionEnforcerV1, LegacyNamedProspectiveFailure,
-            ProspectiveArmExchange, ProspectiveRegistrationV1,
+            NamedImportArmBirthV1, ProspectiveArmExchange, ProspectiveRegistrationV1,
         },
         journal::{CancelStopProjectionV1, JournalError, JournalScopeV1, RevisionRefV1, canonical},
         lifecycle::LocalCommandRequestV1,
@@ -56,6 +56,7 @@ pub(crate) struct RecordedLegacyNamedImportArm<'enforcer> {
     writer: WriterClient,
     operation: Uuid,
     write: ImportArmWrite,
+    birth: NamedImportArmBirthV1,
     target: ProspectiveRegistrationV1,
     cancel: CancelGeneration,
     expected: u64,
@@ -344,12 +345,15 @@ pub(super) async fn record_import_arm<'enforcer>(
         }
     };
     require_arm_generation(cancel, expected)?;
+    let birth = NamedImportArmBirthV1::from_plan(scope, plan, recorded.birth())
+        .map_err(prospective_error)?;
     Ok(RecordedLegacyNamedImportArm {
         presence,
         enforcer,
         writer: writer.clone(),
         operation,
         write: recorded,
+        birth,
         target,
         cancel: cancel.clone(),
         expected,
@@ -366,6 +370,7 @@ pub(super) async fn arm_import(
         writer,
         operation,
         write,
+        birth,
         target,
         cancel,
         expected,
@@ -382,7 +387,7 @@ pub(super) async fn arm_import(
         .map_err(prospective_error)?;
     require_arm_generation(&cancel, expected)?;
     let reserved = enforcer
-        .legacy_reserve_named_prospective(target.clone(), &cancel, expected)
+        .legacy_reserve_named_prospective(target.clone(), &birth, &cancel, expected)
         .await
         .map_err(named_prospective_error)?;
     let exchange = enforcer

@@ -284,11 +284,12 @@ impl EnforcerClient {
     pub(crate) async fn legacy_reserve_named_prospective(
         &self,
         target: ProspectiveRegistrationV1,
+        birth: &NamedImportArmBirthV1,
         generation: &CancelGeneration,
         expected: u64,
     ) -> Result<LegacyNamedProspectiveReservation, LegacyNamedProspectiveFailure> {
         let (retained, custody_nonce) = self
-            .reserve_legacy_prospective(target, generation, false, Some(expected))
+            .reserve_legacy_prospective(target, generation, false, Some((expected, birth)))
             .await?;
         let custody_nonce = custody_nonce.ok_or(LegacyNamedProspectiveFailure::OutcomeUnknown(
             EnforcerError::Conflict,
@@ -308,15 +309,15 @@ impl EnforcerClient {
         target: ProspectiveRegistrationV1,
         generation: &CancelGeneration,
         replay_only: bool,
-        named_expected: Option<u64>,
+        named_birth: Option<(u64, &NamedImportArmBirthV1)>,
     ) -> Result<(Arc<LocalProspective>, Option<Uuid>), LegacyNamedProspectiveFailure> {
         use LegacyNamedProspectiveFailure::{
             BeforeSend, OutcomeUnknown, Refused, StaleAcknowledged,
         };
 
         target.validate().map_err(BeforeSend)?;
-        let named = named_expected.is_some();
-        let expected = named_expected.unwrap_or_else(|| generation.current());
+        let named = named_birth.is_some();
+        let expected = named_birth.map_or_else(|| generation.current(), |(expected, _)| expected);
         if expected == u64::MAX {
             return Err(BeforeSend(EnforcerError::NotReady));
         }
@@ -393,11 +394,12 @@ impl EnforcerClient {
                 return Err(BeforeSend(EnforcerError::NotReady));
             }
             let prospective = Box::new(retained.target.clone());
-            let request = if named {
+            let request = if let Some((_, birth)) = named_birth {
                 Request::ReserveNamedProspective {
                     prospective,
                     generation: expected,
                     custody_nonce: custody_nonce.ok_or(BeforeSend(EnforcerError::Conflict))?,
+                    birth: Box::new(birth.clone()),
                 }
             } else {
                 Request::ReserveProspective {
@@ -410,7 +412,7 @@ impl EnforcerClient {
                 .request_reservation(
                     request,
                     REGISTER_TIMEOUT,
-                    named_expected.map(|expected| (&retained.generation, expected)),
+                    named_birth.map(|(expected, _)| (&retained.generation, expected)),
                 )
                 .await
         }
@@ -1119,15 +1121,18 @@ async fn named_reservation_retains_stale_ack_without_issuing_stop() -> anyhow::R
     let fixture = LegacyIpcFixture::start(1, 0).await;
     let root = fixture.root();
     let client = connect_named_legacy_fixture(&fixture).await?;
-    let target = named_import_registration(root.path()).prospective()?;
+    let (registration, birth) = named_import_registration(root.path());
+    let target = registration.prospective()?;
     let generation = CancelGeneration::new();
     let expected = generation.current();
     let observation = async {
-        let unsent = named_import_registration(root.path()).prospective()?;
+        let (unsent, unsent_birth) = named_import_registration(root.path());
+        let unsent = unsent.prospective()?;
         let unsent_generation = CancelGeneration::new();
         let (held, resume) = fixture.pause_capabilities_reply();
         let reserve_never_sent = client.legacy_reserve_named_prospective(
             unsent.clone(),
+            &unsent_birth,
             &unsent_generation,
             unsent_generation.current(),
         );
@@ -1157,7 +1162,7 @@ async fn named_reservation_retains_stale_ack_without_issuing_stop() -> anyhow::R
         // exists, invalidation must preserve the reservation for durable STOP.
         let (held, resume) = fixture.pause_reserve_ack();
         let reserve =
-            client.legacy_reserve_named_prospective(target.clone(), &generation, expected);
+            client.legacy_reserve_named_prospective(target.clone(), &birth, &generation, expected);
         tokio::pin!(reserve);
         tokio::select! {
             _ = &mut reserve => anyhow::bail!("reservation did not reach the native ACK barrier"),
@@ -1229,12 +1234,13 @@ async fn named_exchange_never_enters_the_historical_bind() -> anyhow::Result<()>
     let fixture = LegacyIpcFixture::start(1, 0).await;
     let client = connect_named_legacy_fixture(&fixture).await?;
     let observation = async {
-        let registration = named_import_registration(fixture.root().path());
+        let (registration, birth) = named_import_registration(fixture.root().path());
         let target = registration.prospective()?;
         let generation = CancelGeneration::new();
         let reserved = client
             .legacy_reserve_named_prospective(
                 target.clone(),
+                &birth,
                 &generation,
                 generation.current(),
             )

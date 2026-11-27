@@ -12,6 +12,7 @@ pub(crate) mod ledger;
     reason = "the live named STOP dispatch is composed separately"
 )]
 mod legacy_named_stop;
+pub(in crate::broker) use legacy_named_stop::NamedImportArmBirthV1;
 mod native_stop_failure;
 mod recovery;
 pub(crate) mod retirement;
@@ -441,17 +442,6 @@ impl fmt::Debug for ProspectiveRegistrationV1 {
     }
 }
 impl ProspectiveRegistrationV1 {
-    fn validate_named_import(&self) -> EnforcerResult<()> {
-        match &self.arm.subject {
-            ArmSubjectV1::Helper {
-                purpose: HelperPurposeV1::Import,
-                permission,
-                ..
-            } if matches!(permission.as_ref(), HelperPermissionV1::Admission { .. }) => Ok(()),
-            _ => Err(EnforcerError::InvalidInput),
-        }
-    }
-
     pub(crate) fn new(
         control_origin_hash: String,
         tenant_id: String,
@@ -811,6 +801,7 @@ enum Request {
         prospective: Box<ProspectiveRegistrationV1>,
         generation: u64,
         custody_nonce: Uuid,
+        birth: Box<NamedImportArmBirthV1>,
     },
     BeginProspectiveArmExchange {
         reservation: ProspectiveReservationV1,
