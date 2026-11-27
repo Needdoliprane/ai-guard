@@ -1016,6 +1016,14 @@ fn project_cancel(
     }))
 }
 
+fn first_named_import_stop_receipt(job: &RecoveredJobV1) -> Option<(u64, &LocalCommandReceiptV1)> {
+    let arm_revision = job.named_import_arm_revision?;
+    job.cancel_command_ids().iter().find_map(|command| {
+        let receipt = job.cancel_receipt(*command)?;
+        (receipt.head().revision() > arm_revision).then_some((arm_revision, receipt))
+    })
+}
+
 fn named_import_stop(
     recovered: &RecoveredJobV1,
     command_id: Uuid,
@@ -1424,25 +1432,22 @@ impl StopRecoveryReportV1 {
         &self.jobs
     }
 
+    pub(in crate::broker) fn named_import_stop_jobs(&self) -> impl Iterator<Item = usize> + '_ {
+        self.jobs
+            .iter()
+            .enumerate()
+            .filter_map(|(index, job)| first_named_import_stop_receipt(job).map(|_| index))
+    }
+
     /// Resolve the first confirmed STOP after this report's named Import Arm.
     /// Reread just the selected job under the same reader and check the
     /// retained prefix before projecting it across a later checkpoint ACK.
-    #[allow(
-        dead_code,
-        reason = "the startup service caller is composed separately"
-    )]
     pub(in crate::broker) fn named_import_stop_projection(
         &self,
         job_index: usize,
     ) -> JournalResult<Option<CancelStopProjectionV1>> {
         let retained = self.jobs.get(job_index).ok_or(JournalError::InvalidInput)?;
-        let Some(arm_revision) = retained.named_import_arm_revision else {
-            return Ok(None);
-        };
-        let Some(receipt) = retained.cancel_command_ids().iter().find_map(|command| {
-            let receipt = retained.cancel_receipt(*command)?;
-            (receipt.head().revision() > arm_revision).then_some(receipt)
-        }) else {
+        let Some((arm_revision, receipt)) = first_named_import_stop_receipt(retained) else {
             return Ok(None);
         };
 

@@ -3006,30 +3006,33 @@ impl Service {
         progress: super::retirement_startup::RestoreProgress,
     ) -> Result<usize, BrokerErrorCodeV1> {
         let scope = report.scope().clone();
-        let (restored, mut partial) =
-            if let Some(completed) = startup_owner.as_ref().and_then(|owner| owner.restored()) {
-                completed
-            } else {
-                let (later_restored, later_partial) = self
-                    .restore_profile_targets(
-                        profile,
-                        &report,
-                        if progress.split {
-                            RestorePass::PendingOnly
-                        } else {
-                            RestorePass::All
-                        },
-                    )
-                    .await?;
-                let restored = progress.restored.saturating_add(later_restored);
-                let partial = progress.partial || report.incomplete() || later_partial;
-                if let Some(owner) = &startup_owner {
-                    owner
-                        .record_restored(restored, partial)
-                        .map_err(jobs::journal_error)?;
-                }
-                (restored, partial)
-            };
+        let (restored, mut partial) = if let Some(completed) =
+            startup_owner.as_ref().and_then(|owner| owner.restored())
+        {
+            completed
+        } else {
+            let (ordinary, named_partial) = tokio::join!(
+                self.restore_profile_targets(
+                    profile,
+                    &report,
+                    if progress.split {
+                        RestorePass::PendingOnly
+                    } else {
+                        RestorePass::All
+                    },
+                ),
+                self.restore_named_import_stops(&report),
+            );
+            let (later_restored, later_partial) = ordinary?;
+            let restored = progress.restored.saturating_add(later_restored);
+            let partial = progress.partial || report.incomplete() || later_partial || named_partial;
+            if let Some(owner) = &startup_owner {
+                owner
+                    .record_restored(restored, partial)
+                    .map_err(jobs::journal_error)?;
+            }
+            (restored, partial)
+        };
         if partial {
             self.fenced.store(true, Ordering::SeqCst);
         }
@@ -3084,6 +3087,33 @@ impl Service {
             self.fenced.store(true, Ordering::SeqCst);
         }
         Ok(restored)
+    }
+
+    async fn restore_named_import_stops(&self, report: &Arc<StopRecoveryReportV1>) -> bool {
+        if !self.recovery_only()
+            && !matches!(self.full_enforcer(), Ok(ExecutionEnforcerV1::Legacy(_)))
+        {
+            return false;
+        }
+        let mut attempts =
+            futures_util::stream::iter(report.named_import_stop_jobs().map(|index| async move {
+                let proof = Arc::clone(report);
+                let projection = self
+                    .filesystem(move || Ok(proof.named_import_stop_projection(index)?))
+                    .await;
+                match projection {
+                    Ok(Some(projection)) => {
+                        self.deliver_named_import_cancel(&projection).await.is_err()
+                    }
+                    Ok(None) | Err(_) => true,
+                }
+            }))
+            .buffer_unordered(16);
+        let mut partial = false;
+        while let Some(failed) = attempts.next().await {
+            partial |= failed;
+        }
+        partial
     }
 
     async fn restore_profile_targets(
