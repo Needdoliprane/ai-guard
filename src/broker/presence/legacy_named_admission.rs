@@ -147,7 +147,7 @@ async fn exchange_confirmation<T>(
             .await
     };
     let (status, bytes) = match generation {
-        Some((cancel, expected)) => enqueue_before_stop(cancel, expected, send).await?,
+        Some((cancel, expected)) => dispatch_before_stop(cancel, expected, send).await?,
         None => send.await?,
     };
     let confirmed = decode(status, &bytes)?;
@@ -277,18 +277,28 @@ fn named_write_error(error: JournalError) -> PresenceError {
     }
 }
 
-async fn enqueue_before_stop<T: Send + 'static>(
+async fn dispatch_before_stop<T>(
     cancel: &CancelGeneration,
     expected_generation: u64,
-    send: impl Future<Output = Result<T>> + Send + 'static,
+    send: impl Future<Output = Result<T>>,
 ) -> Result<T> {
-    // Only the enqueue runs under the same gate as STOP invalidation. Once
-    // queued an HTTP result may be lost, so the retained request is reconciled.
-    cancel
-        .with_current_generation(expected_generation, || tokio::spawn(send))
-        .map_err(|_| PresenceError::Stopped)?
-        .await
-        .map_err(|_| PresenceError::AdmissionOutcomeUnknown)?
+    use std::task::Poll;
+    tokio::pin!(send);
+    // Order the transport's first poll with STOP. The caller prepares all
+    // retained data beforehand. No wait or detached task runs under the gate.
+    let first = std::future::poll_fn(|context| {
+        Poll::Ready(
+            cancel.with_current_generation(expected_generation, || send.as_mut().poll(context)),
+        )
+    })
+    .await
+    .map_err(|_| PresenceError::Stopped)?;
+    match first {
+        Poll::Ready(result) => result,
+        // Once dispatched the request may have committed. Settle its exact
+        // acknowledgement even if STOP wins while the response is pending.
+        Poll::Pending => send.await,
+    }
 }
 
 enum Dispatch<'a> {
@@ -338,7 +348,7 @@ async fn send_request(
         Dispatch::Reserve {
             cancel,
             expected_generation,
-        } => enqueue_before_stop(cancel, expected_generation, send).await?,
+        } => dispatch_before_stop(cancel, expected_generation, send).await?,
         Dispatch::Reconcile => send.await?,
     };
     let (status, bytes) = response;
@@ -551,7 +561,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn stopped_generation_never_enqueues_the_named_admission_post() {
+    async fn stopped_generation_never_dispatches_the_named_admission_post() {
         use std::sync::atomic::{AtomicBool, Ordering};
 
         let cancel = CancelGeneration::new();
@@ -559,7 +569,7 @@ mod tests {
         cancel.invalidate();
         let submitted = Arc::new(AtomicBool::new(false));
         let witness = Arc::clone(&submitted);
-        let blocked = enqueue_before_stop(&cancel, expected, async move {
+        let blocked = dispatch_before_stop(&cancel, expected, async move {
             witness.store(true, Ordering::SeqCst);
             Ok(())
         })
@@ -567,13 +577,20 @@ mod tests {
         assert!(matches!(blocked, Err(PresenceError::Stopped)));
         assert!(!submitted.load(Ordering::SeqCst));
 
-        enqueue_before_stop(&cancel, cancel.current(), async move {
-            submitted.store(true, Ordering::SeqCst);
-            Ok(submitted)
-        })
-        .await
-        .map(|submitted| assert!(submitted.load(Ordering::SeqCst)))
-        .unwrap();
+        let cancel = CancelGeneration::new();
+        let (started, wait_started) = tokio::sync::oneshot::channel();
+        let (reply, wait_reply) = tokio::sync::oneshot::channel();
+        let send = dispatch_before_stop(&cancel, cancel.current(), async {
+            started.send(()).unwrap();
+            Ok(wait_reply.await.unwrap())
+        });
+        let stop_then_reply = async {
+            wait_started.await.unwrap();
+            cancel.invalidate();
+            reply.send(1u8).unwrap();
+        };
+        let (receipt, ()) = tokio::join!(send, stop_then_reply);
+        assert_eq!(receipt, Ok(1));
     }
     use crate::broker::presence::preparation_tests::Fixture;
 
