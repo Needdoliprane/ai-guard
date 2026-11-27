@@ -101,10 +101,6 @@ impl fmt::Debug for PreparedSubmission {
 }
 
 impl PreparedSubmission {
-    #[allow(
-        dead_code,
-        reason = "the named launch caller is being composed with source selection"
-    )]
     pub(crate) fn from_legacy_named_launch(
         options: RunOptions,
         config: Directory,

@@ -7,7 +7,7 @@ use crate::{
         journal::JournalScopeV1,
     },
     control::{
-        EgressLaunchV1, content_hash,
+        EgressLaunchV1, NetworkV1, RuntimeKindV1, content_hash,
         session_control::{
             LegacyConfirmedLaunchSpecV1, ProvisionLegacySessionTargetV1,
             SessionLaunchTargetSelectionV1, canonical_uuid,
@@ -15,7 +15,7 @@ use crate::{
     },
     control_fs::{Directory, PrivateFile, absolute_path},
     provider::AuthPreference,
-    runner::RunOptions,
+    runner::{RunOptions, broker::PreparedSubmission},
     runtime::{NetworkMode, RuntimeKind, validate_command},
     workspace::{AuthorizedSource, Limits, PreparedNamedWorkspace},
 };
@@ -24,7 +24,6 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
     fmt,
-    fs::File,
     net::IpAddr,
     path::{Path, PathBuf},
     sync::Arc,
@@ -87,6 +86,61 @@ pub(super) struct Registry {
     egress_resolver: Option<Arc<Resolver>>,
     pub(super) relay_service:
         std::sync::OnceLock<std::sync::Arc<crate::broker::relay_owner::RelayRegistry>>,
+}
+
+/// A source obtained through the exact profile that produced the initial
+/// intention. The caller can record Initial before collecting project data.
+pub(super) struct LegacyNamedSource {
+    source: AuthorizedSource,
+    identity_hash: String,
+    manifest_hash: String,
+    registry_file: PrivateFile,
+    registry_directory: Directory,
+    broker_root: Directory,
+    config: Directory,
+}
+
+impl LegacyNamedSource {
+    /// Collect through the pinned source with the retained credential and
+    /// presence parents supplied by the broker.
+    #[allow(
+        dead_code,
+        reason = "the private named admission caller will collect after Initial"
+    )]
+    pub(super) fn collect(
+        self,
+        control_parents: &[Directory],
+    ) -> Result<PreparedNamedWorkspace, BrokerErrorCodeV1> {
+        self.revalidate()?;
+        let retained = [&self.broker_root, &self.config, &self.registry_directory]
+            .into_iter()
+            .chain(control_parents)
+            .map(Directory::try_clone_file)
+            .collect::<Result<Vec<_>>>()
+            .map_err(|_| BrokerErrorCodeV1::Conflict)?;
+        let exclusions = retained.iter().collect::<Vec<_>>();
+        let workspace = self
+            .source
+            .prepare_named(&self.identity_hash, Limits::default(), &exclusions)
+            .map_err(|_| BrokerErrorCodeV1::Unavailable)?
+            .ok_or(BrokerErrorCodeV1::Conflict)?;
+        let digest = content_hash("ai-guard:workspace-manifest:v1", workspace.manifest())
+            .map_err(|_| BrokerErrorCodeV1::Unavailable)?;
+        if digest != self.manifest_hash {
+            return Err(BrokerErrorCodeV1::Conflict);
+        }
+        self.revalidate()?;
+        Ok(workspace)
+    }
+
+    fn revalidate(&self) -> Result<(), BrokerErrorCodeV1> {
+        self.registry_file
+            .revalidate()
+            .and_then(|()| self.registry_directory.revalidate())
+            .and_then(|()| self.broker_root.revalidate())
+            .and_then(|()| self.config.revalidate())
+            .map_err(|_| BrokerErrorCodeV1::Conflict)
+    }
 }
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
@@ -543,13 +597,7 @@ impl Registry {
             .find(|profile| profile.id == id)
             .ok_or_else(|| anyhow!("broker request is not authorized"))
     }
-    /// Retain the local source for the authenticated profile and exact target
-    /// selection. The caller supplies the scope and selection from Prepare.
-    pub(super) fn open_legacy_named_source(
-        &self,
-        scope: &JournalScopeV1,
-        target: SessionLaunchTargetSelectionV1,
-    ) -> Result<AuthorizedSource> {
+    fn profile_for_scope(&self, scope: &JournalScopeV1) -> Result<&ControlProfileV1> {
         let profile = self.profile(scope.profile_id())?;
         ensure!(
             scope.installation_id() == self.data.installation_id
@@ -558,7 +606,16 @@ impl Registry {
                 && scope.control_namespace_uuid() == profile.control_namespace_uuid,
             "named broker source scope does not match the operator profile"
         );
-        self.open_legacy_named_source_for_profile(profile, target)
+        Ok(profile)
+    }
+
+    #[cfg(test)]
+    fn open_legacy_named_source(
+        &self,
+        scope: &JournalScopeV1,
+        target: SessionLaunchTargetSelectionV1,
+    ) -> Result<AuthorizedSource> {
+        self.open_legacy_named_source_for_profile(self.profile_for_scope(scope)?, target)
     }
 
     fn open_legacy_named_source_for_profile(
@@ -581,18 +638,19 @@ impl Registry {
         Ok(source)
     }
 
-    /// Keep the archive from the single authorized collection whose manifest
-    /// matches the confirmed launch.
+    /// Derive the initial intention and pin its authorized source before any
+    /// workspace collection. The caller supplies the authenticated scope and
+    /// the broker's retained control root.
     #[allow(
         dead_code,
         reason = "the named broker preparation caller is a separate G04 integration"
     )]
-    pub(super) fn prepare_legacy_named_workspace(
+    pub(super) fn prepare_legacy_named_submission(
         &self,
         scope: &JournalScopeV1,
         material: &LegacyConfirmedLaunchSpecV1,
-        excluded_roots: &[&File],
-    ) -> std::result::Result<PreparedNamedWorkspace, BrokerErrorCodeV1> {
+        broker_root: &Directory,
+    ) -> Result<(PreparedSubmission, LegacyNamedSource), BrokerErrorCodeV1> {
         let plan = &material.plan;
         if plan.broker_profile_id != scope.profile_id()
             || plan.control_namespace_uuid != scope.control_namespace_uuid().to_string()
@@ -602,6 +660,35 @@ impl Registry {
         material
             .validate()
             .map_err(|_| BrokerErrorCodeV1::InvalidInput)?;
+        let profile = self
+            .profile_for_scope(scope)
+            .map_err(|_| BrokerErrorCodeV1::Forbidden)?;
+        let launch = &material.launch;
+        // Named intent and its journal cannot carry the Docker launch profile
+        // binding or controlled egress. Keep these operator choices explicit.
+        if self.data.version != 2
+            || self.start_profile(&profile.id) != PrearmedStartProfile::Legacy
+            || self.egress(&profile.id).is_some()
+            || profile.network != NetworkMode::None
+            || launch.network != NetworkV1::None
+            || launch.provider != "generic"
+            || launch.security_preset.is_interactive()
+        {
+            return Err(BrokerErrorCodeV1::IncompatibleControl);
+        }
+        let runtime = match profile.runtime {
+            RuntimeKind::Docker => RuntimeKindV1::Docker,
+            RuntimeKind::Podman => RuntimeKindV1::Podman,
+        };
+        if launch.profile != profile.policy_profile
+            || launch.runtime_kind != runtime
+            || launch.image_ref != profile.image
+            || launch.timeout_seconds > profile.max_timeout_seconds
+            || (launch.capture_output && !profile.allow_capture_output)
+            || broker_root.path() != self.data.root.as_path()
+        {
+            return Err(BrokerErrorCodeV1::Conflict);
+        }
         let expected_identity = material
             .source_identity_hash
             .as_deref()
@@ -610,22 +697,33 @@ impl Registry {
             SessionLaunchTargetSelectionV1::new(plan.launch_target_id, plan.target_revision)
                 .map_err(|_| BrokerErrorCodeV1::InvalidInput)?;
         let source = self
-            .open_legacy_named_source(scope, target)
+            .open_legacy_named_source_for_profile(profile, target)
             .map_err(|_| BrokerErrorCodeV1::Unavailable)?;
-        let workspace = source
-            .prepare_named(expected_identity, Limits::default(), excluded_roots)
-            .map_err(|_| BrokerErrorCodeV1::Unavailable)?
-            .ok_or(BrokerErrorCodeV1::Conflict)?;
-        let digest = content_hash("ai-guard:workspace-manifest:v1", workspace.manifest())
+        let identity_hash = source
+            .identity_hash()
             .map_err(|_| BrokerErrorCodeV1::Unavailable)?;
-        if digest != material.launch.workspace_manifest_digest {
+        if identity_hash != expected_identity {
             return Err(BrokerErrorCodeV1::Conflict);
         }
-        self.source
-            .revalidate()
-            .and_then(|()| self.source_directory.revalidate())
-            .map_err(|_| BrokerErrorCodeV1::Conflict)?;
-        Ok(workspace)
+        let config = Directory::open_existing(&profile.config_dir)
+            .map_err(|_| BrokerErrorCodeV1::Unavailable)?;
+        let mut options =
+            profile.source_options(&source, launch.timeout_seconds, launch.capture_output);
+        options.argv = launch.command.argv.clone();
+        let submission =
+            PreparedSubmission::from_legacy_named_launch(options, config.clone(), material)
+                .map_err(|_| BrokerErrorCodeV1::InvalidInput)?;
+        let source = LegacyNamedSource {
+            source,
+            identity_hash,
+            manifest_hash: launch.workspace_manifest_digest.clone(),
+            registry_file: self.source.clone(),
+            registry_directory: self.source_directory.clone(),
+            broker_root: broker_root.clone(),
+            config,
+        };
+        source.revalidate()?;
+        Ok((submission, source))
     }
 
     pub(super) fn start_profile(&self, id: &str) -> PrearmedStartProfile {
@@ -691,6 +789,39 @@ impl fmt::Debug for ControlProfileV1 {
     }
 }
 impl ControlProfileV1 {
+    fn source_options(
+        &self,
+        source: &AuthorizedSource,
+        timeout: u32,
+        capture_output: bool,
+    ) -> RunOptions {
+        RunOptions {
+            project: source.path().to_owned(),
+            config_dir: self.config_dir.clone(),
+            gateway: self.gateway.clone(),
+            runtime: self.runtime,
+            runtime_program: Some(self.runtime_program.clone()),
+            runtime_endpoint: Some(self.runtime_endpoint.clone()),
+            image: self.image.clone(),
+            profile: self.policy_profile.clone(),
+            network: self.network,
+            allow_rootful_runtime: self.allow_rootful_runtime,
+            timeout: u64::from(timeout),
+            provider: "generic".into(),
+            client: None,
+            auth_mode: None,
+            client_profile: None,
+            providers_file: None,
+            prompt: None,
+            model: None,
+            approve_hash: None,
+            capture_output,
+            interactive: false,
+            secret_env_file: None,
+            argv: Vec::new(),
+        }
+    }
+
     fn validate(&mut self, installation: Uuid, egress_resolver: Option<&Resolver>) -> Result<()> {
         let url = reqwest::Url::parse(&self.gateway)
             .map_err(|_| anyhow!("invalid broker gateway origin"))?;
@@ -857,31 +988,8 @@ impl SubmitV1 {
             !self.capture_output || profile.allow_capture_output,
             "capture is not enabled in broker profile"
         );
-        let mut options = RunOptions {
-            project: source.path().to_owned(),
-            config_dir: profile.config_dir.clone(),
-            gateway: profile.gateway.clone(),
-            runtime: profile.runtime,
-            runtime_program: Some(profile.runtime_program.clone()),
-            runtime_endpoint: Some(profile.runtime_endpoint.clone()),
-            image: profile.image.clone(),
-            profile: profile.policy_profile.clone(),
-            network: profile.network,
-            allow_rootful_runtime: profile.allow_rootful_runtime,
-            timeout: u64::from(timeout),
-            provider: "generic".into(),
-            client: None,
-            auth_mode: None,
-            client_profile: None,
-            providers_file: None,
-            prompt: None,
-            model: None,
-            approve_hash: None,
-            capture_output: self.capture_output,
-            interactive: false,
-            secret_env_file: profile.manual_credential_file.clone(),
-            argv: Vec::new(),
-        };
+        let mut options = profile.source_options(source, timeout, self.capture_output);
+        options.secret_env_file = profile.manual_credential_file.clone();
         match &self.execution {
             RequestedExecutionV1::Command { argv } => {
                 validate_command(argv).map_err(|_| anyhow!("invalid broker command"))?;
@@ -981,7 +1089,8 @@ mod tests {
                 LaunchSpecV1, NetworkV1, RestartPolicyV1, RuntimeKindV1, SecurityPresetV1,
                 session_control::LegacyConfirmedPlanV1,
             },
-            model::CommandSpec,
+            model::{CommandSpec, Outcome},
+            policy::{Policy, evaluate},
             workspace::{Fingerprint, Manifest, scan_workspace_archive},
         };
         use sha2::{Digest, Sha256};
@@ -993,7 +1102,7 @@ mod tests {
         std::fs::create_dir(&private)?;
         std::fs::set_permissions(&private, std::fs::Permissions::from_mode(0o700))?;
         std::fs::write(private.join("excluded.txt"), b"control fixture")?;
-        let excluded = File::open(&private)?;
+        let excluded = Directory::open_existing(&private)?;
         let manifest = Manifest::from([(
             "tracked.txt".into(),
             Fingerprint {
@@ -1002,16 +1111,23 @@ mod tests {
                 mode: Some(0o644),
             },
         )]);
+        let broker_root = Directory::open_or_create(&registry.data.root)?;
+        let profile = registry.profile(scope.profile_id())?;
+        let config = Directory::open_or_create(&profile.config_dir)?;
+        std::fs::write(
+            config.path().join("control.txt"),
+            b"private configuration fixture",
+        )?;
 
         let session = Uuid::new_v4();
         let launch = LaunchSpecV1 {
             version: 1,
             session_id: session.to_string(),
             command: CommandSpec {
-                argv: vec!["/usr/bin/id".into(), "-u".into()],
+                argv: vec!["echo".into(), "sandbox-ok".into()],
                 cwd: "/workspace".into(),
             },
-            profile: "strict".into(),
+            profile: profile.policy_profile.clone(),
             runtime_kind: RuntimeKindV1::Docker,
             authority_id: Uuid::new_v4().to_string(),
             image_ref: "worker:synthetic".into(),
@@ -1053,26 +1169,93 @@ mod tests {
             launch,
             source_identity_hash: Some(identity),
         };
-        let workspace = registry.prepare_legacy_named_workspace(scope, &material, &[&excluded])?;
-        assert_eq!(workspace.manifest(), &manifest);
-        material.version = 1;
-        let identity = material.source_identity_hash.take();
+        let prepare = |material: &LegacyConfirmedLaunchSpecV1| {
+            registry.prepare_legacy_named_submission(scope, material, &broker_root)
+        };
+        let (submission, authorized_source) = prepare(&material)?;
+        let options = submission.intent().initial_options().run_options();
+        assert_eq!(options.project.as_path(), source);
+        assert_eq!(options.config_dir, profile.config_dir);
+        assert_eq!(options.gateway, profile.gateway);
+        assert_eq!(options.runtime, profile.runtime);
+        assert_eq!(
+            options.runtime_program.as_ref(),
+            Some(&profile.runtime_program)
+        );
+        assert_eq!(
+            options.runtime_endpoint.as_ref(),
+            Some(&profile.runtime_endpoint)
+        );
+        assert_eq!(options.profile, material.launch.profile);
+        assert_eq!(options.image, material.launch.image_ref);
+        assert_eq!(options.timeout, u64::from(material.launch.timeout_seconds));
+        assert_eq!(options.capture_output, material.launch.capture_output);
+        assert_eq!(options.network, NetworkMode::None);
+        assert!(options.secret_env_file.is_none());
+        assert_eq!(options.argv, material.launch.command.argv);
+
+        // The initial request survives even when collecting the project
+        // would now fail. Decisions use the command confirmed by the gateway.
+        std::fs::write(&file, b"changed contents")?;
+        for (executable, expected) in [("", Outcome::Deny), ("/usr/bin/whoami", Outcome::Review)] {
+            let mut command = material.clone();
+            command.launch.command.argv = vec![executable.into()];
+            command.plan.launch_spec_hash = command.launch.spec_hash()?;
+            let (initial, _) = prepare(&command)?;
+            assert_eq!(
+                evaluate(&Policy::default(), initial.intent().request_data()).outcome,
+                expected
+            );
+        }
         assert!(matches!(
-            registry.prepare_legacy_named_workspace(scope, &material, &[&excluded]),
+            authorized_source.collect(std::slice::from_ref(&excluded)),
+            Err(BrokerErrorCodeV1::Conflict)
+        ));
+        std::fs::write(&file, contents)?;
+        let (_, authorized_source) = prepare(&material)?;
+        let workspace = authorized_source.collect(std::slice::from_ref(&excluded))?;
+        assert_eq!(workspace.manifest(), &manifest);
+
+        // An invalid profile or launch is refused even if its source is
+        // absent, so collecting could not have run before these checks.
+        let mut missing = material.clone();
+        missing.plan.launch_target_id = Uuid::new_v4();
+        let profile_conflicts: [fn(&mut LaunchSpecV1); 5] = [
+            |launch| launch.image_ref = "worker:other".into(),
+            |launch| launch.runtime_kind = RuntimeKindV1::Podman,
+            |launch| launch.timeout_seconds += 1,
+            |launch| launch.capture_output = true,
+            |launch| launch.profile = "strict".into(),
+        ];
+        for change in profile_conflicts {
+            let mut incompatible = missing.clone();
+            change(&mut incompatible.launch);
+            incompatible.plan.launch_spec_hash = incompatible.launch.spec_hash()?;
+            assert!(matches!(
+                prepare(&incompatible),
+                Err(BrokerErrorCodeV1::Conflict)
+            ));
+        }
+        missing.launch.profile = "observe".into();
+        missing.launch.network = NetworkV1::Bridge;
+        missing.plan.launch_spec_hash = missing.launch.spec_hash()?;
+        assert!(matches!(
+            prepare(&missing),
+            Err(BrokerErrorCodeV1::IncompatibleControl)
+        ));
+        material.version = 1;
+        material.source_identity_hash = None;
+        assert!(matches!(
+            prepare(&material),
             Err(BrokerErrorCodeV1::IncompatibleControl)
         ));
         material.version = 2;
         material.source_identity_hash = Some("d".repeat(64));
         assert!(matches!(
-            registry.prepare_legacy_named_workspace(scope, &material, &[&excluded]),
+            prepare(&material),
             Err(BrokerErrorCodeV1::Conflict)
         ));
-        material.source_identity_hash = identity;
         std::fs::write(&file, b"changed contents")?;
-        assert!(matches!(
-            registry.prepare_legacy_named_workspace(scope, &material, &[&excluded]),
-            Err(BrokerErrorCodeV1::Conflict)
-        ));
         let (_, workspace) = workspace.into_parts();
         let retained = scan_workspace_archive(workspace.archive.reopen()?, Limits::default())?;
         assert_eq!(retained, manifest);
@@ -1085,7 +1268,7 @@ mod tests {
             .permissions(std::fs::Permissions::from_mode(0o700))
             .tempdir()?;
         let base = temporary.path().canonicalize()?;
-        let directory = Directory::open_existing(&base)?;
+        let directory = Directory::open_or_create(&base.join("registry"))?;
         let source_root = base.join("source-not-opened");
         let first = source_root.join("first");
         let second = source_root.join("second");
@@ -1127,6 +1310,8 @@ mod tests {
         assert!(load(&wire).is_err());
         wire["version"] = json!(2);
         wire["profiles"][0]["prearmed_start_profile"] = json!({"version": 1, "mode": "legacy"});
+        wire["profiles"][0]["policy_profile"] = json!("review");
+        wire["profiles"][0]["config_dir"] = json!(first.join("broker-config"));
         wire["profiles"][0]["legacy_named_sources"] =
             json!([binding(1, &first), binding(2, &second), binding(3, &alias),]);
         let registry = load(&wire)?;
