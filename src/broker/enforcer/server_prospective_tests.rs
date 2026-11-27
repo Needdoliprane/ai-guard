@@ -132,6 +132,9 @@ async fn restore(root: &Directory, registration: &RegistrationV1) -> Response {
 fn expect_error(response: Response, wanted: EnforcerError) {
     assert!(matches!(response, Response::Error { code } if code == wanted));
 }
+fn expect_refusal(response: Response) {
+    assert!(matches!(response, Response::Error { .. }));
+}
 
 // Same validated unavailable-invocation shape as the historical S0 oracle.
 // Absence is checked before any native child spawn; it is not a fake Ready.
@@ -198,6 +201,54 @@ pub(super) fn registration(root: &Path) -> RegistrationV1 {
         receipt,
         authority,
         owned,
+    )
+    .unwrap()
+}
+
+fn named_import_registration(root: &Path) -> RegistrationV1 {
+    let base = registration(root);
+    let helper_id = base.owned.handle.operation_id().to_string();
+    let mut arm = base.arm.clone();
+    let admission_receipt = crate::control::MutationReceiptV1 {
+        operation_id: Uuid::new_v4().to_string(),
+        worker_id: Some(arm.worker_id.clone()),
+        revision: Some(1),
+        input_hash: "1".repeat(64),
+        audit_seq: 1,
+        audit_hash: "2".repeat(64),
+    };
+    arm.subject = ArmSubjectV1::Helper {
+        helper_id,
+        purpose: crate::control::HelperPurposeV1::Import,
+        policy_version: 1,
+        permission: Box::new(crate::control::HelperPermissionV1::Admission {
+            receipt: admission_receipt,
+        }),
+    };
+    arm.timeout_seconds = 120;
+    arm.deadline_ns_decimal = checked_deadline(
+        arm.clock.continuous_ns().unwrap(),
+        u64::from(arm.timeout_seconds),
+    )
+    .unwrap()
+    .to_string();
+    let receipt = ArmReceiptV1 {
+        version: 1,
+        arm_id: arm.operation_id.clone(),
+        worker_id: arm.worker_id.clone(),
+        attempt_id: arm.attempt_id.clone(),
+        input_hash: arm.input_hash().unwrap(),
+        control_namespace_uuid: Uuid::new_v4().to_string(),
+        audit_seq: 2,
+        audit_hash: "3".repeat(64),
+    };
+    RegistrationV1::new(
+        base.control_origin_hash,
+        base.tenant_id,
+        arm,
+        receipt,
+        base.authority,
+        base.owned,
     )
     .unwrap()
 }
@@ -496,6 +547,207 @@ async fn exercise(mode: &str, parent: &Directory) {
         drop(pending_state);
         server.abort();
         return;
+    }
+    if mode == "named_reconnect" {
+        // Every rpc() opens a fresh authenticated IPC connection. A owns the
+        // reservation custody; B represents a reconnect with a different
+        // custody nonce while the same guardian and native owner remain live.
+        let first = named_import_registration(root.path());
+        let custody_a = Uuid::new_v4();
+        let custody_b = Uuid::new_v4();
+        let reserved = match rpc(
+            &root,
+            Request::ReserveNamedProspective {
+                prospective: Box::new(first.prospective().unwrap()),
+                generation: 0,
+                custody_nonce: custody_a,
+            },
+        )
+        .await
+        {
+            Response::ProspectiveReserved { reservation } => reservation,
+            _ => panic!("A's named reserve must retain the native target"),
+        };
+        let pending = native.pending(&reserved).unwrap();
+        assert!(pending.runtime_installed.load(Ordering::SeqCst));
+
+        // Reconnected B cannot claim the same target through either the
+        // named protocol with a different custody nonce or any legacy port.
+        expect_error(
+            rpc(
+                &root,
+                Request::ReserveNamedProspective {
+                    prospective: Box::new(first.prospective().unwrap()),
+                    generation: 0,
+                    custody_nonce: custody_b,
+                },
+            )
+            .await,
+            EnforcerError::Conflict,
+        );
+        expect_error(
+            rpc(
+                &root,
+                Request::BeginNamedProspectiveArmExchange {
+                    reservation: reserved.clone(),
+                    generation: 0,
+                    custody_nonce: custody_b,
+                },
+            )
+            .await,
+            EnforcerError::Conflict,
+        );
+        expect_error(
+            rpc(
+                &root,
+                Request::BindNamedProspective {
+                    reservation: reserved.clone(),
+                    registration: Box::new(first.clone()),
+                    generation: 0,
+                    original_exchange_nonce: Uuid::new_v4(),
+                    custody_nonce: custody_b,
+                },
+            )
+            .await,
+            EnforcerError::Conflict,
+        );
+        expect_refusal(
+            rpc(
+                &root,
+                Request::ReserveProspective {
+                    prospective: Box::new(first.prospective().unwrap()),
+                    generation: 0,
+                    replay_only: false,
+                },
+            )
+            .await,
+        );
+        expect_refusal(
+            rpc(
+                &root,
+                Request::BeginProspectiveArmExchange {
+                    reservation: reserved.clone(),
+                    generation: 0,
+                },
+            )
+            .await,
+        );
+        expect_refusal(
+            rpc(
+                &root,
+                Request::BindProspective {
+                    reservation: reserved.clone(),
+                    registration: Box::new(first.clone()),
+                    generation: 0,
+                    observe_only: false,
+                    original_exchange_nonce: Some(Uuid::new_v4()),
+                },
+            )
+            .await,
+        );
+        expect_refusal(
+            rpc(
+                &root,
+                Request::CancelProspective {
+                    reservation: reserved.clone(),
+                    generation: 0,
+                },
+            )
+            .await,
+        );
+        expect_refusal(
+            rpc(
+                &root,
+                Request::Register {
+                    registration: Box::new(first.clone()),
+                    generation: 0,
+                    observe_only: true,
+                },
+            )
+            .await,
+        );
+        expect_refusal(
+            rpc(
+                &root,
+                Request::Register {
+                    registration: Box::new(first.clone()),
+                    generation: 0,
+                    observe_only: false,
+                },
+            )
+            .await,
+        );
+
+        // In particular, legacy Register must not turn the retry into the
+        // guardian-wide recovery path or consume A's one-shot exchange.
+        assert!(!pending.state.lock().unwrap().stop_reserved);
+        assert!(matches!(
+            pending.state.lock().unwrap().exchange,
+            ExchangePhase::NotIssued
+        ));
+
+        let original_exchange_nonce = match rpc(
+            &root,
+            Request::BeginNamedProspectiveArmExchange {
+                reservation: reserved.clone(),
+                generation: 0,
+                custody_nonce: custody_a,
+            },
+        )
+        .await
+        {
+            Response::ProspectiveArmExchange {
+                original_exchange_nonce: Some(nonce),
+            } => nonce,
+            _ => panic!("A retains the original one-shot Begin after B's reconnect"),
+        };
+        expect_error(
+            rpc(
+                &root,
+                Request::BindNamedProspective {
+                    reservation: reserved.clone(),
+                    registration: Box::new(first.clone()),
+                    generation: 0,
+                    original_exchange_nonce,
+                    custody_nonce: custody_b,
+                },
+            )
+            .await,
+            EnforcerError::Conflict,
+        );
+        assert!(!pending.state.lock().unwrap().stop_reserved);
+        assert!(matches!(
+            rpc(
+                &root,
+                Request::BindNamedProspective {
+                    reservation: reserved,
+                    registration: Box::new(first),
+                    generation: 0,
+                    original_exchange_nonce,
+                    custody_nonce: custody_a,
+                },
+            )
+            .await,
+            Response::Registered { .. }
+        ));
+
+        // The global historical recovery fence closes admission but must not
+        // commandeer a named prospect or its bound slot. Its native deadline
+        // continues to be owned by the same guardian independently.
+        assert!(matches!(
+            rpc(&root, Request::BeginRecovery {}).await,
+            Response::RecoveryBegun { generation: 1 }
+        ));
+        assert!(!pending.state.lock().unwrap().stop_reserved);
+        assert!(
+            pending
+                .state
+                .lock()
+                .unwrap()
+                .bound
+                .as_ref()
+                .is_some_and(|actor| !actor.stop.load(Ordering::SeqCst))
+        );
     }
     if mode == "deadline" {
         let mut expiring = first;
@@ -942,6 +1194,10 @@ fn native_prearm_s1_is_reserved_before_ack_and_counts_idle() {
 #[test]
 fn lost_begin_and_absent_replay_never_recreate_original() {
     run_child("lost_begin");
+}
+#[test]
+fn named_guardian_custody_survives_authenticated_reconnect() {
+    run_child("named_reconnect");
 }
 #[test]
 fn bind_keeps_actual_thread_runtime_key_and_failure_custody() {
