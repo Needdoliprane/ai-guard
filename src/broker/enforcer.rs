@@ -7,6 +7,11 @@ mod client;
 mod diagnostics;
 mod execution;
 pub(crate) mod ledger;
+#[allow(
+    dead_code,
+    reason = "the live named STOP dispatch is composed separately"
+)]
+mod legacy_named_stop;
 mod native_stop_failure;
 mod recovery;
 pub(crate) mod retirement;
