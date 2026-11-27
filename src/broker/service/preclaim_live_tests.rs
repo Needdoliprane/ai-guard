@@ -37,7 +37,9 @@ const SIGNAL: &str = "broker.abandon-before-claim.requested";
 #[derive(Default)]
 struct Delivery {
     fail_first_signal: AtomicBool,
+    control_event_posts: AtomicUsize,
     signal_posts: AtomicUsize,
+    injected_503: AtomicUsize,
     payloads: Mutex<Vec<Vec<u8>>>,
 }
 struct OwnedGateway {
@@ -71,6 +73,7 @@ impl OwnedGateway {
                     {
                         return next.run(request).await;
                     }
+                    delivery.control_event_posts.fetch_add(1, Ordering::SeqCst);
                     let (parts, body) = request.into_parts();
                     let bytes = match axum::body::to_bytes(body, 128 * 1024).await {
                         Ok(bytes) => bytes,
@@ -91,6 +94,7 @@ impl OwnedGateway {
                             payloads.push(bytes.to_vec());
                         }
                         if delivery.fail_first_signal.swap(false, Ordering::SeqCst) {
+                            delivery.injected_503.fetch_add(1, Ordering::SeqCst);
                             // Owned, bounded transport fault before SQLite commit.
                             // Every successful retry reaches the real gateway router.
                             return axum::response::IntoResponse::into_response(
@@ -361,14 +365,31 @@ async fn run_producer(
             "refused credential mutated preclaim or audit"
         );
     }
+    let control_posts_before = delivery.control_event_posts.load(Ordering::SeqCst);
+    let signal_posts_before = delivery.signal_posts.load(Ordering::SeqCst);
+    let injected_503_before = delivery.injected_503.load(Ordering::SeqCst);
+    let first_signal = service
+        .dispatch(envelope(scope.profile_id(), RUNNER, &signal)?)
+        .await;
+    let first_signal_status = match &first_signal {
+        Ok(_) => "Ok".to_owned(),
+        Err(code) => format!("Err({code:?})"),
+    };
+    let control_posts = delivery
+        .control_event_posts
+        .load(Ordering::SeqCst)
+        .saturating_sub(control_posts_before);
+    let signal_posts = delivery
+        .signal_posts
+        .load(Ordering::SeqCst)
+        .saturating_sub(signal_posts_before);
+    let injected_503 = delivery
+        .injected_503
+        .load(Ordering::SeqCst)
+        .saturating_sub(injected_503_before);
     ensure!(
-        matches!(
-            service
-                .dispatch(envelope(scope.profile_id(), RUNNER, &signal)?)
-                .await,
-            Err(BrokerErrorCodeV1::Unavailable)
-        ),
-        "first real signal HTTP503 was not reported unavailable"
+        matches!(first_signal, Err(BrokerErrorCodeV1::Unavailable)),
+        "phase=preclaim_first_signal_dispatch status={first_signal_status} control_route_posts={control_posts} preclaim_kind_posts={signal_posts} injected_503={injected_503}"
     );
     let view = local.preclaim.arm_view(arm);
     ensure!(
