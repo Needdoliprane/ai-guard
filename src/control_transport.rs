@@ -273,7 +273,10 @@ pub fn control_route(method: &Method, path: &str) -> Option<ControlRouteIdentity
                 "import-claim",
                 "reconcile",
             ],
-        ) if v1 && crate::control::session_control::canonical_uuid(id).is_ok() => {
+        ) if v1
+            && crate::control::session_control::canonical_uuid(id)
+                .is_ok_and(|binding| !binding.is_nil()) =>
+        {
             Some(BrokerSession)
         }
         // Proposed owned broker-supervision targets (`OwnedBrokerOperationV2`).
