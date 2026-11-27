@@ -17,7 +17,9 @@ use crate::{
     },
     model::{CommandSpec, DecisionRequest},
     policy::{self, Policy},
-    workload::{WorkloadBindingIssueV1, WorkloadSubjectV1},
+    workload::{
+        AuthenticatedWorkload, WorkloadBindingIssueV1, WorkloadFailureV1, WorkloadSubjectV1,
+    },
 };
 use sha2::{Digest, Sha256};
 use std::{os::unix::fs::PermissionsExt, path::Path};
@@ -282,16 +284,28 @@ async fn confirmed_plan_is_private_and_requires_current_initiator() {
     use std::sync::Arc;
     use tower::ServiceExt;
 
+    const HUMAN_DEADLINE: &str = "2126-02-01T00:00:00Z";
+
     let fixture = Fixture::new();
+    let proof = || LegacySessionLocalProof {
+        context_expires_at: HUMAN_DEADLINE,
+        ..fixture.proof()
+    };
     let prepared = fixture
         .store
-        .legacy_session_prepare_local(fixture.proof(), fixture.request())
+        .legacy_session_prepare_local(
+            proof(),
+            SessionLaunchPrepareRequestV1 {
+                expires_at: HUMAN_DEADLINE.into(),
+                ..fixture.request()
+            },
+        )
         .unwrap();
     let operation_id = Uuid::new_v4();
     let confirmation = fixture
         .store
         .legacy_session_confirm_local(
-            fixture.proof(),
+            proof(),
             SessionLaunchRequestV1 {
                 version: 1,
                 operation_id,
@@ -377,8 +391,32 @@ async fn confirmed_plan_is_private_and_requires_current_initiator() {
     assert_eq!(context.launch_spec_hash, launch.spec_hash().unwrap());
     assert_eq!(
         context.expires_at,
-        crate::broker_registry::parse_time(DEADLINE).unwrap()
+        crate::broker_registry::parse_time(HUMAN_DEADLINE).unwrap()
     );
+    {
+        let Some(AuthenticatedWorkload::Broker(broker)) =
+            store.authenticate_workload_token(BROKER_TOKEN).unwrap()
+        else {
+            panic!("expected the retained broker binding and grant");
+        };
+        let mut db = store.db.lock().unwrap();
+        let tx = store.begin_checked(&mut db).unwrap();
+        let clock = workload::capture_control_time(&tx).unwrap();
+        let resolved = store
+            .resolve_legacy_confirmed_plan(&tx, &broker, context.binding_ref, &clock)
+            .unwrap();
+        let deadline = crate::broker_registry::parse_time(DEADLINE).unwrap();
+        assert_eq!(resolved.broker_deadline, deadline);
+        assert!(deadline < resolved.plan.expires_at);
+        store.commit_authorized(tx, &clock).unwrap();
+        assert_eq!(
+            resolved
+                .release_at(deadline)
+                .unwrap_err()
+                .downcast_ref::<WorkloadFailureV1>(),
+            Some(&WorkloadFailureV1::Unauthorized)
+        );
+    }
     assert_eq!(store.head().unwrap(), before);
 
     store

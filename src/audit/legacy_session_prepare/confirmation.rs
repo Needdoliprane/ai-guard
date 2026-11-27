@@ -99,6 +99,17 @@ struct ResolvedLegacyConfirmedPlan {
     broker_deadline: DateTime<Utc>,
 }
 
+impl ResolvedLegacyConfirmedPlan {
+    fn release_at(self, now: DateTime<Utc>) -> anyhow::Result<LegacyConfirmedPlanV1> {
+        anyhow::ensure!(now < self.plan.expires_at, ControlFailure::NotFound);
+        anyhow::ensure!(
+            workload::canonical_control_time(now)? < self.broker_deadline,
+            crate::workload::WorkloadFailureV1::Unauthorized
+        );
+        Ok(self.plan)
+    }
+}
+
 fn confirmed_plan(
     binding_ref: Uuid,
     record: &Confirmed,
@@ -530,12 +541,9 @@ impl Store {
             ControlFailure::MigrationRequired
         );
         let clock = workload::capture_control_time(&tx)?;
-        let plan = self
-            .resolve_legacy_confirmed_plan(&tx, broker, binding_ref, &clock)?
-            .plan;
+        let resolved = self.resolve_legacy_confirmed_plan(&tx, broker, binding_ref, &clock)?;
         self.commit_authorized(tx, &clock)?;
-        anyhow::ensure!(plan.expires_at > Utc::now(), ControlFailure::NotFound);
-        Ok(plan)
+        resolved.release_at(Utc::now())
     }
 
     fn resolve_legacy_confirmed_plan(
