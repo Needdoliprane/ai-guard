@@ -1,0 +1,223 @@
+name: G07 worker image SessionStart ACK Linux QA
+
+'on':
+  push:
+    branches: [codex/g07-image-session-start-ack-qa-20261128]
+    paths: [.github/workflows/g07-worker-image-session-start-linux-qa.yaml]
+
+permissions:
+  contents: read
+
+jobs:
+  worker-image:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      SOURCE_SHA: c47a7ea8b145996435a6790a1776efe61905a909
+      SOURCE_TREE: 201e224881b70efb2e90dbc91e142ffcc4177c82
+      IMAGE_TEST_BLOB: 750d37b2235ab3ffb59ad9e57bdb6606fb14b1e8
+      WORKER_DOCKERFILE_BLOB: e40ffb72f09ec3797bf80d31494ba1d81a2c43f7
+      ACTIVITY_HELPER_BLOB: 69a5a655ae476e94aa2fab8e2b8fd7877cdf2921
+      ACTIVITY_WIRE_BLOB: 444ae8ed3722d10e2f3d78a9cf2cd9e5ff8d2076
+      ACTIVITY_API_BLOB: dbd92b9456d5f72b5c0a2d7f2ab902eb3a606a11
+      ACTIVITY_COLLECTOR_BLOB: 0604d403b6c867a05d12b58fa59d57decbae6dc8
+      ACTIVITY_SPOOL_BLOB: afee0af9ae7a75a5995d99ef591ce706236e3bfe
+      ACTIVITY_HOOKS_BLOB: 2d646b2a3a17c01c29d2f2006b23d1f614036a2c
+      CARGO_TOML_BLOB: c9f4c074ac92353e5132af300f3abd000c2d6460
+      CARGO_LOCK_BLOB: fb0169055947cae6f1e7d64714f89c7a1b52a69c
+      CARGO_BUILD_JOBS: '1'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      CARGO_TERM_COLOR: never
+      DOCKER_HOST: unix:///var/run/docker.sock
+      RUST_MIN_STACK: '8388608'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          persist-credentials: false
+
+      - name: Build one provider-empty worker image and run the exact ACK test
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          selector=production_image_session_start_is_spooled_before_recorded_ack
+
+          report_not_run() {
+            printf 'test=%s status=NOT_RUN\n' "$selector"
+          }
+
+          if [[ "$(git rev-parse HEAD 2>/dev/null)" != "$SOURCE_SHA" ||
+                "$(git rev-parse 'HEAD^{tree}' 2>/dev/null)" != "$SOURCE_TREE" ||
+                "$(git rev-parse HEAD:tests/worker_activity_image_session_start.rs 2>/dev/null)" != "$IMAGE_TEST_BLOB" ||
+                "$(git rev-parse HEAD:images/worker.Dockerfile 2>/dev/null)" != "$WORKER_DOCKERFILE_BLOB" ||
+                "$(git rev-parse HEAD:src/activity_channel/helper.rs 2>/dev/null)" != "$ACTIVITY_HELPER_BLOB" ||
+                "$(git rev-parse HEAD:src/activity_channel/wire.rs 2>/dev/null)" != "$ACTIVITY_WIRE_BLOB" ||
+                "$(git rev-parse HEAD:src/provider_activity/mod.rs 2>/dev/null)" != "$ACTIVITY_API_BLOB" ||
+                "$(git rev-parse HEAD:src/provider_activity/collector.rs 2>/dev/null)" != "$ACTIVITY_COLLECTOR_BLOB" ||
+                "$(git rev-parse HEAD:src/provider_activity/spool.rs 2>/dev/null)" != "$ACTIVITY_SPOOL_BLOB" ||
+                "$(git rev-parse HEAD:src/provider_activity/hooks.rs 2>/dev/null)" != "$ACTIVITY_HOOKS_BLOB" ||
+                "$(git rev-parse HEAD:Cargo.toml 2>/dev/null)" != "$CARGO_TOML_BLOB" ||
+                "$(git rev-parse HEAD:Cargo.lock 2>/dev/null)" != "$CARGO_LOCK_BLOB" ]]; then
+            printf 'source=FAIL\n'
+            report_not_run
+            exit 1
+          fi
+          printf 'source=PASS\nsource_sha=%s\nsource_tree=%s\nimage_test_blob=%s\nworker_dockerfile_blob=%s\n' \
+            "$SOURCE_SHA" "$SOURCE_TREE" "$IMAGE_TEST_BLOB" "$WORKER_DOCKERFILE_BLOB"
+          export AI_GUARD_BUILD_REVISION="$SOURCE_SHA"
+
+          unset DOCKER_CONTEXT DOCKER_TLS_VERIFY DOCKER_CERT_PATH
+          if [[ "$DOCKER_HOST" != 'unix:///var/run/docker.sock' || ! -S /var/run/docker.sock ]]; then
+            printf 'daemon=FAIL\ndaemon_scope=not_job_local_unix_socket\n'
+            report_not_run
+            exit 1
+          fi
+          docker_bin=$(command -v docker || true)
+          if [[ -z "$docker_bin" || "$docker_bin" != /* || ! -x "$docker_bin" ]]; then
+            printf 'daemon=FAIL\ndaemon_scope=missing_docker_cli\n'
+            report_not_run
+            exit 1
+          fi
+
+          scratch=$(mktemp -d "${RUNNER_TEMP:-/tmp}/aig-g07-worker-image.XXXXXX")
+          chmod 700 "$scratch"
+          mkdir -m 700 "$scratch/target" "$scratch/tmp"
+          export CARGO_TARGET_DIR="$scratch/target"
+          export TMPDIR="$scratch/tmp"
+          mkdir -m 700 "$scratch/docker-config"
+          export DOCKER_CONFIG="$scratch/docker-config"
+          image_tag="ai-guard-g07-session-start-qa:run-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+
+          cleanup() {
+            rc=$?
+            trap - EXIT
+            set +e
+            "$docker_bin" ps -aq --filter 'name=^/ai-guard-activity-' 2>/dev/null \
+              | xargs -r "$docker_bin" rm --force >/dev/null 2>&1
+            "$docker_bin" image rm --force "$image_tag" >/dev/null 2>&1
+            rm -rf -- "$scratch"
+            exit "$rc"
+          }
+          trap cleanup EXIT
+
+          if ! "$docker_bin" info >/dev/null 2>"$scratch/daemon.log"; then
+            printf 'daemon=FAIL\ndaemon_scope=job_local_daemon_unavailable\n'
+            report_not_run
+            exit 1
+          fi
+          printf 'daemon=PASS\ndaemon_scope=github_hosted_job\n'
+
+          build_json="$scratch/build.jsonl"
+          build_rc=0
+          cargo test --locked --no-default-features \
+            --test worker_activity_image_session_start --no-run \
+            --message-format=json >"$build_json" 2>"$scratch/cargo.stderr" || build_rc=$?
+          if [[ "$build_rc" != 0 ]]; then
+            printf 'harness=FAIL\nharness_exit=%s\n' "$build_rc"
+            jq -Rr 'fromjson? | objects
+              | select(.reason == "compiler-message" and .message.level == "error")
+              | .message.code.code // empty | strings | select(test("\\AE[0-9]{4}\\z"))
+              | "compiler_error=" + .' "$build_json" 2>/dev/null | sort -u || true
+            report_not_run
+            exit 1
+          fi
+          printf 'harness=PASS\n'
+
+          if ! harness=$(jq -ers '[.[] | select(.reason == "compiler-artifact"
+              and .target.name == "worker_activity_image_session_start"
+              and .target.kind == ["test"] and .profile.test == true
+              and (.executable | type) == "string") | .executable]
+              | unique | select(length == 1) | .[0]' "$build_json" 2>/dev/null) ||
+              [[ "$harness" != "$CARGO_TARGET_DIR"/debug/deps/worker_activity_image_session_start-* ||
+                 ! -f "$harness" || ! -x "$harness" || -L "$harness" ]]; then
+            printf 'harness=FAIL\n'
+            report_not_run
+            exit 1
+          fi
+          harness_hash=$(sha256sum -- "$harness")
+          harness_sha=${harness_hash%% *}
+          if [[ ! "$harness_sha" =~ ^[0-9a-f]{64}$ ]]; then
+            printf 'harness=FAIL\n'
+            report_not_run
+            exit 1
+          fi
+          printf 'harness_sha256=%s\n' "$harness_sha"
+
+          image_rc=0
+          unset HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY \
+            http_proxy https_proxy all_proxy no_proxy DOCKER_AUTH_CONFIG
+          env -u OPENAI_API_KEY -u ANTHROPIC_API_KEY -u CODEX_API_KEY \
+            -u CLAUDE_CODE_OAUTH_TOKEN "$docker_bin" build --pull --progress=plain \
+            --file images/worker.Dockerfile --tag "$image_tag" \
+            --build-arg CODEX_VERSION= \
+            --build-arg CLAUDE_CODE_VERSION= \
+            --build-arg CLAUDE_ACTIVITY_PROFILE= \
+            --build-arg AI_GUARD_VERSION= \
+            --build-arg "AI_GUARD_BUILD_ID=g07-image-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            --build-arg "AI_GUARD_BUILD_REVISION=$SOURCE_SHA" \
+            . >"$scratch/image-build.log" 2>&1 || image_rc=$?
+          if [[ "$image_rc" != 0 ]]; then
+            printf 'image_build=FAIL\nimage_build_exit=%s\n' "$image_rc"
+            if rg -q 'No space left on device|no space left on device' "$scratch/image-build.log"; then
+              printf 'image_build_failure=disk_space\n'
+            elif rg -q 'could not resolve host|TLS handshake timeout|connection timed out' "$scratch/image-build.log"; then
+              printf 'image_build_failure=base_or_package_network\n'
+            elif rg -q 'error: could not compile|error\[E[0-9]+\]' "$scratch/image-build.log"; then
+              printf 'image_build_failure=rust_source_or_compile\n'
+            else
+              printf 'image_build_failure=unclassified\n'
+            fi
+            report_not_run
+            exit 1
+          fi
+          printf 'image_build=PASS\nprovider_versions=empty\nclaude_activity_profile=empty\n'
+
+          image_id=$("$docker_bin" image inspect --format '{{.Id}}' "$image_tag" 2>"$scratch/image-inspect.stderr") || {
+            printf 'image_inspect=FAIL\n'
+            report_not_run
+            exit 1
+          }
+          if [[ ! "$image_id" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            printf 'image_inspect=FAIL\n'
+            report_not_run
+            exit 1
+          fi
+          printf 'image_id=%s\n' "$image_id"
+
+          test_log="$scratch/test.log"
+          test_rc=0
+          env -u OPENAI_API_KEY -u ANTHROPIC_API_KEY -u CODEX_API_KEY \
+            -u CLAUDE_CODE_OAUTH_TOKEN \
+            AI_GUARD_TEST_WORKER_IMAGE="$image_tag" \
+            AI_GUARD_TEST_DOCKER_BIN="$docker_bin" \
+            "$harness" --ignored --exact "$selector" --test-threads=1 \
+            --color never --show-output >"$test_log" 2>&1 || test_rc=$?
+
+          if [[ "$test_rc" == 0 ]] &&
+              grep -Fqx 'running 1 test' "$test_log" &&
+              grep -Fqx "test $selector ... ok" "$test_log" &&
+              grep -Eq '^test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; [0-9]+ filtered out;' "$test_log"; then
+            printf 'test=%s status=PASS\ntest_exit=0\ntest_pass_count=1\ntest_fail_count=0\n' "$selector"
+          else
+            printf 'test=%s status=FAIL\ntest_exit=%s\n' "$selector" "$test_rc"
+            if grep -Fq 'provider command claude is installed' "$test_log" ||
+                grep -Fq 'provider command codex is installed' "$test_log" ||
+                grep -Fq 'test image must not install' "$test_log"; then
+              printf 'test_failure=provider_not_empty\n'
+            elif grep -Fq 'SessionStart was not acknowledged as recorded' "$test_log"; then
+              printf 'test_failure=ack_order_or_status\n'
+            elif grep -Fq 'successful ACK left a loss marker' "$test_log"; then
+              printf 'test_failure=loss_marker_after_ack\n'
+            elif grep -Fq 'image helper frame exceeded its deadline' "$test_log" ||
+                grep -Fq 'image activity test timed out' "$test_log"; then
+              printf 'test_failure=deadline\n'
+            elif [[ "$test_rc" == 0 ]] && grep -Fqx 'running 0 tests' "$test_log"; then
+              printf 'test_failure=selector\n'
+            else
+              printf 'test_failure=unclassified\n'
+            fi
+            exit 1
+          fi
