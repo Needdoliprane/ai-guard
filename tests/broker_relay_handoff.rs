@@ -37,18 +37,57 @@ async fn with_fixture(
     worker_timeout: u32,
     scenario: impl AsyncFnOnce(&mut Fixture) -> Result<()>,
 ) -> Result<()> {
-    let mut fixture = Fixture::new(worker_timeout).await?;
-    let exercise = timeout(EXERCISE_TIMEOUT, scenario(&mut fixture))
-        .await
+    run_fixture(worker_timeout, scenario, false).await
+}
+
+async fn run_fixture(
+    worker_timeout: u32,
+    scenario: impl AsyncFnOnce(&mut Fixture) -> Result<()>,
+    trace_missing_receipt: bool,
+) -> Result<()> {
+    if trace_missing_receipt {
+        println!("phase=handoff_progress step=fixture_start");
+    }
+    let startup = Fixture::new(worker_timeout).await;
+    if trace_missing_receipt && startup.is_err() {
+        println!(
+            "phase=handoff_outcome startup={} exercise=not_started cleanup=unobserved",
+            fixture_result_category(&startup),
+        );
+    }
+    let mut fixture = startup?;
+    let exercise = timeout(EXERCISE_TIMEOUT, scenario(&mut fixture)).await;
+    let exercise_category = match &exercise {
+        Ok(result) => fixture_result_category(result),
+        Err(_) => "outer_timeout",
+    };
+    let exercise = exercise
         .context("Handoff fixture exercise deadline")
         .and_then(|result| result);
+    if trace_missing_receipt {
+        println!("phase=handoff_progress step=fixture_close");
+    }
     let cleanup = fixture.close().await;
+    if trace_missing_receipt {
+        println!(
+            "phase=handoff_outcome startup=passed exercise={exercise_category} cleanup={}",
+            fixture_result_category(&cleanup),
+        );
+    }
     match (exercise, cleanup) {
         (Ok(()), Ok(())) => Ok(()),
         (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
         (Err(error), Err(cleanup)) => {
             Err(error.context(format!("owned fixture cleanup also failed: {cleanup:#}")))
         }
+    }
+}
+
+fn fixture_result_category<T>(result: &Result<T>) -> &'static str {
+    match result {
+        Ok(_) => "passed",
+        Err(error) if error.is::<tokio::time::error::Elapsed>() => "timeout",
+        Err(_) => "error",
     }
 }
 
@@ -610,7 +649,7 @@ async fn scoped_relay_ipc(fixture: &mut Fixture) -> Result<()> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn software_broker_missing_receipt_expires_under_original_arm_without_exec() -> Result<()> {
-    with_fixture(12, missing_receipt_expiry).await
+    run_fixture(12, missing_receipt_expiry, true).await
 }
 
 async fn report_missing_receipt_wait_failure(
@@ -702,7 +741,9 @@ async fn report_missing_receipt_wait_failure(
 }
 
 async fn missing_receipt_expiry(fixture: &mut Fixture) -> Result<()> {
+    println!("phase=handoff_progress step=submit");
     let job = fixture.submit("a", 12).await?;
+    println!("phase=handoff_progress step=wait_endpoint");
     let endpoint = match fixture.wait_endpoint(job).await {
         Ok(endpoint) => endpoint,
         Err(error) => {
@@ -717,12 +758,14 @@ async fn missing_receipt_expiry(fixture: &mut Fixture) -> Result<()> {
             return Err(error.context("phase=handoff_wait_endpoint"));
         }
     };
+    println!("phase=handoff_progress step=read_original_fact");
     let fact = fixture.latest_fact(job)?;
     let original: HostClockSampleV1 = serde_json::from_value(fact["original_clock"].clone())?;
     let deadline: u128 = fact["original_deadline_ns_decimal"]
         .as_str()
         .context("original Arm absolute deadline")?
         .parse()?;
+    println!("phase=handoff_progress step=check_original_arm");
     let clock = NativeHostClock::new()?;
     let before = clock.sample()?;
     ensure!(
@@ -734,6 +777,7 @@ async fn missing_receipt_expiry(fixture: &mut Fixture) -> Result<()> {
         before_ns < deadline,
         "fixture must reach Awaiting within its original budget"
     );
+    println!("phase=handoff_progress step=wait_worker_terminal");
     if let Err(error) = worker_terminal(&fixture.a, &endpoint).await {
         report_missing_receipt_wait_failure(
             fixture,
@@ -745,6 +789,7 @@ async fn missing_receipt_expiry(fixture: &mut Fixture) -> Result<()> {
         .await;
         return Err(error.context("phase=handoff_worker_terminal"));
     }
+    println!("phase=handoff_progress step=check_terminal_arm");
     let after = clock.sample()?;
     let after_ns: u128 = after.continuous_ns_decimal.parse()?;
     ensure!(
@@ -754,16 +799,20 @@ async fn missing_receipt_expiry(fixture: &mut Fixture) -> Result<()> {
             && after_ns - deadline < 8_000_000_000,
         "missing receipt must stop under the original monotone deadline"
     );
+    println!("phase=handoff_progress step=read_final_fact");
     let final_fact = fixture.latest_fact(job)?;
+    println!("phase=handoff_progress step=check_retained_arm");
     ensure!(
         final_fact["original_clock"] == fact["original_clock"]
             && final_fact["original_deadline_ns_decimal"] == fact["original_deadline_ns_decimal"],
         "polls and cleanup cannot renew the Arm"
     );
+    println!("phase=handoff_progress step=check_no_exec");
     ensure!(
         fixture.exec_count().await == 0 && fixture.committed_claims()? == 0,
         "absent issued material never authorizes exec"
     );
+    println!("phase=handoff_progress step=check_no_auto_provision");
     ensure!(
         !fixture.operations[0].exists() && !fixture.operations[1].exists(),
         "the product does not auto-provision credentials while awaiting"
