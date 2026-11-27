@@ -355,6 +355,65 @@ impl LegacyNamedImportArmRequestV1 {
     }
 }
 
+/// The exact claim for the Import helper of one named Legacy launch. The
+/// retained Arm and current broker/initiator authority are resolved by Core.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct LegacyNamedImportClaimRequestV1 {
+    pub(crate) version: u32,
+    pub(crate) binding_ref: Uuid,
+    pub(crate) namespace: String,
+    pub(crate) claim: super::HelperStartClaimV1,
+}
+
+impl LegacyNamedImportClaimRequestV1 {
+    pub(crate) fn operation_id(binding_ref: Uuid, arm_id: Uuid) -> String {
+        let domain = format!("ai-guard:legacy-named-import-claim-operation:v1:{binding_ref}");
+        crate::model::bound_event_id(domain.as_bytes(), arm_id)
+    }
+
+    pub(crate) fn validate(&self) -> anyhow::Result<()> {
+        invalid(self.version == 1 && !self.binding_ref.is_nil())?;
+        canonical_uuid(&self.namespace)?;
+        self.claim.validate()?;
+        let receipt = &self.claim.arm_receipt;
+        invalid(
+            receipt.control_namespace_uuid == self.namespace
+                && self.claim.operation_id
+                    == Self::operation_id(self.binding_ref, canonical_uuid(&receipt.arm_id)?),
+        )
+    }
+
+    pub(crate) fn validate_for_arm(
+        &self,
+        binding_ref: Uuid,
+        namespace: &str,
+        arm: &super::ArmV1,
+        receipt: &super::ArmReceiptV1,
+    ) -> anyhow::Result<()> {
+        self.validate()?;
+        invalid(
+            self.binding_ref == binding_ref
+                && self.namespace == namespace
+                && matches!(
+                    &arm.subject,
+                    super::ArmSubjectV1::Helper {
+                        purpose: super::HelperPurposeV1::Import,
+                        permission,
+                        ..
+                    } if matches!(permission.as_ref(), super::HelperPermissionV1::Admission { .. })
+                ),
+        )?;
+        conflict(serde_json::to_value(&self.claim.arm_receipt)? == serde_json::to_value(receipt)?)?;
+        self.claim.validate_for_arm(arm)
+    }
+
+    pub(crate) fn input_hash(&self) -> anyhow::Result<String> {
+        self.validate()?;
+        content_hash("ai-guard:legacy-named-import-claim:v1", self)
+    }
+}
+
 /// The exact launch commit of one retained preparation. It names the launch
 /// operation (the idempotency key), the opaque target and its expected server
 /// revision, and the preparation it consumes by reference and exact fingerprint.
