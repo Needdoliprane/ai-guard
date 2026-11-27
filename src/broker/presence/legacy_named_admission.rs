@@ -4,12 +4,19 @@ use super::*;
 use crate::{
     audit::legacy_session_prepare::LegacyNamedCancelReservationV1,
     broker::{
+        checkpoint::LegacyNamedAdmissionCheckpoint,
+        enforcer::{
+            EnforcerClient, EnforcerError, ExecutionEnforcerV1, ProspectiveArmExchange,
+            ProspectiveRegistrationV1,
+        },
         journal::{CancelStopProjectionV1, JournalError, JournalScopeV1, canonical},
+        lifecycle::LocalCommandRequestV1,
         presence::http::{Client, Limits},
     },
     control::{AdmissionRefusalV1, MutationResultV1, RuntimeKindV1, WorkerV1, session_control::*},
 };
 use reqwest::{Method, StatusCode};
+use sha2::{Digest, Sha256};
 
 const RESPONSE_BYTES: u64 = 128 * 1024;
 
@@ -37,6 +44,20 @@ impl Outcome {
 enum AdmissionOperation {
     Reserve,
     Reconcile,
+}
+
+/// Live handoff from the Writer's first confirmed Arm CAS, bound to the
+/// exact target, Writer, presence and local STOP arbiter. Recovery reads
+/// cannot reconstruct this non-cloneable capability.
+pub(crate) struct RecordedLegacyNamedImportArm<'enforcer> {
+    presence: Arc<PresenceAuthority>,
+    enforcer: &'enforcer EnforcerClient,
+    writer: WriterClient,
+    operation: Uuid,
+    request: LegacyNamedImportArmRequestV1,
+    target: ProspectiveRegistrationV1,
+    cancel: CancelGeneration,
+    expected: u64,
 }
 
 pub(super) async fn read_plan(
@@ -257,34 +278,224 @@ pub(super) async fn reconcile(
     Ok(outcome)
 }
 
-pub(super) async fn arm_import(
-    presence: &PresenceAuthority,
+pub(super) async fn record_import_arm<'enforcer>(
+    presence: Arc<PresenceAuthority>,
+    enforcer: &'enforcer ExecutionEnforcerV1,
     writer: &WriterClient,
     plan: &LegacyConfirmedPlanV1,
     archive_digest: &str,
-    arm: ArmV1,
-    generation: (&CancelGeneration, u64),
-) -> Result<ArmResultV1> {
-    validate_scope(presence, writer.scope())?;
+    target: ProspectiveRegistrationV1,
+    (cancel, expected): (&CancelGeneration, u64),
+) -> Result<RecordedLegacyNamedImportArm<'enforcer>> {
+    let ExecutionEnforcerV1::Legacy(enforcer) = enforcer else {
+        return Err(PresenceError::InvalidConfig);
+    };
+    require_arm_generation(cancel, expected)?;
+    presence.revalidate()?;
+    let scope = writer.scope();
+    validate_scope(&presence, scope)?;
+    target.validate().map_err(prospective_error)?;
+    if target.tenant_id() != scope.tenant_id()
+        || target.control_origin_hash()
+            != hex::encode(Sha256::digest(scope.gateway_origin().as_bytes()))
+    {
+        return Err(PresenceError::Forbidden);
+    }
+    let operation = plan.operation_id;
+    let retained = open_named_import(writer, operation, &target).await?;
+    let owned = retained
+        .import_creation()
+        .and_then(|creation| creation.owned())
+        .ok_or(PresenceError::Conflict)?;
+    if retained.plan() != plan
+        || retained.archive_digest() != Some(archive_digest)
+        || retained.import_arm().is_some()
+        || canonical(owned).map_err(named_write_error)?
+            != canonical(target.owned()).map_err(named_write_error)?
+    {
+        // Historical pending and acknowledged Arms are reconciliation only.
+        return Err(PresenceError::Conflict);
+    }
+    retained
+        .with_import_arm(target.arm().clone())
+        .map_err(named_write_error)?;
+    enforcer
+        .legacy_require_new_prearm_identity()
+        .map_err(prospective_error)?;
+    require_arm_generation(cancel, expected)?;
+    let recorded = match writer
+        .record_legacy_named_import_arm(plan, archive_digest, target.arm().clone())
+        .await
+    {
+        Ok(recorded) => recorded,
+        Err(JournalError::Interrupted) => return Err(PresenceError::Stopped),
+        Err(_) => {
+            // The exact write may have committed even when its ACK or head
+            // confirmation is missing. The Writer's current error loses the
+            // phase of the CAS and its confirmation read.
+            enforcer
+                .legacy_fence_unknown_prearm_write()
+                .map_err(prospective_error)?;
+            return Err(PresenceError::AdmissionOutcomeUnknown);
+        }
+    };
+    require_arm_generation(cancel, expected)?;
+    Ok(RecordedLegacyNamedImportArm {
+        presence,
+        enforcer,
+        writer: writer.clone(),
+        operation,
+        request: recorded.into_request(),
+        target,
+        cancel: cancel.clone(),
+        expected,
+    })
+}
+
+pub(super) async fn arm_import(
+    presence: &Arc<PresenceAuthority>,
+    pending: RecordedLegacyNamedImportArm<'_>,
+) -> Result<(ArmResultV1, ProspectiveArmExchange)> {
+    let RecordedLegacyNamedImportArm {
+        presence: issuer,
+        enforcer,
+        writer,
+        operation,
+        request,
+        target,
+        cancel,
+        expected,
+    } = pending;
+    if !Arc::ptr_eq(presence, &issuer) {
+        return Err(PresenceError::Forbidden);
+    }
+    require_arm_generation(&cancel, expected)?;
     let client = Client::new(presence)?;
     checked_identity(&client, presence).await?;
-    let (cancel, expected) = generation;
-    cancel
-        .with_current_generation(expected, || ())
-        .map_err(|_| PresenceError::Stopped)?;
-    let request = writer
-        .record_legacy_named_import_arm(plan, archive_digest, arm)
+    require_pending_import_arm(&writer, operation, &request, &target).await?;
+    enforcer
+        .legacy_require_new_prearm_identity()
+        .map_err(prospective_error)?;
+    require_arm_generation(&cancel, expected)?;
+    // The Legacy client already targets STOP on a reservation ACK it
+    // received with a stale generation. An unknown reservation grants no
+    // authorization to select another native owner for cancellation.
+    enforcer
+        .legacy_reserve_prospective_diagnosed(target.clone(), cancel.clone(), false)
+        .await
+        .map_err(|refusal| prospective_error(refusal.code()))?;
+    let dispatched = async {
+        require_arm_generation(&cancel, expected)?;
+        let exchange = enforcer
+            .legacy_begin_prospective_arm_exchange(&target, &cancel)
+            .await
+            .map_err(prospective_error)?;
+        require_arm_generation(&cancel, expected)?;
+        if !exchange.permits_original() {
+            // A replayed native exchange cannot authorize the first POST.
+            return Err(PresenceError::Conflict);
+        }
+        require_pending_import_arm(&writer, operation, &request, &target).await?;
+        let result = send_import_arm(&client, presence, &request, Some((&cancel, expected)))
+            .await?
+            .ok_or(PresenceError::AdmissionOutcomeUnknown)?;
+        writer
+            .acknowledge_legacy_named_import_arm(operation, &request, result.clone())
+            .await
+            .map_err(|_| PresenceError::AdmissionOutcomeUnknown)?;
+        let exchange = if result.replayed {
+            exchange.into_restrictive()
+        } else {
+            exchange
+        };
+        Ok((result, exchange))
+    }
+    .await;
+    // Settle any received HTTP result before notifying the exact prospective
+    // owner. An unknown Arm still requires reconciliation after native STOP.
+    if matches!(&dispatched, Err(PresenceError::Stopped))
+        || require_arm_generation(&cancel, expected).is_err()
+    {
+        enforcer
+            .legacy_cancel_prospective(&target, cancel.current())
+            .await
+            .map_err(prospective_error)?;
+        return match dispatched {
+            Err(PresenceError::AdmissionOutcomeUnknown) => {
+                Err(PresenceError::AdmissionOutcomeUnknown)
+            }
+            _ => Err(PresenceError::Stopped),
+        };
+    }
+    dispatched
+}
+
+async fn open_named_import(
+    writer: &WriterClient,
+    operation: Uuid,
+    target: &ProspectiveRegistrationV1,
+) -> Result<LegacyNamedAdmissionCheckpoint> {
+    let job = writer
+        .load(operation)
         .await
         .map_err(named_write_error)?
-        .into_request();
-    let result = send_import_arm(&client, presence, &request, Some(generation))
-        .await?
-        .ok_or(PresenceError::AdmissionOutcomeUnknown)?;
-    writer
-        .acknowledge_legacy_named_import_arm(plan.operation_id, &request, result.clone())
-        .await
-        .map_err(|_| PresenceError::AdmissionOutcomeUnknown)?;
-    Ok(result)
+        .ok_or(PresenceError::Conflict)?;
+    let checkpoint = job.broker_checkpoint_v3().ok_or(PresenceError::Conflict)?;
+    if checkpoint
+        .commands()
+        .iter()
+        .any(|command| matches!(command.request(), LocalCommandRequestV1::CancelRequested))
+    {
+        return Err(PresenceError::Stopped);
+    }
+    let retained = checkpoint
+        .broker()
+        .supervision()
+        .legacy_named_admission()
+        .filter(|named| job.intent().legacy_named_plan() == Some(named.plan()))
+        .cloned()
+        .ok_or(PresenceError::Conflict)?;
+    retained
+        .require_import_creation_binding(target.authority())
+        .map_err(named_write_error)?;
+    Ok(retained)
+}
+
+async fn require_pending_import_arm(
+    writer: &WriterClient,
+    operation: Uuid,
+    request: &LegacyNamedImportArmRequestV1,
+    target: &ProspectiveRegistrationV1,
+) -> Result<()> {
+    let retained = open_named_import(writer, operation, target).await?;
+    let arm = retained.import_arm().ok_or(PresenceError::Conflict)?;
+    let exact = retained
+        .import_arm_request()
+        .ok_or(PresenceError::Conflict)?;
+    if arm.receipt().is_some()
+        || canonical(&exact).map_err(named_write_error)?
+            != canonical(request).map_err(named_write_error)?
+    {
+        return Err(PresenceError::Conflict);
+    }
+    Ok(())
+}
+
+fn require_arm_generation(cancel: &CancelGeneration, expected: u64) -> Result<()> {
+    cancel
+        .with_current_generation(expected, || ())
+        .map_err(|_| PresenceError::Stopped)
+}
+
+fn prospective_error(error: EnforcerError) -> PresenceError {
+    match error {
+        EnforcerError::InvalidInput => PresenceError::Protocol,
+        EnforcerError::UnsafeFilesystem => PresenceError::UnsafeFilesystem,
+        EnforcerError::Unauthorized => PresenceError::Forbidden,
+        EnforcerError::Conflict | EnforcerError::AlreadyPrepared => PresenceError::Conflict,
+        EnforcerError::Capacity => PresenceError::Capacity,
+        _ => PresenceError::UnsafeState,
+    }
 }
 
 pub(super) async fn reconcile_import_arm(

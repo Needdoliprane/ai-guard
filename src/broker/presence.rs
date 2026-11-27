@@ -4,7 +4,7 @@ use crate::{
     broker::{enforcer::CancelGeneration, journal::CancelStopProjectionV1, writer::WriterClient},
     broker_registry::{BrokerAuthorityV1, BrokerRuntimeKindV1},
     control::{
-        ArmResultV1, ArmV1,
+        ArmResultV1,
         session_control::{
             LegacyConfirmedLaunchSpecV1, LegacyConfirmedPlanV1, LegacyNamedInitialDecisionV1,
         },
@@ -37,7 +37,9 @@ mod http;
 #[cfg(test)]
 mod http_tests;
 mod legacy_named_admission;
-pub(crate) use legacy_named_admission::Outcome as LegacyNamedAdmissionOutcome;
+pub(crate) use legacy_named_admission::{
+    Outcome as LegacyNamedAdmissionOutcome, RecordedLegacyNamedImportArm,
+};
 /// Proposed owned broker-supervision publisher, selected only by its explicit
 /// configuration profile. It never falls back to, adopts or migrates legacy.
 pub(crate) mod owned;
@@ -457,22 +459,49 @@ impl LegacyNamedControl {
         self.0.revalidate()?;
         legacy_named_admission::reconcile(&self.0, writer, operation).await
     }
-    /// Record the unique named import Arm and dispatch that exact request.
+    /// Retain the exact pending Arm before asking the selected guardian for
+    /// prospective custody. Only this Writer acknowledgement can dispatch it.
+    /// This named rail requires the Legacy guardian's targeted prospective STOP.
+    /// An unknown publication fences new native identities. A historical Arm
+    /// is read through the exact reconciliation request.
+    #[allow(
+        dead_code,
+        reason = "the named import runtime preparation is a separate lot"
+    )]
+    pub(crate) async fn record_legacy_named_import_arm<'enforcer>(
+        &self,
+        enforcer: &'enforcer super::enforcer::ExecutionEnforcerV1,
+        writer: &WriterClient,
+        plan: &LegacyConfirmedPlanV1,
+        archive_digest: &str,
+        target: super::enforcer::ProspectiveRegistrationV1,
+        generation: (&CancelGeneration, u64),
+    ) -> Result<RecordedLegacyNamedImportArm<'enforcer>> {
+        legacy_named_admission::record_import_arm(
+            Arc::clone(&self.0),
+            enforcer,
+            writer,
+            plan,
+            archive_digest,
+            target,
+            generation,
+        )
+        .await
+    }
+
+    /// Dispatch once after the exact original native exchange and return it
+    /// with the durable reply. The caller still owns native binding after ACK.
+    /// A restrictive native exchange cannot dispatch. A replayed reply only
+    /// returns a restrictive exchange for STOP and observation.
     #[allow(
         dead_code,
         reason = "the named import runtime preparation is a separate lot"
     )]
     pub(crate) async fn arm_legacy_named_import(
         &self,
-        writer: &WriterClient,
-        plan: &LegacyConfirmedPlanV1,
-        archive_digest: &str,
-        arm: ArmV1,
-        generation: (&CancelGeneration, u64),
-    ) -> Result<ArmResultV1> {
-        self.0.revalidate()?;
-        legacy_named_admission::arm_import(&self.0, writer, plan, archive_digest, arm, generation)
-            .await
+        pending: RecordedLegacyNamedImportArm<'_>,
+    ) -> Result<(ArmResultV1, super::enforcer::ProspectiveArmExchange)> {
+        legacy_named_admission::arm_import(&self.0, pending).await
     }
 
     /// Read back the exact retained Arm after a lost acknowledgement.
