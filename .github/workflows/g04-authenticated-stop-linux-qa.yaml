@@ -1,0 +1,183 @@
+name: G04 authenticated named STOP Linux QA
+
+on:
+  push:
+    branches: [codex/g04-authenticated-stop-linux-qa-20261127]
+    paths: [.github/workflows/g04-authenticated-stop-linux-qa.yaml]
+
+permissions:
+  contents: read
+
+jobs:
+  stop:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      SOURCE_SHA: 41c0ec4b00b2590d1d828c26bb33e7034e9b7b00
+      SOURCE_TREE: f251beacaaca5af20bff7928c6d6b27cae78cfcb
+      CARGO_BUILD_JOBS: '1'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      CARGO_TERM_COLOR: never
+      RUST_MIN_STACK: '8388608'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          persist-credentials: false
+
+      - name: Build one SQLite library harness and verify exact STOP selectors
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          selectors=(
+            broker::enforcer::server::prospective::tests::named_guardian_custody_survives_authenticated_reconnect
+            broker::enforcer::legacy_named_stop_auth::tests::first_authentication_preserves_legacy_and_closes_stops_only
+            broker::enforcer::legacy_named_stop_auth::tests::stops_only_proofs_bind_roles_epoch_filesystem_and_packet
+          )
+
+          report_not_run() {
+            local selector
+            for selector in "${selectors[@]}"; do
+              printf 'test=%s status=NOT_RUN\n' "$selector"
+            done
+          }
+
+          if [[ "$(git rev-parse HEAD 2>/dev/null)" != "$SOURCE_SHA" ||
+                "$(git rev-parse 'HEAD^{tree}' 2>/dev/null)" != "$SOURCE_TREE" ]]; then
+            printf 'source=FAIL\n'
+            report_not_run
+            exit 1
+          fi
+          printf 'source=PASS\nsource_sha=%s\nsource_tree=%s\n' "$SOURCE_SHA" "$SOURCE_TREE"
+          export AI_GUARD_BUILD_REVISION="$SOURCE_SHA"
+
+          # Keep fixture paths short for Unix sockets and keep all raw output private.
+          scratch=$(mktemp -d /tmp/aig-g04.XXXXXX)
+          trap 'rm -rf -- "$scratch"' EXIT
+          export TMPDIR="$scratch"
+          export CARGO_TARGET_DIR="$scratch/target"
+          build_json="$scratch/build.jsonl"
+
+          if ! cargo fetch --locked --target host-tuple >"$scratch/fetch.log" 2>&1; then
+            printf 'fetch=FAIL\nbuild=NOT_RUN\n'
+            report_not_run
+            exit 1
+          fi
+          printf 'fetch=PASS\n'
+
+          build_timer=()
+          if [[ -x /usr/bin/time ]]; then
+            build_timer=(/usr/bin/time -o "$scratch/build.rss" -f '%M')
+          fi
+          if "${build_timer[@]}" \
+              cargo test --locked --offline --no-default-features --lib --no-run \
+              --message-format=json >"$build_json" 2>"$scratch/build.stderr"; then
+            printf 'build=PASS\n'
+          else
+            build_rc=$?
+            printf 'build=FAIL\nbuild_exit=%s\n' "$build_rc"
+            if [[ -f "$scratch/build.rss" ]]; then
+              awk '/^[0-9]+$/{printf "build_peak_rss_kib=%s\n", $0}' "$scratch/build.rss"
+            fi
+            df -k "$scratch" | awk 'NR == 2 && $4 ~ /^[0-9]+$/{printf "build_free_disk_kib=%s\n", $4}'
+            jq -Rr 'fromjson? | objects
+              | select(.reason == "compiler-message" and .message.level == "error")
+              | .message as $message
+              | ($message.code.code // "") as $code
+              | (if $code | test("\\AE[0-9]{4}\\z") then "compiler_error=\($code)"
+                else ($message.message | ascii_downcase) as $heading
+                | "compiler_class=" + (if $heading | test("recursion limit|reached the type-length limit") then "compiler_limit"
+                  elif $heading | test("overflow evaluating|stack overflow") then "compiler_overflow"
+                  elif $heading | test("linking with|linker") then "linker_error"
+                  elif $heading | test("cycle detected") then "compiler_cycle"
+                  elif $heading | test("internal compiler error|llvm error") then "compiler_internal"
+                  else "untyped_compiler_error" end)
+                end) as $diagnostic
+              | (first($message.spans[]? | select(.is_primary)
+                | recurse(.expansion.span // empty)
+                | select((.file_name | length <= 130 and
+                    test("\\A(src|tests)/([A-Za-z0-9_-]+/)*[A-Za-z0-9_.-]+[.]rs\\z"))
+                  and (.line_start | type == "number" and . == floor and . >= 1 and . <= 1000000))) // null) as $span
+              | if $span then "\($diagnostic) file=\($span.file_name) line=\($span.line_start)"
+                else $diagnostic end' "$build_json" 2>/dev/null |
+              sort -u | awk 'NR <= 12' || true
+            if rg -q 'No space left on device|Disk quota exceeded' "$scratch/build.stderr"; then
+              printf 'build_failure_class=disk_space\n'
+            elif rg -q 'signal: 9, SIGKILL|Killed process' "$scratch/build.stderr"; then
+              printf 'build_failure_class=compiler_killed\n'
+            elif rg -q 'signal: 11, SIGSEGV|rustc interrupted by SIGSEGV' "$scratch/build.stderr"; then
+              printf 'build_failure_class=compiler_crash\n'
+            elif rg -q 'cannot execute linker|linker .* not found' "$scratch/build.stderr"; then
+              printf 'build_failure_class=missing_linker\n'
+            elif rg -q 'internal compiler error|LLVM ERROR' "$scratch/build.stderr"; then
+              printf 'build_failure_class=compiler_internal\n'
+            fi
+            report_not_run
+            exit 1
+          fi
+
+          if ! libtest=$(jq -ers '[.[] | select(.reason == "compiler-artifact"
+              and .target.name == "agentsandbox" and .target.kind == ["lib"]
+              and .profile.test == true and (.executable | type) == "string") | .executable]
+              | unique | select(length == 1) | .[0]' "$build_json" 2>/dev/null) ||
+              [[ "$libtest" != "$CARGO_TARGET_DIR"/debug/deps/agentsandbox-* ||
+                 ! -f "$libtest" || ! -x "$libtest" || -L "$libtest" ]]; then
+            printf 'libtest=FAIL\n'
+            report_not_run
+            exit 1
+          fi
+          if ! checksum=$(sha256sum -- "$libtest" 2>/dev/null) ||
+              [[ ! ${checksum%% *} =~ ^[0-9a-f]{64}$ ]]; then
+            printf 'libtest=FAIL\n'
+            report_not_run
+            exit 1
+          fi
+          printf 'libtest=PASS\nlibtest_sha256=%s\n' "${checksum%% *}"
+
+          failures=0
+          for selector in "${selectors[@]}"; do
+            log="$scratch/test.log"
+            test_exit=0
+            "$libtest" --exact "$selector" --test-threads=1 --color never >"$log" 2>&1 || test_exit=$?
+            read -r header passed failed < <(
+              awk '
+                /^running [0-9]+ tests?$/ { headers++; running=$2 }
+                /^test result: / { summaries++ }
+                /^test result: (ok|FAILED)\. [01] passed; [01] failed; 0 ignored; 0 measured; [0-9]+ filtered out; finished in [0-9]+([.][0-9]+)?s$/ {
+                  if (($3 == "ok." && $6 == 0) || ($3 == "FAILED." && $6 == 1)) {
+                    passed=$4; failed=$6
+                  }
+                }
+                END {
+                  if (headers == 1 && summaries == 1 && passed != "" && passed+failed == running && running <= 1)
+                    print running, passed, failed
+                  else
+                    print "unknown unknown unknown"
+                }' "$log"
+            )
+            status=FAIL
+            if [[ "$test_exit" == 0 && "$header" == 1 && "$passed" == 1 && "$failed" == 0 ]] &&
+                [[ "$(grep -Fxc "test $selector ... ok" "$log" || true)" == 1 ]]; then
+              status=PASS
+            elif [[ "$test_exit" == 0 && "$header" == 0 && "$passed" == 0 && "$failed" == 0 ]]; then
+              status=NO_TEST
+            elif [[ "$test_exit" == 0 || "$header" != 1 || "$passed" != 0 || "$failed" != 1 ]] ||
+                [[ "$(grep -Fxc "test $selector ... FAILED" "$log" || true)" != 1 ]]; then
+              passed=unknown
+              failed=unknown
+            fi
+            printf 'test=%s status=%s\ntest_exit=%s\ntest_pass_count=%s\ntest_fail_count=%s\n' \
+              "$selector" "$status" "$test_exit" "$passed" "$failed"
+            if [[ "$status" != PASS ]]; then
+              grep -E '^(Error: (Conflict|Corrupt|Interrupted|InvalidInput|UnsafeFilesystem|UnsupportedVersion|Capacity|Io))$' "$log" |
+                sort -u | awk 'NR <= 8' || true
+              grep -Eo 'panicked at (src|tests)/[A-Za-z0-9_./-]{1,120}[.]rs:[0-9]{1,7}:[0-9]{1,5}' "$log" |
+                sort -u | awk 'NR <= 8' || true
+              failures=$((failures + 1))
+            fi
+          done
+          printf "oracle_count=%s\noracle_failures=%s\n" "${#selectors[@]}" "$failures"
+          [[ "$failures" == 0 ]]
