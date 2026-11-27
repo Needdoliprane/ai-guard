@@ -11,7 +11,7 @@ permissions:
   contents: read
 
 env:
-  HANDOFF_SOURCE_SHA: b056d68a95b376b272cfdb49e6337e9cbcbee133
+  HANDOFF_SOURCE_SHA: 08c9506f0f51c1126b7ab350d6e291ff689c2be7
   HANDOFF_ORACLE: software_broker_missing_receipt_expires_under_original_arm_without_exec
 
 jobs:
