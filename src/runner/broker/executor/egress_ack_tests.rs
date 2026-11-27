@@ -50,6 +50,7 @@ const HTTP_WAIT: Duration = Duration::from_secs(15);
 const OBSERVATION_SLACK: Duration = Duration::from_secs(2);
 const EXTERNAL_LIMIT: Duration = Duration::from_secs(180);
 const CALLBACK_DRAIN: Duration = Duration::from_secs(1);
+const STDIN_CUSTODY_WINDOW: Duration = Duration::from_millis(500);
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn held_egress_release_waits_for_committed_sqlite_opening_ack() -> Result<()> {
@@ -495,6 +496,17 @@ async fn run_held_egress_oracle(
                 .observe_release(first_byte_deadline, async { Ok((&mut first_rx).await?) })
                 .await?;
             first_seen = true;
+            phase = "submitted_stdin_custody";
+            opening_progress
+                .wait_for(&opening_progress.release_submitted, first_byte_deadline)
+                .await?;
+            // The real attach fixture has received data. While its owner is
+            // paused after submission, EOF must wait for the explicit close.
+            if let Ok(result) = timeout(STDIN_CUSTODY_WINDOW, &mut capture_rx).await {
+                captured = Some(result.context("stdin witness closed before explicit close")?);
+                anyhow::bail!("the submitted writer was closed before the egress handoff");
+            }
+            opening_progress.close_release_stdin.notify_one();
             phase = "release_eof";
             captured = Some(
                 opening_progress

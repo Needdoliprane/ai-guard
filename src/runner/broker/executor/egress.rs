@@ -56,6 +56,8 @@ pub(super) struct EgressOpeningProgress {
     pub(super) opening_http: OnceLock<(u128, u16)>,
     pub(super) opening_receipt_held: OnceLock<Instant>,
     pub(super) release_intent_ack: OnceLock<Instant>,
+    pub(super) release_submitted: OnceLock<Instant>,
+    pub(super) close_release_stdin: Notify,
     pub(super) stop: OnceLock<Instant>,
     pub(super) callback_failed: OnceLock<Instant>,
     writer_failure: OnceLock<(Instant, EgressWitnessWriterFailure)>,
@@ -432,6 +434,11 @@ impl Execution<'_> {
                     ensure!(!stop.is_stopped(), "retained egress channel has stopped");
                     self.require_egress_live(exec)
                 })?;
+            #[cfg(test)]
+            if let Ok(progress) = EGRESS_OPENING_PROGRESS.try_with(Arc::clone) {
+                progress.mark(&progress.release_submitted);
+                progress.close_release_stdin.notified().await;
+            }
             let authorization = Arc::from(authorization);
             let stop = Arc::new(stop);
             let task_stop = Arc::clone(&stop);
