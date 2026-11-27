@@ -23,7 +23,7 @@ mod auth_bootstrap_tests;
 use crate::{
     control::{
         ArmReceiptV1, ArmSubjectV1, ArmV1, HelperPermissionV1, HelperPurposeV1, HostClockSampleV1,
-        RuntimeKindV1,
+        MutationReceiptV1, RuntimeKindV1, session_control::LegacyNamedImportClaimRequestV1,
     },
     runtime::{ContainerObservation, OwnedContainerSnapshot, RuntimeAuthority, RuntimeKind},
 };
@@ -784,6 +784,18 @@ enum LegacyProspectiveRailV1 {
 }
 
 #[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NamedImportPrepareV1 {
+    reservation: ProspectiveReservationV1,
+    registration_hash: String,
+    generation: u64,
+    custody_nonce: Uuid,
+    original_exchange_nonce: Uuid,
+    claim: LegacyNamedImportClaimRequestV1,
+    receipt: MutationReceiptV1,
+}
+
+#[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum Request {
     ProspectiveCapabilities {},
@@ -825,6 +837,9 @@ enum Request {
         generation: u64,
         original_exchange_nonce: Uuid,
         custody_nonce: Uuid,
+    },
+    PrepareNamedImport {
+        request: Box<NamedImportPrepareV1>,
     },
     CancelProspective {
         reservation: ProspectiveReservationV1,

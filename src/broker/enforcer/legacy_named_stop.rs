@@ -1,5 +1,8 @@
 //! Compare verified journal STOP facts with one live named Import target.
-use super::{EnforcerError, EnforcerResult, ProspectiveRegistrationV1, hex_hash};
+use super::{
+    EnforcerError, EnforcerResult, NamedImportPrepareV1, ProspectiveRegistrationV1, RegistrationV1,
+    hex_hash,
+};
 use crate::{
     broker::{
         journal::{
@@ -158,6 +161,23 @@ impl NamedImportStopAnchorV1 {
 
     pub(super) fn prospective_hash(&self) -> &str {
         &self.prospective_hash
+    }
+
+    pub(super) fn require_claim(
+        &self,
+        request: &NamedImportPrepareV1,
+        registration: &RegistrationV1,
+    ) -> EnforcerResult<()> {
+        request
+            .claim
+            .validate_for_arm(
+                self.birth.binding_ref,
+                &self.birth.scope.control_namespace_uuid().to_string(),
+                &registration.arm,
+                &registration.receipt,
+            )
+            .and_then(|()| request.claim.validate_receipt(&request.receipt))
+            .map_err(|_| EnforcerError::Conflict)
     }
 
     pub(super) fn require_facts(

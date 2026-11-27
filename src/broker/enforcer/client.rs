@@ -1346,6 +1346,7 @@ impl Client {
             | Request::BeginNamedProspectiveArmExchange { .. }
             | Request::BindProspective { .. }
             | Request::BindNamedProspective { .. }
+            | Request::PrepareNamedImport { .. }
             | Request::CancelProspective { .. }
             | Request::BeginRecovery {} => return Err(EnforcerError::Unauthorized),
             Request::Status {} => FullCommand::Status {},

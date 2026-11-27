@@ -573,6 +573,7 @@ async fn dispatch(
                 )
                 .await
         }
+        Request::PrepareNamedImport { request } => state.prepare_named_import(&request),
         Request::CancelProspective {
             reservation,
             generation,

@@ -809,18 +809,7 @@ fn decode_import_claim(
         ClaimDispositionV1::EmitOnce => !reconcile && status == StatusCode::CREATED,
         ClaimDispositionV1::AlreadyConsumed => status == StatusCode::OK,
     };
-    let receipt = &result.receipt;
-    if !disposition_matches
-        || receipt.operation_id != request.claim.operation_id
-        || receipt.input_hash
-            != request
-                .input_hash()
-                .map_err(|_| PresenceError::AdmissionOutcomeUnknown)?
-        || receipt.worker_id.as_deref() != Some(request.claim.arm_receipt.worker_id.as_str())
-        || receipt.revision.is_some()
-        || receipt.audit_seq <= request.claim.arm_receipt.audit_seq
-        || crate::control::hash(&receipt.audit_hash).is_err()
-    {
+    if !disposition_matches || request.validate_receipt(&result.receipt).is_err() {
         return Err(PresenceError::AdmissionOutcomeUnknown);
     }
     Ok(Some(result))
