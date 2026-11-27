@@ -1036,6 +1036,69 @@ mod tests {
         }
     }
 
+    /// Reopen an existing named Writer journal and retry the exact retained
+    /// observation. This is a cold Writer fixture only, not a Service or
+    /// runtime reconciliation test.
+    async fn reopen_and_replay_import_observation(
+        root: &std::path::Path,
+        journal_name: &str,
+        scope: &JournalScopeV1,
+        plan: &LegacyConfirmedPlanV1,
+        request: &LegacyNamedImportObservationRequestV1,
+        receipt: &MutationReceiptV1,
+    ) -> anyhow::Result<crate::broker::journal::RevisionRefV1> {
+        let journal_dir = Directory::open_existing(&root.join(journal_name))?;
+        let journal = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match Journal::open(
+                    &journal_dir,
+                    scope.clone(),
+                    &FsExclusions::new(),
+                    JournalLimitsV1::default(),
+                    ControlSecrets::new(vec![])?,
+                ) {
+                    Ok(journal) => break Ok(journal),
+                    Err(JournalError::Busy) => tokio::task::yield_now().await,
+                    Err(error) => break Err(error),
+                }
+            }
+        })
+        .await??;
+        let writer = WriterClient::start(journal, 8, Duration::from_secs(5))?;
+        let retained = writer
+            .load_legacy_named_import_observation(plan.operation_id, request.phase)
+            .await?
+            .expect("cold Writer retains the exact observation");
+        assert!(equal(retained.request(), request)?);
+        assert_eq!(retained.receipt(), Some(receipt));
+        let head_before_replay = writer
+            .load(plan.operation_id)
+            .await?
+            .unwrap()
+            .head()
+            .clone();
+        let replay = writer
+            .record_legacy_named_import_observation(plan, request.clone())
+            .await?;
+        assert_eq!(replay.receipt(), Some(receipt));
+        writer
+            .acknowledge_legacy_named_import_observation(
+                plan.operation_id,
+                request,
+                receipt.clone(),
+            )
+            .await?;
+        let head_after_replay = writer
+            .load(plan.operation_id)
+            .await?
+            .unwrap()
+            .head()
+            .clone();
+        assert_eq!(head_after_replay, head_before_replay);
+        drop(writer);
+        Ok(head_after_replay)
+    }
+
     #[tokio::test]
     async fn explicit_named_admission_requires_an_immutable_archive_digest() -> anyhow::Result<()> {
         let temporary = tempfile::Builder::new()
@@ -2257,42 +2320,44 @@ mod tests {
             audit_seq: claim_receipt.audit_seq + 1,
             audit_hash: "d".repeat(64),
         };
-        let pause = observation_writer.pause_for_test().await?;
-        let acknowledgement = observation_writer.acknowledge_legacy_named_import_observation(
-            operation,
-            &started_request,
-            started_receipt.clone(),
-        );
-        tokio::pin!(acknowledgement);
-        assert!(futures_util::poll!(&mut acknowledgement).is_pending());
-        let stops = observation_writer.stops();
-        let stop_id = Uuid::new_v4();
-        let cancellation = stops.append_cancel(CancelInputV1::new(operation, stop_id)?);
-        tokio::pin!(cancellation);
-        assert!(futures_util::poll!(&mut cancellation).is_pending());
-        assert!(pause.is_paused());
-        drop(pause);
-        let stopped = cancellation.await.map_err(|failure| failure.error())?;
-        assert!(stopped.incomplete());
-        let stopped_job = observation_writer.load(operation).await?.unwrap();
-        acknowledgement.await?;
-        let after_started_ack = observation_writer.load(operation).await?.unwrap();
-        assert_eq!(
-            after_started_ack
-                .broker_checkpoint_v2()
-                .unwrap()
-                .supervision()
-                .legacy_named_admission()
-                .unwrap()
-                .import_observation(LegacyNamedImportObservationPhaseV1::Started)
-                .unwrap()
-                .1,
-            Some(&started_receipt)
-        );
-        assert!(equal(
-            &after_started_ack.broker_checkpoint_v3().unwrap().commands(),
-            &stopped_job.broker_checkpoint_v3().unwrap().commands()
-        )?);
+        {
+            let pause = observation_writer.pause_for_test().await?;
+            let acknowledgement = observation_writer.acknowledge_legacy_named_import_observation(
+                operation,
+                &started_request,
+                started_receipt.clone(),
+            );
+            tokio::pin!(acknowledgement);
+            assert!(futures_util::poll!(&mut acknowledgement).is_pending());
+            let stops = observation_writer.stops();
+            let stop_id = Uuid::new_v4();
+            let cancellation = stops.append_cancel(CancelInputV1::new(operation, stop_id)?);
+            tokio::pin!(cancellation);
+            assert!(futures_util::poll!(&mut cancellation).is_pending());
+            assert!(pause.is_paused());
+            drop(pause);
+            let stopped = cancellation.await.map_err(|failure| failure.error())?;
+            assert!(stopped.incomplete());
+            let stopped_job = observation_writer.load(operation).await?.unwrap();
+            acknowledgement.await?;
+            let after_started_ack = observation_writer.load(operation).await?.unwrap();
+            assert_eq!(
+                after_started_ack
+                    .broker_checkpoint_v2()
+                    .unwrap()
+                    .supervision()
+                    .legacy_named_admission()
+                    .unwrap()
+                    .import_observation(LegacyNamedImportObservationPhaseV1::Started)
+                    .unwrap()
+                    .1,
+                Some(&started_receipt)
+            );
+            assert!(equal(
+                &after_started_ack.broker_checkpoint_v3().unwrap().commands(),
+                &stopped_job.broker_checkpoint_v3().unwrap().commands()
+            )?);
+        }
 
         let terminal_first = observation_base
             .clone()
@@ -2310,10 +2375,6 @@ mod tests {
             terminal_first.with_import_observation(started_request.clone()),
             Err(JournalError::Conflict)
         ));
-        let terminal_pending = observation_writer
-            .record_legacy_named_import_observation(&plan, terminal_request.clone())
-            .await?;
-        assert!(terminal_pending.receipt().is_none());
         let terminal_receipt = MutationReceiptV1 {
             operation_id: terminal_request.observation.operation_id.clone(),
             worker_id: Some(arm.worker_id.clone()),
@@ -2357,6 +2418,11 @@ mod tests {
             failed_prefix.import_verification_permission(),
             Err(JournalError::Conflict)
         ));
+        let terminal_pending = observation_writer
+            .record_legacy_named_import_observation(&plan, terminal_request.clone())
+            .await?;
+        assert!(terminal_pending.receipt().is_none());
+        assert!(equal(terminal_pending.request(), &terminal_request)?);
         observation_writer
             .acknowledge_legacy_named_import_observation(
                 operation,
@@ -2396,7 +2462,27 @@ mod tests {
             .unwrap();
         assert!(equal(retained.request(), &terminal_request)?);
         assert_eq!(retained.receipt(), Some(&terminal_receipt));
-
+        let terminal_ack_head = observation_writer
+            .load(operation)
+            .await?
+            .unwrap()
+            .head()
+            .clone();
+        // Drop every live Writer handle, reacquire the same journal, and
+        // reconcile the exact retained Terminal bytes after the process-local
+        // owner is gone. This proves Writer recovery/replay only; the Service
+        // cold route and native runtime inspection remain outside this oracle.
+        drop(observation_writer);
+        let cold_head = reopen_and_replay_import_observation(
+            &root,
+            "import-observation-race",
+            &scope,
+            &plan,
+            &terminal_request,
+            &terminal_receipt,
+        )
+        .await?;
+        assert_eq!(cold_head, terminal_ack_head);
         let writer = start_admitted_writer("import-creation").await?;
         let before_creation = writer.load(operation).await?.unwrap();
         assert!(matches!(
