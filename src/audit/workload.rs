@@ -872,7 +872,7 @@ pub(super) fn revalidate_broker_identity(
     now: DateTime<Utc>,
 ) -> anyhow::Result<()> {
     require_schema(db)?;
-    revalidate_broker_identity_state(db, identity, now)
+    revalidate_broker_identity_state(db, identity, now).map(|_| ())
 }
 
 pub(super) fn revalidate_broker_identity_checked(
@@ -881,14 +881,24 @@ pub(super) fn revalidate_broker_identity_checked(
     now: DateTime<Utc>,
 ) -> anyhow::Result<()> {
     require_checked_schema(tx)?;
-    revalidate_broker_identity_state(tx, identity, now)
+    revalidate_broker_identity_state(tx, identity, now).map(|_| ())
+}
+
+pub(super) fn broker_identity_deadline_checked(
+    tx: &CheckedTransaction<'_>,
+    identity: &BrokerIdentityV1,
+    now: DateTime<Utc>,
+) -> anyhow::Result<DateTime<Utc>> {
+    require_checked_schema(tx)?;
+    let (binding, broker) = revalidate_broker_identity_state(tx, identity, now)?;
+    Ok(parse_time(&binding.expires_at)?.min(parse_time(&broker.not_after)?))
 }
 
 fn revalidate_broker_identity_state(
     db: &Connection,
     identity: &BrokerIdentityV1,
     now: DateTime<Utc>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<(WorkloadBinding, BrokerV1)> {
     validate_control_time_floor(db, now, None)?;
     tenant_matches(db, identity.tenant_id())?;
     let binding =
@@ -898,7 +908,8 @@ fn revalidate_broker_identity_state(
     if let WorkloadSubjectV1::Broker { incarnation_id, .. } = &binding.subject {
         workload_authorized(broker.incarnation_id == *incarnation_id)?;
     }
-    broker.require_current_grant(identity, &format_time(now))
+    broker.require_current_grant(identity, &format_time(now))?;
+    Ok((binding, broker))
 }
 pub(super) fn validate_broker_identity_at(
     db: &Connection,

@@ -10,6 +10,7 @@ use crate::{
         IdentityChangeV1, IdentityMutationV1, IdentityReceiptV1, ResourceGrantV1, ResourceKindV1,
         ResourceRefV1,
     },
+    workload::WorkloadFailureV1,
 };
 
 pub(super) const ADMITTED: &str = "control.legacy_session_prepare.admission";
@@ -288,7 +289,7 @@ impl Store {
             conflict(fact.binding_ref == request.binding_ref && fact.input_hash == input_hash)?;
             let (admission, record) = admission_record(&tx, &fact)?;
             let result = admission_codec::result(&admission, &record, true)?;
-            self.commit_authorized(tx, &clock)?;
+            self.commit_named_admission(tx, &clock, broker, None)?;
             return Ok(LegacyNamedAdmissionCommit {
                 admission: result,
                 grant: fact.grant,
@@ -342,19 +343,55 @@ impl Store {
         };
         let stored = self.append_legacy_session_record(&tx, &clock, ADMITTED, event_id, &fact)?;
         self.validate_supervision_write(&tx)?;
-        let now = Utc::now();
-        anyhow::ensure!(resolved.plan.expires_at > now, ControlFailure::NotFound);
-        workload::revalidate_broker_identity_checked(
-            &tx,
-            broker,
-            workload::canonical_control_time(now)?,
-        )?;
-        self.commit_authorized(tx, &clock)?;
+        self.commit_named_admission(tx, &clock, broker, Some(request))?;
         Ok(LegacyNamedAdmissionCommit {
             admission: result,
             grant: fact.grant,
             audit_seq: stored.seq,
             audit_hash: stored.hash,
+        })
+    }
+
+    fn commit_named_admission(
+        &self,
+        tx: CheckedTransaction<'_>,
+        clock: &workload::AuthorizedControlTimeV1,
+        broker: &BrokerIdentityV1,
+        fresh: Option<&LegacyNamedSupervisedAdmissionV1>,
+    ) -> anyhow::Result<()> {
+        self.commit_checked_guarded(tx, |tx| {
+            let current = workload::capture_control_time(tx)?;
+            let (human_deadline, broker_deadline) = if let Some(request) = fresh {
+                let resolved =
+                    self.resolve_legacy_confirmed_plan(tx, broker, request.binding_ref, &current)?;
+                request.require_plan(&resolved.plan)?;
+                (Some(resolved.plan.expires_at), resolved.broker_deadline)
+            } else {
+                (
+                    None,
+                    workload::broker_identity_deadline_checked(tx, broker, current.at())?,
+                )
+            };
+            let validated_at = Utc::now();
+            workload::validate_fresh_control_time_at(tx, clock, validated_at)?;
+            let now = Utc::now();
+            #[cfg(test)]
+            let now = self
+                .named_admission_commit_observation
+                .lock()
+                .map_err(|_| IdentityFailureV1::IdentityUnavailable)?
+                .take()
+                .unwrap_or(now);
+            anyhow::ensure!(now >= validated_at, WorkloadFailureV1::ClockRegression);
+            anyhow::ensure!(
+                human_deadline.is_none_or(|deadline| now < deadline),
+                ControlFailure::NotFound
+            );
+            anyhow::ensure!(
+                workload::canonical_control_time(now)? < broker_deadline,
+                WorkloadFailureV1::Unauthorized
+            );
+            Ok(())
         })
     }
 }

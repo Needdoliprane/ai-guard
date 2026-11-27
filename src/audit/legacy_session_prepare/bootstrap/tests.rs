@@ -16,7 +16,7 @@ use crate::{
     },
     model::{CommandSpec, Decision, DecisionRequest, Outcome},
     policy::{self, Policy},
-    workload::AuthenticatedWorkload,
+    workload::{AuthenticatedWorkload, WorkloadFailureV1},
 };
 use sha2::{Digest, Sha256};
 use std::{os::unix::fs::PermissionsExt, path::PathBuf};
@@ -413,6 +413,17 @@ fn legacy_named_admission_commits_a_grant_and_replays_after_reopen() {
 
     let reopened = f.reopen();
     assert!(!reopened.supervision_state().unwrap().active);
+    *reopened.named_admission_commit_observation.lock().unwrap() =
+        Some(crate::broker_registry::parse_time(DEADLINE).unwrap());
+    assert_eq!(
+        apply(&reopened, &request)
+            .err()
+            .unwrap()
+            .downcast_ref::<WorkloadFailureV1>(),
+        Some(&WorkloadFailureV1::Unauthorized)
+    );
+    assert!(reopened.integrity().unwrap().valid);
+    assert_eq!(reopened.integrity().unwrap().head_hash, after_revocation);
     let replay = apply(&reopened, &request).unwrap();
     assert!(replay.admission.replayed);
     assert_eq!(replay.admission.receipt, committed.admission.receipt);
@@ -513,6 +524,60 @@ fn legacy_named_admission_rolls_back_worker_and_grant_when_link_exceeds_audit_ca
     assert_eq!(after.head_hash, before.head_hash);
     assert!(store.workers().unwrap().is_empty());
     assert_eq!(store.worker_quota(&quota).unwrap().held_workers, 0);
+    assert!(
+        store
+            .identity_resource_grant(&ResourceRefV1 {
+                kind: ResourceKindV1::Session,
+                resource_id: request.admission.admission.launch.session_id,
+            })
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn legacy_named_admission_rolls_back_at_commit_when_human_deadline_is_reached() {
+    let f = Fixture::new();
+    let (store, _) = f.provision(f.create().unwrap()).unwrap();
+    let (request, _) = f.confirmed_request(&store);
+    let Some(AuthenticatedWorkload::Broker(broker)) =
+        store.authenticate_workload_token(BROKER_TOKEN).unwrap()
+    else {
+        panic!("fixture broker identity");
+    };
+    let before = store.integrity().unwrap();
+    *store.named_admission_commit_observation.lock().unwrap() =
+        Some(crate::broker_registry::parse_time(DEADLINE).unwrap());
+    let policy = Policy::default();
+    let quota = QuotaPolicyV1::default();
+    let refusal = store
+        .admit_legacy_named(
+            &broker,
+            &request,
+            &policy,
+            policy::evaluate(&policy, &request.admission.admission.decision_request),
+            Value::Null,
+            &quota,
+        )
+        .err()
+        .expect("the retained human authority expires at the final observation");
+    assert_eq!(
+        refusal.downcast_ref::<ControlFailure>(),
+        Some(&ControlFailure::NotFound)
+    );
+    assert!(
+        store
+            .named_admission_commit_observation
+            .lock()
+            .unwrap()
+            .is_none()
+    );
+    assert!(store.supervision_state().unwrap().active);
+    let after = store.integrity().unwrap();
+    assert!(after.valid);
+    assert_eq!(after.head_hash, before.head_hash);
+    assert_eq!(store.worker_quota(&quota).unwrap().held_workers, 0);
+    assert!(store.workers().unwrap().is_empty());
     assert!(
         store
             .identity_resource_grant(&ResourceRefV1 {

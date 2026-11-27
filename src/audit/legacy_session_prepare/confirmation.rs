@@ -94,6 +94,7 @@ struct ResolvedLegacyConfirmedPlan {
     plan: LegacyConfirmedPlanV1,
     confirmed: StoredEvent,
     initiator: Initiator,
+    broker_deadline: DateTime<Utc>,
 }
 
 fn confirmed_plan(
@@ -488,7 +489,7 @@ impl Store {
         binding_ref: Uuid,
         clock: &workload::AuthorizedControlTimeV1,
     ) -> anyhow::Result<ResolvedLegacyConfirmedPlan> {
-        workload::revalidate_broker_identity_checked(tx, broker, clock.at())?;
+        let broker_deadline = workload::broker_identity_deadline_checked(tx, broker, clock.at())?;
         let confirmed = event_by_id(tx, &binding_ref.to_string())?
             .filter(|stored| stored.event.kind == CONFIRMED)
             .ok_or(ControlFailure::NotFound)?;
@@ -562,6 +563,7 @@ impl Store {
             plan,
             confirmed,
             initiator: prepared.initiator,
+            broker_deadline,
         })
     }
 

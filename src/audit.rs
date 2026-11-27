@@ -303,6 +303,8 @@ pub struct Store {
     review_authority: Option<review_authority::RetainedReviewAuthority>,
     #[cfg(test)]
     read_test_observer: read_test_observer::ReadTestObserver,
+    #[cfg(test)]
+    named_admission_commit_observation: Mutex<Option<chrono::DateTime<chrono::Utc>>>,
 }
 
 struct SupervisionOrigin {
@@ -1191,6 +1193,8 @@ impl Store {
             review_authority: None,
             #[cfg(test)]
             read_test_observer: read_test_observer::ReadTestObserver::default(),
+            #[cfg(test)]
+            named_admission_commit_observation: Mutex::new(None),
         }
     }
     /// Another connection to this live origin; no caller-selected identity or path.
@@ -1644,38 +1648,41 @@ impl Store {
         })
     }
     fn commit_checked(&self, tx: CheckedTransaction<'_>) -> anyhow::Result<()> {
+        self.commit_checked_guarded(tx, |_| Ok(()))
+    }
+
+    fn commit_checked_guarded(
+        &self,
+        mut tx: CheckedTransaction<'_>,
+        check_before_commit: impl FnOnce(&CheckedTransaction<'_>) -> anyhow::Result<()>,
+    ) -> anyhow::Result<()> {
         // A foreign CheckedTransaction is an argument refusal, before touching
         // either Store's health or the actual origin's retained lease.
         if !std::ptr::eq(self, tx.origin) {
             return Err(review_authority::ReviewAuthorityFailure::ForeignTransaction.into());
         }
         review_access::validate_context(self, tx.connection, tx.source_access, tx.operation_class)?;
-        let CheckedTransaction {
-            transaction,
-            connection,
-            origin: _,
-            mut lease,
-            source_access,
-            operation_class,
-            activate_supervision,
-            positive_bindings,
-        } = tx;
-        let result = (|| {
+        let scoped = tx.source_access.is_some();
+        let record_failure = |lease: &mut SupervisionLease, error: &anyhow::Error| {
+            if !review_access::admission_refusal(error, scoped) {
+                self.storage_failure(lease, error);
+            }
+        };
+        let prepared = (|| -> anyhow::Result<_> {
             anyhow::ensure!(
                 self.healthy(),
                 "supervision origin invalidated before commit"
             );
-            self.backing.verify(&transaction)?;
-            lease.verify(&self.backing, &transaction)?;
-            let next_head = audit_head(&transaction)?;
+            self.backing.verify(&tx)?;
+            tx.lease.verify(&self.backing, &tx)?;
+            let next_head = audit_head(&tx)?;
             anyhow::ensure!(
-                next_head.0 >= lease.floor.0,
+                next_head.0 >= tx.lease.floor.0,
                 "audit head regressed before commit"
             );
-            let schema_version: i64 =
-                transaction.pragma_query_value(None, "user_version", |r| r.get(0))?;
+            let schema_version: i64 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
             let namespace = if schema_version >= 2 {
-                Some(transaction.query_row(
+                Some(tx.query_row(
                     "SELECT namespace_uuid FROM control_meta WHERE singleton=1",
                     [],
                     |r| r.get(0),
@@ -1683,11 +1690,48 @@ impl Store {
             } else {
                 None
             };
-            let checked_changes = transaction.total_changes();
-            let mut capacity = self.lock_access_capacity(source_access)?;
-            let capacity_prefix = capacity.prepare(&transaction)?;
-            let positive_bindings = positive_bindings.map(Arc::new);
-            review_access::validate_context(self, &transaction, source_access, operation_class)?;
+            let checked_changes = tx.total_changes();
+            let mut capacity = self.lock_access_capacity(tx.source_access)?;
+            let capacity_prefix = capacity.prepare(&tx)?;
+            let positive_bindings = tx.positive_bindings.take().map(Arc::new);
+            review_access::validate_context(self, &tx, tx.source_access, tx.operation_class)?;
+            Ok((
+                next_head,
+                namespace,
+                checked_changes,
+                capacity,
+                capacity_prefix,
+                positive_bindings,
+            ))
+        })();
+        let (
+            next_head,
+            namespace,
+            checked_changes,
+            mut capacity,
+            capacity_prefix,
+            positive_bindings,
+        ) = match prepared {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                record_failure(&mut tx.lease, &error);
+                return Err(error);
+            }
+        };
+
+        // A refusal here rolls back the transaction and discards the prepared
+        // capacity snapshot. It says nothing about the Store's integrity.
+        check_before_commit(&tx)?;
+        let CheckedTransaction {
+            transaction,
+            connection,
+            mut lease,
+            source_access,
+            operation_class,
+            activate_supervision,
+            ..
+        } = tx;
+        let result = (|| {
             transaction.commit()?;
             // Publish committed positive ownership before any fallible
             // filesystem observation. This is not an authority/ACK: a failed
@@ -1718,10 +1762,9 @@ impl Store {
                 .store(checked_changes, Ordering::Release);
             Ok(())
         })();
-        if let Err(error) = &result
-            && !review_access::admission_refusal(error, source_access.is_some())
-        {
-            self.storage_failure(&mut lease, error);
+        drop(capacity);
+        if let Err(error) = &result {
+            record_failure(&mut lease, error);
         }
         result
     }
