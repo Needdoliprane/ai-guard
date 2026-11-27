@@ -24,6 +24,8 @@ La réponse prépare la comparaison côté broker. L’admission résout la mêm
 
 Le même préfixe privé expose `GET …/{binding_ref}/launch-spec` pour le LaunchSpec exact et `POST …/{binding_ref}/initial-decision` avec un corps vide pour la décision Initial. Le gateway dérive la demande du lancement confirmé et garde le reçu sous l’identité broker. Une nouvelle décision renvoie HTTP 201, le rejeu du reçu renvoie HTTP 200. Cette étape consigne aussi les décisions de revue et de refus. L’admission qui réserve le quota relève d’une requête distincte. Le raccord au Writer et au parcours applicatif reste ouvert.
 
+`POST …/{binding_ref}/admission/cancel-reserved` clôt une réservation intacte sous la même identité broker. La demande lie le reçu d’admission initial, le namespace, le worker, la tentative et sa révision à une opération d’annulation stable. Le broker doit d’abord établir qu’aucun travail runtime n’a commencé. Le Store vérifie le prédécesseur exact et consigne l’annulation et la libération du quota dans la même transaction, y compris après révocation de l’initiateur. Rejouer la même annulation retrouve le reçu durable. Le parcours STOP du broker doit encore produire cette demande.
+
 ## Un vrai canal de conversation
 
 [Étude des protocoles et oracles de recette](evidence/2026-11-25/provider-conversation.fr.md).

@@ -239,7 +239,7 @@ pub fn control_route(method: &Method, path: &str) -> Option<ControlRouteIdentity
                 "session-confirmations",
                 id,
                 "admission",
-                "reconcile",
+                "reconcile" | "cancel-reserved",
             ],
         ) if v1 && canonical_uuid(id) => Some(BrokerSession),
         // Proposed owned broker-supervision targets (`OwnedBrokerOperationV2`).

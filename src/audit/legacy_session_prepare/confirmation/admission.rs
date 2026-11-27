@@ -25,7 +25,7 @@ pub(in crate::audit) use arm::{
     LEGACY_NAMED_ARM_KIND, legacy_named_arm_predecessor, validate_named_arm_initiator,
 };
 #[cfg(test)]
-pub(in crate::audit) use cancel::LegacyNamedCancelReservationV1;
+pub(crate) use cancel::LegacyNamedCancelReservationV1;
 pub(crate) use cancel::LegacyNamedCancelV1;
 pub(in crate::audit) use cancel::validate_legacy_named_cancel;
 pub(crate) use initial_decision::LegacyNamedInitialDecision;

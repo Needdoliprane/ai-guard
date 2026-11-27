@@ -1,18 +1,24 @@
 //! HTTP bindings for the versioned, tenant-scoped supervision Store.
 use super::*;
-use crate::audit::legacy_session_prepare::LegacyNamedInitialDecision;
+use crate::audit::legacy_session_prepare::{
+    LegacyNamedCancelReservationV1, LegacyNamedInitialDecision,
+};
 use crate::control::{
     AdmissionResultV1, ArmResultV1, ArmV1, ArmedStartClaimV1, ControlCapabilitiesV1,
     ControlProtocolV1, ExportRequestV1, HelperClaimResultV1, HelperCleanupV1, HelperObservationV1,
     HelperStartClaimV1, MutationReceiptV1, MutationResultV1, SupervisedAdmissionV1,
     session_control::{
         LEGACY_CONFIRMED_LAUNCH_SPEC_RESPONSE_BYTES, LEGACY_NAMED_ADMISSION_RECEIPT_NOT_FOUND,
-        LegacyConfirmedPlanV1, LegacyNamedAdmissionReceiptV1, LegacyNamedSupervisedAdmissionV1,
-        canonical_uuid,
+        LEGACY_NAMED_ADMISSION_REQUEST_BYTES, LegacyConfirmedPlanV1, LegacyNamedAdmissionReceiptV1,
+        LegacyNamedSupervisedAdmissionV1, canonical_uuid,
     },
 };
 use crate::tenant_store::StoreHealth;
-use axum::{body::Bytes, extract::FromRequestParts, http::request::Parts};
+use axum::{
+    body::Bytes,
+    extract::{DefaultBodyLimit, FromRequestParts},
+    http::request::Parts,
+};
 
 // Deliberately merged only into /api/v1, preserving historical /api aliases.
 pub(super) fn routes() -> Router<GatewayState> {
@@ -38,6 +44,11 @@ pub(super) fn routes() -> Router<GatewayState> {
         .route(
             "/control/session-confirmations/{binding_ref}/admission/reconcile",
             post(reconcile_named_admission),
+        )
+        .route(
+            "/control/session-confirmations/{binding_ref}/admission/cancel-reserved",
+            post(cancel_named_reservation)
+                .layer(DefaultBodyLimit::max(LEGACY_NAMED_ADMISSION_REQUEST_BYTES)),
         )
         .route("/workers/supervised-reservations", post(reserve))
         .route("/workers/{id}/arms", post(arm))
@@ -405,6 +416,38 @@ async fn reconcile_named_admission(
                         )
                     })?;
                 named_admission_response(receipt, &redactor)
+            },
+        )
+        .await
+}
+
+async fn cancel_named_reservation(
+    _private: PrivateControlTransport,
+    broker: workload::VerifiedBroker,
+    Path(binding_ref): Path<String>,
+    body: Result<Json<LegacyNamedCancelReservationV1>, JsonRejection>,
+) -> ApiResult<Json<MutationResultV1>> {
+    let binding_ref = canonical_uuid(&binding_ref).map_err(control_error)?;
+    let request = parse_json(body)?;
+    if request.binding_ref != binding_ref {
+        return Err(control_error(ControlFailure::InvalidRequest.into()));
+    }
+    broker
+        .blocking_on(
+            store_io::Lane::Control,
+            move |tenant, identity, redactor| {
+                let store = named_admission_store(&tenant, &redactor)?;
+                let result = store
+                    .cancel_legacy_named_reservation(&identity, &request)
+                    .map_err(|error| named_admission_error(&tenant.store, error))?;
+                let value =
+                    serde_json::to_value(&result).map_err(|error| control_error(error.into()))?;
+                if redactor.value_unclipped(&value) != value {
+                    return Err(control_error(anyhow::anyhow!(
+                        "named reservation cancellation receipt requires redaction"
+                    )));
+                }
+                Ok(Json(result))
             },
         )
         .await

@@ -924,8 +924,36 @@ fn legacy_named_reservation_refuses_generic_prepare_and_stays_cancellable() {
     assert_eq!(integrity.head_hash, cancelled.receipt.audit_hash);
 }
 
-#[test]
-fn legacy_named_cancel_releases_an_unarmed_reservation_after_revocation() {
+#[tokio::test]
+async fn legacy_named_cancel_releases_an_unarmed_reservation_after_revocation() {
+    use crate::{
+        api::{GatewayState, TenantGateway, gateway_router},
+        control::MutationResultV1,
+    };
+    use axum::{
+        body::{Body, to_bytes},
+        http::{Request, StatusCode, header},
+    };
+    use std::sync::Arc;
+    use tower::ServiceExt;
+
+    const RUNNER: &str = "synthetic-named-cancel-runner-fixture";
+    let router = |store: Arc<Store>| {
+        gateway_router(
+            GatewayState::for_tenants(
+                vec![TenantGateway {
+                    tenant_id: TENANT.into(),
+                    store,
+                    runner_token: RUNNER.into(),
+                    viewer_token: "synthetic-named-cancel-viewer-fixture".into(),
+                }],
+                Policy::default(),
+                None,
+                Redactor::new(vec![]),
+            )
+            .unwrap(),
+        )
+    };
     let f = Fixture::new();
     let (store, _) = f.provision(f.create().unwrap()).unwrap();
     let (request, mut credential) = f.confirmed_request(&store);
@@ -1024,9 +1052,41 @@ fn legacy_named_cancel_releases_an_unarmed_reservation_after_revocation() {
             .is_none()
     );
 
-    let committed = store
-        .cancel_legacy_named_reservation(&broker, &cancel)
+    let store = Arc::new(store);
+    let app = router(Arc::clone(&store));
+    let public_path = format!(
+        "/api/v1/control/session-confirmations/{}/admission/cancel-reserved",
+        cancel.binding_ref
+    );
+    let private_path = format!("/control{public_path}");
+    let wrong_path = format!(
+        "/control/api/v1/control/session-confirmations/{}/admission/cancel-reserved",
+        Uuid::new_v4()
+    );
+    let post = |path: &str, token: &str| {
+        Request::post(path)
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(serde_json::to_vec(&cancel).unwrap()))
+            .unwrap()
+    };
+    for (path, token, status) in [
+        (public_path.as_str(), BROKER_TOKEN, StatusCode::NOT_FOUND),
+        (private_path.as_str(), RUNNER, StatusCode::FORBIDDEN),
+        (wrong_path.as_str(), BROKER_TOKEN, StatusCode::BAD_REQUEST),
+    ] {
+        let refusal = app.clone().oneshot(post(path, token)).await.unwrap();
+        assert_eq!(refusal.status(), status);
+    }
+    assert_eq!(store.integrity().unwrap().head_hash, revoked.audit_hash);
+    assert_eq!(store.worker_quota(&quota).unwrap().held_workers, 1);
+    let response = app
+        .oneshot(post(&private_path, BROKER_TOKEN))
+        .await
         .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let committed: MutationResultV1 =
+        serde_json::from_slice(&to_bytes(response.into_body(), 128 * 1024).await.unwrap()).unwrap();
     assert!(committed.disposition.is_none());
     assert_eq!(committed.worker.state, WorkerStateV1::Cancelled);
     assert_eq!(committed.worker.revision, reserved.revision + 1);
@@ -1035,10 +1095,14 @@ fn legacy_named_cancel_releases_an_unarmed_reservation_after_revocation() {
     assert_eq!(store.worker_quota(&quota).unwrap().held_workers, 0);
     drop(store);
 
-    let reopened = f.reopen();
-    let replay = reopened
-        .cancel_legacy_named_reservation(&broker, &cancel)
+    let reopened = Arc::new(f.reopen());
+    let response = router(Arc::clone(&reopened))
+        .oneshot(post(&private_path, BROKER_TOKEN))
+        .await
         .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let replay: MutationResultV1 =
+        serde_json::from_slice(&to_bytes(response.into_body(), 128 * 1024).await.unwrap()).unwrap();
     assert!(replay.disposition.is_none());
     assert_eq!(replay.receipt, committed.receipt);
     assert!(

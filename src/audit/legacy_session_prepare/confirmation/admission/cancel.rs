@@ -139,7 +139,6 @@ impl Store {
     /// including after human authority was withdrawn or supervision reopened.
     /// The Store establishes the absence of a durable arm or claim. The broker
     /// must independently establish that no runtime work preceded this boundary.
-    #[allow(dead_code, reason = "private named cancellation transport is pending")]
     pub(crate) fn cancel_legacy_named_reservation(
         &self,
         broker: &BrokerIdentityV1,
