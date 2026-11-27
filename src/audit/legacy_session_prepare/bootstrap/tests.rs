@@ -169,6 +169,37 @@ impl Fixture {
         startup.provision_target(self.operator.clone(), self.target.clone())
     }
 
+    fn issue_additional_broker(&self, store: &Store, token: &str) {
+        let broker_id = Uuid::new_v4().to_string();
+        let incarnation_id = Uuid::new_v4().to_string();
+        let credential_id = Uuid::new_v4().to_string();
+        store
+            .issue_workload_binding(&WorkloadBindingIssueV1 {
+                operation_id: Uuid::new_v4().to_string(),
+                credential_id: credential_id.clone(),
+                subject: WorkloadSubjectV1::Broker {
+                    broker_id: broker_id.clone(),
+                    incarnation_id: incarnation_id.clone(),
+                },
+                sha256_digest: hex::encode(Sha256::digest(token)),
+                ..self.credential.clone()
+            })
+            .unwrap();
+        store
+            .mutate_broker_grant(&BrokerGrantMutationV1 {
+                operation_id: Uuid::new_v4().to_string(),
+                broker_id,
+                incarnation_id,
+                credential_id,
+                authorities: vec![BrokerAuthorityV1 {
+                    authority_id: Uuid::new_v4().to_string(),
+                    runtime_kind: BrokerRuntimeKindV1::Docker,
+                }],
+                ..self.grant.clone()
+            })
+            .unwrap();
+    }
+
     fn reopen(&self) -> Store {
         Store::open_existing_for_tenant(
             &self.source,
@@ -938,6 +969,7 @@ async fn legacy_named_cancel_releases_an_unarmed_reservation_after_revocation() 
     use tower::ServiceExt;
 
     const RUNNER: &str = "synthetic-named-cancel-runner-fixture";
+    const OTHER_BROKER: &str = "synthetic-named-cancel-other-broker-fixture";
     let router = |store: Arc<Store>| {
         gateway_router(
             GatewayState::for_tenants(
@@ -956,6 +988,7 @@ async fn legacy_named_cancel_releases_an_unarmed_reservation_after_revocation() 
     };
     let f = Fixture::new();
     let (store, _) = f.provision(f.create().unwrap()).unwrap();
+    f.issue_additional_broker(&store, OTHER_BROKER);
     let (request, mut credential) = f.confirmed_request(&store);
     let Some(AuthenticatedWorkload::Broker(broker)) =
         store.authenticate_workload_token(BROKER_TOKEN).unwrap()
@@ -1073,6 +1106,7 @@ async fn legacy_named_cancel_releases_an_unarmed_reservation_after_revocation() 
     for (path, token, status) in [
         (public_path.as_str(), BROKER_TOKEN, StatusCode::NOT_FOUND),
         (private_path.as_str(), RUNNER, StatusCode::FORBIDDEN),
+        (private_path.as_str(), OTHER_BROKER, StatusCode::NOT_FOUND),
         (wrong_path.as_str(), BROKER_TOKEN, StatusCode::BAD_REQUEST),
     ] {
         let refusal = app.clone().oneshot(post(path, token)).await.unwrap();
@@ -1418,34 +1452,7 @@ async fn legacy_named_admission_route_replays_the_committed_receipt_after_reopen
         audit_seq: manual_decision.seq,
         audit_hash: manual_decision.hash,
     };
-    let broker_id = Uuid::new_v4().to_string();
-    let incarnation_id = Uuid::new_v4().to_string();
-    let credential_id = Uuid::new_v4().to_string();
-    store
-        .issue_workload_binding(&WorkloadBindingIssueV1 {
-            operation_id: Uuid::new_v4().to_string(),
-            credential_id: credential_id.clone(),
-            subject: WorkloadSubjectV1::Broker {
-                broker_id: broker_id.clone(),
-                incarnation_id: incarnation_id.clone(),
-            },
-            sha256_digest: hex::encode(Sha256::digest(OTHER_BROKER)),
-            ..f.credential.clone()
-        })
-        .unwrap();
-    store
-        .mutate_broker_grant(&BrokerGrantMutationV1 {
-            operation_id: Uuid::new_v4().to_string(),
-            broker_id,
-            incarnation_id,
-            credential_id,
-            authorities: vec![BrokerAuthorityV1 {
-                authority_id: Uuid::new_v4().to_string(),
-                runtime_kind: BrokerRuntimeKindV1::Docker,
-            }],
-            ..f.grant.clone()
-        })
-        .unwrap();
+    f.issue_additional_broker(&store, OTHER_BROKER);
     let store = Arc::new(store);
     let app = make_router(Arc::clone(&store));
     let path = format!(

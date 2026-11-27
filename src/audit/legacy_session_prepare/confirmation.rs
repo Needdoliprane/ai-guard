@@ -17,7 +17,6 @@ mod admission;
 #[cfg(test)]
 mod tests;
 
-#[cfg(test)]
 pub(crate) use admission::LegacyNamedCancelReservationV1;
 pub(in crate::audit) use admission::{
     ADMITTED, LEGACY_NAMED_ARM_KIND, legacy_named_arm_predecessor, require_named_admission_link,
