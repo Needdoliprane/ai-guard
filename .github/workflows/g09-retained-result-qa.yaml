@@ -1,0 +1,118 @@
+name: G09 retained result Linux QA
+
+'on':
+  push:
+    branches: [codex/g09-retained-result-qa-20261127]
+    paths: [.github/workflows/g09-retained-result-qa.yaml]
+
+permissions:
+  contents: read
+
+jobs:
+  retained-result:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      SOURCE_SHA: 57f5f4768fbe5184e99033d1be68facd3fce8405
+      SOURCE_TREE: add5dd5800a9d86c774919b110685f164b612016
+      CARGO_BUILD_JOBS: '1'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      CARGO_TERM_COLOR: never
+      RUST_MIN_STACK: '8388608'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: 57f5f4768fbe5184e99033d1be68facd3fce8405
+          persist-credentials: false
+
+      - name: Build one library harness and verify four exact tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          selectors=(
+            runner::broker::executor::results::observed_result_tests::retained_result_reuses_its_sample_only_for_the_same_terminal_facts
+            runner::broker::executor::journal::tests::cancelled_recovery_tests::cancelled_running_worker_reconciles_an_exact_terminal_without_a_new_start
+            runner::broker::executor::journal::tests::cancelled_recovery_tests::cancelled_running_worker_rejects_divergent_runtime_observations_without_mutation
+            runner::broker::executor::journal::tests::cancelled_recovery_tests::cancelled_terminal_ack_loss_replays_result_publication_exactly_once
+          )
+
+          report_not_run() {
+            local selector
+            for selector in "${selectors[@]}"; do
+              printf 'test=%s status=NOT_RUN\n' "$selector"
+            done
+          }
+
+          if [[ "$(git rev-parse HEAD 2>/dev/null)" != "$SOURCE_SHA" ||
+                "$(git rev-parse 'HEAD^{tree}' 2>/dev/null)" != "$SOURCE_TREE" ]]; then
+            printf 'source=FAIL\n'
+            report_not_run
+            exit 1
+          fi
+          printf 'source=PASS\nsource_sha=%s\nsource_tree=%s\n' "$SOURCE_SHA" "$SOURCE_TREE"
+          export AI_GUARD_BUILD_REVISION="$SOURCE_SHA"
+
+          # Keep fixture paths short for Unix sockets and keep all raw output private.
+          scratch=$(mktemp -d /tmp/aig-g09.XXXXXX)
+          trap 'rm -rf -- "$scratch"' EXIT
+          export TMPDIR="$scratch"
+          export CARGO_TARGET_DIR="$scratch/target"
+          build_json="$scratch/build.jsonl"
+
+          if ! cargo fetch --locked --target host-tuple >"$scratch/fetch.log" 2>&1; then
+            printf 'fetch=FAIL\nbuild=NOT_RUN\n'
+            report_not_run
+            exit 1
+          fi
+          printf 'fetch=PASS\n'
+
+          if ! cargo test --locked --offline --features mysql-storage --lib --no-run \
+              --message-format=json >"$build_json" 2>"$scratch/build.stderr"; then
+            printf 'build=FAIL\n'
+            jq -Rr 'fromjson? | objects
+              | select(.reason == "compiler-message" and .message.level == "error")
+              | .message.code.code // empty | strings | select(test("\\AE[0-9]{4}\\z"))
+              | "compiler_error=" + .' "$build_json" 2>/dev/null | sort -u || true
+            report_not_run
+            exit 1
+          fi
+          printf 'build=PASS\n'
+
+          if ! libtest=$(jq -ers '[.[] | select(.reason == "compiler-artifact"
+              and .target.name == "agentsandbox" and .target.kind == ["lib"]
+              and .profile.test == true and (.executable | type) == "string") | .executable]
+              | unique | select(length == 1) | .[0]' "$build_json" 2>/dev/null) ||
+              [[ "$libtest" != "$CARGO_TARGET_DIR"/debug/deps/agentsandbox-* ||
+                 ! -f "$libtest" || ! -x "$libtest" || -L "$libtest" ]]; then
+            printf 'libtest=FAIL\n'
+            report_not_run
+            exit 1
+          fi
+          printf 'libtest=PASS\n'
+
+          check_selector() {
+            local selector=$1
+            local log="$scratch/test.log"
+            if ! "$libtest" --exact "$selector" --test-threads=1 --color never >"$log" 2>&1; then
+              printf 'FAIL'
+            elif grep -Fqx 'running 0 tests' "$log"; then
+              printf 'NO_TEST'
+            elif grep -Fqx 'running 1 test' "$log" &&
+                grep -Fqx "test $selector ... ok" "$log" &&
+                grep -Eq '^test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; [0-9]+ filtered out;' "$log"; then
+              printf 'PASS'
+            else
+              printf 'FAIL'
+            fi
+          }
+
+          failed=0
+          for selector in "${selectors[@]}"; do
+            status=$(check_selector "$selector")
+            printf 'test=%s status=%s\n' "$selector" "$status"
+            [[ "$status" == PASS ]] || failed=1
+          done
+          exit "$failed"
