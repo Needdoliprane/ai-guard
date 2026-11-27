@@ -1045,21 +1045,7 @@ fn target_receipt(
     }
 }
 
-/// A UUIDv8 bound to the operation, distinct per record family so one operation
-/// cannot collide across the preparation and its target provisioning.
-pub(crate) fn bound_event_id(domain: &[u8], operation_id: Uuid) -> String {
-    use sha2::{Digest, Sha256};
-    let digest = Sha256::new()
-        .chain_update(domain)
-        .chain_update([0])
-        .chain_update(operation_id.as_bytes())
-        .finalize();
-    let mut bytes = [0u8; 16];
-    bytes.copy_from_slice(&digest[..16]);
-    uuid::Builder::from_custom_bytes(bytes)
-        .into_uuid()
-        .to_string()
-}
+pub(crate) use crate::model::bound_event_id;
 
 fn preparation_event_id(operation_id: Uuid) -> String {
     bound_event_id(b"ai-guard:session-prepare:v1", operation_id)

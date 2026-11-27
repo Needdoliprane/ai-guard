@@ -189,6 +189,13 @@ pub(crate) struct LegacyNamedInitialDecisionV1 {
 }
 
 impl LegacyNamedInitialDecisionV1 {
+    pub(crate) fn request_id(binding_ref: Uuid) -> String {
+        crate::model::bound_event_id(
+            b"ai-guard:legacy-named-initial-policy-request:v1",
+            binding_ref,
+        )
+    }
+
     pub(crate) fn validate(&self) -> anyhow::Result<()> {
         let binding_ref = self.binding_ref.to_string();
         invalid(
@@ -200,6 +207,7 @@ impl LegacyNamedInitialDecisionV1 {
                 && !self.request.human_approved
                 && self.request.approval_hash.is_none()
                 && self.request.correlation_id.as_deref() == Some(binding_ref.as_str())
+                && self.request.request_id == Self::request_id(self.binding_ref)
                 && self.request.request_id == self.receipt.request_id
                 && self.receipt.request_hash == crate::policy::request_hash(&self.request),
         )?;

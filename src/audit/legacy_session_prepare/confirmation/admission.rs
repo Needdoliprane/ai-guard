@@ -29,6 +29,7 @@ pub(in crate::audit) use cancel::LegacyNamedCancelReservationV1;
 pub(crate) use cancel::LegacyNamedCancelV1;
 pub(in crate::audit) use cancel::validate_legacy_named_cancel;
 pub(crate) use initial_decision::LegacyNamedInitialDecision;
+pub(in crate::audit) use initial_decision::require_named_admission_link;
 
 pub(in crate::audit) const ADMITTED: &str = "control.legacy_session_prepare.admission";
 
@@ -269,6 +270,13 @@ pub(super) fn validate_fact(db: &Connection, stored: &StoredEvent) -> anyhow::Re
         authority.expires_at,
     )?;
     request.require_plan(&plan)?;
+    initial_decision::validate_historical_admission(
+        db,
+        &plan,
+        &confirmed,
+        &fact,
+        &supervised.admission,
+    )?;
     conflict(
         request.input_hash()? == fact.input_hash
             && supervised.admission.receipt.phase == DecisionPhaseV1::Initial,
@@ -365,7 +373,7 @@ impl Store {
         // The launch confirmation does not approve a separate policy review.
         let admission = &request.admission.admission;
         conflict(admission.receipt.phase == DecisionPhaseV1::Initial)?;
-        initial_decision::require_named_origin_when_used(tx, broker, &resolved, admission)?;
+        initial_decision::require_admission_decision(tx, broker, &resolved, admission)?;
         conflict(supervision::operation_receipt(tx, &admission.operation_id)?.is_none())?;
         Ok(resolved)
     }
@@ -409,14 +417,6 @@ impl Store {
         };
         quota.validate()?;
         let resolved = self.resolve_fresh_legacy_named_admission(&tx, broker, request, &clock)?;
-        let admission = &request.admission.admission;
-        let stored = Self::lookup_decision(
-            &tx,
-            &admission.decision_request,
-            &admission.receipt.request_hash,
-        )?
-        .ok_or(ControlFailure::InvalidRequest)?;
-        crate::audit::worker_admission::require_receipt(&admission.receipt, &stored)?;
         self.commit_authorized(tx, &clock)?;
         resolved.release_at(Utc::now())?;
         Ok(None)
@@ -455,7 +455,7 @@ impl Store {
             return Ok(receipt);
         }
         let resolved = self.resolve_fresh_legacy_named_admission(&tx, broker, request, &clock)?;
-        let worker_record = self.build_admission_record(
+        let worker_record = self.build_admission_after_decision_receipt(
             &tx,
             &request.admission.admission,
             policy,

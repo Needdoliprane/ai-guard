@@ -1,6 +1,21 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+/// A UUIDv8 bound to one operation and a domain-specific record family.
+pub(crate) fn bound_event_id(domain: &[u8], operation_id: uuid::Uuid) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::new()
+        .chain_update(domain)
+        .chain_update([0])
+        .chain_update(operation_id.as_bytes())
+        .finalize();
+    let mut bytes = [0u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    uuid::Builder::from_custom_bytes(bytes)
+        .into_uuid()
+        .to_string()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum Outcome {

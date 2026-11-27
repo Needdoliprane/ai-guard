@@ -949,6 +949,27 @@ impl Store {
         let stored = Self::lookup_decision(tx, request, &admission.receipt.request_hash)?
             .ok_or(ControlFailure::InvalidRequest)?;
         worker_admission::require_receipt(&admission.receipt, &stored)?;
+        self.build_admission_after_decision_receipt(
+            tx,
+            admission,
+            policy,
+            fresh_decision,
+            jev,
+            quota,
+        )
+    }
+    /// Shared quota and projection construction after the selected rail has
+    /// verified its exact durable Allow receipt inside this transaction.
+    pub(in crate::audit) fn build_admission_after_decision_receipt(
+        &self,
+        tx: &Transaction<'_>,
+        admission: &AdmissionV1,
+        policy: &policy::Policy,
+        fresh_decision: Decision,
+        jev: Value,
+        quota: &QuotaPolicyV1,
+    ) -> anyhow::Result<ControlRecord> {
+        let request = &admission.decision_request;
         let existing: bool = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM workers WHERE request_id=?1 OR session_id=?2)",
             params![request.request_id, admission.launch.session_id],
@@ -1636,11 +1657,27 @@ fn validate_admission_input(
         .optional()?
         .context("admission receipt event is missing")?;
     let admission = worker_admission::historical_admission(worker, record, &source, admission_seq)?;
-    let linked = Store::lookup_decision(
-        db,
-        &admission.decision_request,
-        &worker.receipt.request_hash,
-    )?
+    let linked = if source
+        .event
+        .data
+        .get(super::decision_codec::LEGACY_NAMED_ORIGIN)
+        .is_some()
+    {
+        // The named admission's structural fact separately checks the
+        // confirmation and broker provenance of this exact decision.
+        super::legacy_session_prepare::require_named_admission_link(db, &source, admission_seq)?;
+        super::decision_codec::find_receipt(
+            [source.clone()],
+            &admission.decision_request,
+            &worker.receipt.request_hash,
+        )?
+    } else {
+        Store::lookup_decision(
+            db,
+            &admission.decision_request,
+            &worker.receipt.request_hash,
+        )?
+    }
     .context("admission receipt decision is missing")?;
     anyhow::ensure!(
         linked.seq == source.seq && linked.hash == source.hash,

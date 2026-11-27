@@ -20,8 +20,8 @@ mod tests;
 #[cfg(test)]
 pub(in crate::audit) use admission::LegacyNamedCancelReservationV1;
 pub(in crate::audit) use admission::{
-    ADMITTED, LEGACY_NAMED_ARM_KIND, legacy_named_arm_predecessor, validate_admission_initiator,
-    validate_legacy_named_cancel, validate_named_arm_initiator,
+    ADMITTED, LEGACY_NAMED_ARM_KIND, legacy_named_arm_predecessor, require_named_admission_link,
+    validate_admission_initiator, validate_legacy_named_cancel, validate_named_arm_initiator,
 };
 pub(crate) use admission::{LegacyNamedArmV1, LegacyNamedCancelV1, LegacyNamedInitialDecision};
 

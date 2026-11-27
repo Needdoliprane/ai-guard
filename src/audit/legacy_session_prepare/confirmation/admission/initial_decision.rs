@@ -1,12 +1,13 @@
 //! Durable Initial policy evidence constructed from a retained confirmation.
 use super::*;
 use crate::{
-    audit::{decision_codec, worker_admission},
+    audit::{
+        decision_codec::{self, LEGACY_NAMED_ORIGIN},
+        worker_admission,
+    },
     control::{AdmissionV1, DecisionReceiptV1, session_control::LegacyNamedInitialDecisionV1},
     model::DecisionRequest,
 };
-
-const ORIGIN: &str = "legacy_named_confirmation";
 
 pub(crate) enum LegacyNamedInitialDecision {
     Evaluate(DecisionRequest),
@@ -24,79 +25,162 @@ struct Origin {
     actor: AdmissionActor,
 }
 
-fn request_id(binding_ref: Uuid) -> String {
-    key(
-        "ai-guard:legacy-named-initial-policy-request:v1",
-        binding_ref,
-    )
-}
-
 fn decision_id(binding_ref: Uuid) -> String {
     key("ai-guard:legacy-named-initial-policy-event:v1", binding_ref)
 }
 
-fn request_for(resolved: &ResolvedLegacyConfirmedPlan) -> anyhow::Result<DecisionRequest> {
-    resolved.launch.validate()?;
-    resolved.launch.validate_supervised()?;
+fn request_for(
+    plan: &LegacyConfirmedPlanV1,
+    launch: &LaunchSpecV1,
+) -> anyhow::Result<DecisionRequest> {
+    launch.validate()?;
+    launch.validate_supervised()?;
     Ok(DecisionRequest {
-        request_id: request_id(resolved.plan.binding_ref),
-        profile: resolved.launch.profile.clone(),
-        command: resolved.launch.command.clone(),
+        request_id: LegacyNamedInitialDecisionV1::request_id(plan.binding_ref),
+        profile: launch.profile.clone(),
+        command: launch.command.clone(),
         project_id: None,
         sandbox_id: None,
         agent_id: None,
-        session_id: Some(resolved.plan.session_id.to_string()),
-        correlation_id: Some(resolved.plan.binding_ref.to_string()),
+        session_id: Some(plan.session_id.to_string()),
+        correlation_id: Some(plan.binding_ref.to_string()),
         trace_id: None,
         human_approved: false,
         approval_hash: None,
         execution_mode: None,
-        provider_resolution: resolved.launch.provider_resolution.clone(),
+        provider_resolution: launch.provider_resolution.clone(),
     })
 }
 
-fn require_origin(
+fn read_origin(
+    stored: &StoredEvent,
+    plan: &LegacyConfirmedPlanV1,
+    confirmed: &StoredEvent,
+    request: &DecisionRequest,
+) -> anyhow::Result<Origin> {
+    let origin: Origin = serde_json::from_value(stored.event.data[LEGACY_NAMED_ORIGIN].clone())
+        .map_err(|_| ControlFailure::Conflict)?;
+    conflict(
+        origin.version == 1
+            && origin.binding_ref == plan.binding_ref
+            && origin.confirmation_hash == confirmed.hash
+            && origin.launch_spec_hash == plan.launch_spec_hash
+            && stored.seq > confirmed.seq
+            && stored.event.kind == decision_codec::KIND
+            && stored.event.id == decision_id(plan.binding_ref)
+            && stored.event.data["request_id"].as_str() == Some(request.request_id.as_str())
+            && stored.event.session_id == request.session_id
+            && stored.event.correlation_id == request.correlation_id
+            && stored.event.command.as_ref() == Some(&request.command),
+    )?;
+    Ok(origin)
+}
+
+fn require_current_origin(
     stored: &StoredEvent,
     resolved: &ResolvedLegacyConfirmedPlan,
     broker: &BrokerIdentityV1,
     request: &DecisionRequest,
 ) -> anyhow::Result<()> {
-    let origin: Origin = serde_json::from_value(stored.event.data[ORIGIN].clone())
-        .map_err(|_| ControlFailure::Conflict)?;
+    let origin = read_origin(stored, &resolved.plan, &resolved.confirmed, request)?;
     conflict(
-        origin.version == 1
-            && origin.binding_ref == resolved.plan.binding_ref
-            && origin.confirmation_hash == resolved.confirmed.hash
-            && origin.launch_spec_hash == resolved.plan.launch_spec_hash
-            && origin.authorization_revision >= resolved.initiator.authorization_revision
+        origin.authorization_revision >= resolved.initiator.authorization_revision
             && origin.authorization_revision <= resolved.authorization_revision
-            && origin.actor.matches_grant(broker)
-            && stored.seq > resolved.confirmed.seq
-            && stored.event.id == decision_id(resolved.plan.binding_ref)
-            && stored.event.session_id == request.session_id
-            && stored.event.correlation_id == request.correlation_id
-            && stored.event.command.as_ref() == Some(&request.command),
+            && origin.actor.matches_grant(broker),
     )
 }
 
-/// Earlier private callers can still present their own retained policy
-/// decision. The server-derived identity is reserved to the named issuer.
-pub(super) fn require_named_origin_when_used(
+fn lookup_named_decision(
+    db: &Connection,
+    binding_ref: Uuid,
+    request: &DecisionRequest,
+    hash: &str,
+) -> anyhow::Result<Option<StoredEvent>> {
+    let Some(stored) = event_by_id(db, &decision_id(binding_ref))? else {
+        return Ok(None);
+    };
+    let decision =
+        decision_codec::find_receipt([stored], request, hash)?.ok_or(ControlFailure::Conflict)?;
+    Ok(Some(decision))
+}
+
+/// Older callers can still present their existing retained policy decision.
+/// The named policy uses its own deterministic event lookup and scope.
+pub(super) fn require_admission_decision(
     tx: &CheckedTransaction<'_>,
     broker: &BrokerIdentityV1,
     resolved: &ResolvedLegacyConfirmedPlan,
     admission: &AdmissionV1,
 ) -> anyhow::Result<()> {
-    if admission.decision_request.request_id != request_id(resolved.plan.binding_ref) {
+    let request = &admission.decision_request;
+    let hash = &admission.receipt.request_hash;
+    let stored = if request.request_id
+        == LegacyNamedInitialDecisionV1::request_id(resolved.plan.binding_ref)
+    {
+        let expected = request_for(&resolved.plan, &resolved.launch)?;
+        conflict(hash == &policy::request_hash(&expected))?;
+        let stored = lookup_named_decision(tx, resolved.plan.binding_ref, &expected, hash)?
+            .ok_or(ControlFailure::InvalidRequest)?;
+        require_current_origin(&stored, resolved, broker, &expected)?;
+        stored
+    } else {
+        Store::lookup_decision(tx, request, hash)?.ok_or(ControlFailure::InvalidRequest)?
+    };
+    worker_admission::require_receipt(&admission.receipt, &stored)
+}
+
+/// Reconstruct and verify scoped policy evidence at the exact durable prefix.
+pub(super) fn validate_historical_admission(
+    db: &Connection,
+    plan: &LegacyConfirmedPlanV1,
+    confirmed: &StoredEvent,
+    fact: &AdmissionFact,
+    admission: &AdmissionV1,
+) -> anyhow::Result<()> {
+    if admission.decision_request.request_id
+        != LegacyNamedInitialDecisionV1::request_id(plan.binding_ref)
+    {
         return Ok(());
     }
-    let expected = request_for(resolved)?;
+    let expected = request_for(plan, &admission.launch)?;
     let hash = policy::request_hash(&expected);
     conflict(admission.receipt.request_hash == hash)?;
-    let stored =
-        Store::lookup_decision(tx, &expected, &hash)?.ok_or(ControlFailure::InvalidRequest)?;
-    require_origin(&stored, resolved, broker, &expected)?;
+    let stored = lookup_named_decision(db, plan.binding_ref, &expected, &hash)?
+        .ok_or(ControlFailure::Conflict)?;
+    let origin = read_origin(&stored, plan, confirmed, &expected)?;
+    let at = crate::broker_registry::parse_time(&stored.event.timestamp)?;
+    conflict(
+        stored.seq < fact.admission.audit_seq
+            && at < plan.expires_at
+            && origin.authorization_revision
+                == identity::authorization_revision_before(db, stored.seq)?
+            && origin.authorization_revision <= fact.authorization_revision
+            && origin
+                .actor
+                .matches_grant(&fact.actor.historical_identity()?),
+    )?;
+    workload::validate_broker_identity_at(
+        db,
+        &origin.actor.historical_identity()?,
+        at,
+        stored.seq,
+    )?;
     worker_admission::require_receipt(&admission.receipt, &stored)
+}
+
+pub(in crate::audit) fn require_named_admission_link(
+    db: &Connection,
+    decision: &StoredEvent,
+    admission_seq: i64,
+) -> anyhow::Result<()> {
+    let origin: Origin = serde_json::from_value(decision.event.data[LEGACY_NAMED_ORIGIN].clone())?;
+    let stored = event_by_id(db, &fact_id(origin.binding_ref))?.ok_or(ControlFailure::Conflict)?;
+    let fact: AdmissionFact = decoded(&stored, ADMITTED)?;
+    conflict(
+        fact.binding_ref == origin.binding_ref
+            && fact.admission.audit_seq == admission_seq
+            && decision.event.id == decision_id(origin.binding_ref),
+    )
 }
 
 fn recorded(
@@ -143,7 +227,7 @@ impl Store {
         Self::require_legacy_named_admission_format(&tx)?;
         let clock = workload::capture_control_time(&tx)?;
         let resolved = self.resolve_legacy_confirmed_plan(&tx, broker, binding_ref, &clock)?;
-        let request = request_for(&resolved)?;
+        let request = request_for(&resolved.plan, &resolved.launch)?;
         let hash = decision_codec::validate_request(&request, &self.redactor)?;
         let value = serde_json::to_value(&request)?;
         crate::control::invalid(
@@ -155,13 +239,15 @@ impl Store {
                 .as_ref()
                 .is_none_or(|(expected, _, _)| expected == &hash),
         )?;
-        let result = if let Some(stored) = Self::lookup_decision(&tx, &request, &hash)? {
-            require_origin(&stored, &resolved, broker, &request)?;
+        let result = if let Some(stored) = lookup_named_decision(&tx, binding_ref, &request, &hash)?
+        {
+            require_current_origin(&stored, &resolved, broker, &request)?;
             let result = recorded(stored, request, hash, binding_ref, true)?;
             self.commit_authorized(tx, &clock)?;
             result
         } else {
             anyhow::ensure!(tx.lease.active, ControlFailure::SupervisionInactive);
+            conflict(event_by_id(&tx, &fact_id(binding_ref))?.is_none())?;
             if let Some((_, decision, jev)) = proposed {
                 let mut event = decision_codec::build_event(&request, &hash, decision, jev)?;
                 event.id = decision_id(binding_ref);
@@ -174,9 +260,9 @@ impl Store {
                     authorization_revision: resolved.authorization_revision,
                     actor: AdmissionActor::capture(broker),
                 })?;
-                event.data[ORIGIN] = origin.clone();
+                event.data[LEGACY_NAMED_ORIGIN] = origin.clone();
                 let (event, payload) = self.prepare_event(event)?;
-                conflict(event.data[ORIGIN] == origin)?;
+                conflict(event.data[LEGACY_NAMED_ORIGIN] == origin)?;
                 let stored = self.append_with_authorized_capacity_class_at(
                     &tx,
                     event,
@@ -185,7 +271,7 @@ impl Store {
                     &clock,
                     Utc::now(),
                 )?;
-                require_origin(&stored, &resolved, broker, &request)?;
+                require_current_origin(&stored, &resolved, broker, &request)?;
                 let result = recorded(stored, request, hash, binding_ref, false)?;
                 self.commit_legacy_named_control(tx, &clock, |tx, current| {
                     let current =

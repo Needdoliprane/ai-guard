@@ -6,6 +6,7 @@ use crate::{
 use serde_json::{Value, json};
 
 pub(crate) const KIND: &str = "security.decision";
+pub(crate) const LEGACY_NAMED_ORIGIN: &str = "legacy_named_confirmation";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DecisionFailure {

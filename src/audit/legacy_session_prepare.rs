@@ -14,8 +14,9 @@ mod confirmation;
 pub(super) use confirmation::LegacyNamedCancelReservationV1;
 pub(super) use confirmation::{
     ADMITTED, LEGACY_NAMED_ARM_KIND, REFERENCE_KINDS, legacy_named_arm_predecessor, protect_manual,
-    protect_manual_at, session_is_fenced, validate_admission_initiator,
-    validate_legacy_named_cancel, validate_named_arm_initiator, validate_reference_event,
+    protect_manual_at, require_named_admission_link, session_is_fenced,
+    validate_admission_initiator, validate_legacy_named_cancel, validate_named_arm_initiator,
+    validate_reference_event,
 };
 pub(crate) use confirmation::{
     LegacyNamedArmV1, LegacyNamedCancelV1, LegacyNamedInitialDecision, LegacySessionLocalProof,

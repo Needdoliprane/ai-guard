@@ -611,6 +611,16 @@ async fn legacy_named_initial_decision_commits_once_and_is_usable_for_admission(
     let LegacyNamedInitialDecision::Evaluate(request) = pending else {
         panic!("fixture has no initial decision yet");
     };
+    let mut manual = request.clone();
+    manual.correlation_id = None;
+    let manual_decision = store
+        .decision(
+            &manual,
+            Some((policy::evaluate(&Policy::default(), &manual), Value::Null)),
+        )
+        .unwrap()
+        .unwrap();
+    let before = manual_decision.seq;
     *store.named_control_commit_observation.lock().unwrap() =
         Some(crate::broker_registry::parse_time(DEADLINE).unwrap());
     let refused = store
@@ -652,6 +662,10 @@ async fn legacy_named_initial_decision_commits_once_and_is_usable_for_admission(
     assert_eq!(
         store.integrity().unwrap().head_hash,
         committed.receipt.audit_hash
+    );
+    assert_eq!(
+        store.decision(&manual, None).unwrap().unwrap().hash,
+        manual_decision.hash
     );
     assert_eq!(
         store

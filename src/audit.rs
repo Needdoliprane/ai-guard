@@ -2107,7 +2107,11 @@ impl Store {
         request: &DecisionRequest,
         hash: &str,
     ) -> anyhow::Result<Option<StoredEvent>> {
-        let mut statement = db.prepare("SELECT seq,received_at,prev_hash,hash,payload FROM events WHERE kind='security.decision' AND json_extract(payload,'$.data.request_id')=?1 ORDER BY seq")?;
+        let mut statement = db.prepare(
+            "SELECT seq,received_at,prev_hash,hash,payload FROM events
+             WHERE kind='security.decision' AND json_extract(payload,'$.data.request_id')=?1
+               AND json_type(payload,'$.data.legacy_named_confirmation') IS NULL ORDER BY seq",
+        )?;
         let events = statement
             .query_map([&request.request_id], row_event)?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -2463,7 +2467,18 @@ impl Store {
                 |r| r.get(0),
             )?)
         };
-        let pending:i64=db.query_row("SELECT count(*) FROM events e WHERE e.kind='security.decision' AND e.decision='review' AND NOT EXISTS(SELECT 1 FROM events later WHERE later.kind='security.decision' AND later.seq>e.seq AND json_extract(later.payload,'$.data.request_id')=json_extract(e.payload,'$.data.request_id'))",[],|r|r.get(0))?;
+        let pending: i64 = db.query_row(
+            "SELECT count(*) FROM events e
+             WHERE e.kind='security.decision' AND e.decision='review' AND NOT EXISTS(
+                SELECT 1 FROM events later
+                WHERE later.kind='security.decision' AND later.seq>e.seq
+                  AND json_extract(later.payload,'$.data.request_id')=json_extract(e.payload,'$.data.request_id')
+                  AND json_type(later.payload,'$.data.legacy_named_confirmation')
+                      IS json_type(e.payload,'$.data.legacy_named_confirmation')
+             )",
+            [],
+            |r| r.get(0),
+        )?;
         let counts = overview::EventCounts {
             commands: archived.commands + count("kind='command.requested'")?,
             allowed: archived.allowed + count("kind='security.decision' AND decision='allow'")?,
