@@ -6,7 +6,7 @@ use super::{
 };
 use crate::{
     identity::{IdentityReceiptV1, PrincipalRefV1},
-    model::{Decision, DecisionRequest},
+    model::{CommandSpec, Decision, DecisionRequest},
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -198,6 +198,7 @@ impl LegacyConfirmedLaunchSpecV1 {
         self.plan.validate()?;
         self.launch.validate()?;
         self.launch.validate_supervised()?;
+        validate_legacy_launch_command(&self.launch.command)?;
         invalid(
             self.version == 1
                 && self.launch.credential_binding_id.is_none()
@@ -786,18 +787,22 @@ impl ProvisionLegacySessionTargetV1 {
                 && target.launch.provider == "generic"
                 && target.launch.provider_resolution.is_none()
                 && target.launch.credential_binding_id.is_none()
-                && target.launch.egress.is_none()
-                && !target.launch.command.argv.is_empty()
-                && target.launch.command.argv.len() <= 128
-                && target
-                    .launch
-                    .command
-                    .argv
-                    .iter()
-                    .all(|value| value.len() <= 4096 && !value.contains('\0')),
+                && target.launch.egress.is_none(),
         )?;
-        bounded(&target.launch.command.cwd, 4096)
+        validate_legacy_launch_command(&target.launch.command)
     }
+}
+
+fn validate_legacy_launch_command(command: &CommandSpec) -> anyhow::Result<()> {
+    invalid(
+        !command.argv.is_empty()
+            && command.argv.len() <= 128
+            && command
+                .argv
+                .iter()
+                .all(|value| value.len() <= 4096 && !value.contains('\0')),
+    )?;
+    bounded(&command.cwd, 4096)
 }
 
 /// Validate a canonical UUID string used by the catalog and receipts.

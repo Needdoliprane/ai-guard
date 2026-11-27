@@ -1488,6 +1488,12 @@ async fn legacy_named_admission_route_replays_the_committed_receipt_after_reopen
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn legacy_named_writer_retains_confirmed_intent_before_decision() {
+    for (cwd, executable) in [("/workspace/subdir", "/usr/bin/id"), ("/workspace", "")] {
+        retains_confirmed_intent_that_policy_refuses(cwd, executable).await;
+    }
+}
+
+async fn retains_confirmed_intent_that_policy_refuses(cwd: &str, executable: &str) {
     use crate::{
         broker::{
             journal::{
@@ -1502,7 +1508,10 @@ async fn legacy_named_writer_retains_confirmed_intent_before_decision() {
     use std::time::Duration;
 
     let mut fixture = Fixture::new();
-    fixture.target.target.launch.command.cwd = "/workspace/subdir".into();
+    fixture.target.target.launch.command = CommandSpec {
+        argv: vec![executable.into()],
+        cwd: cwd.into(),
+    };
     let (store, _) = fixture.provision(fixture.create().unwrap()).unwrap();
     let (confirmation, _) = fixture.confirm_target(&store);
     let Some(AuthenticatedWorkload::Broker(broker)) =

@@ -179,7 +179,7 @@ impl InitialOptionsDataV1 {
             || self.prompt.is_some()
             || self.model.is_some()
     }
-    fn validate(&self, before_resolution: bool) -> IntentResult<()> {
+    fn validate_settings(&self) -> IntentResult<()> {
         for path in [&self.project, &self.config_dir].into_iter().chain(
             [
                 &self.runtime_program,
@@ -251,7 +251,10 @@ impl InitialOptionsDataV1 {
         require(
             self.secret_env_file.is_none()
                 || self.profile == "observe" && self.network == NetworkMode::Bridge,
-        )?;
+        )
+    }
+    fn validate(&self, before_resolution: bool) -> IntentResult<()> {
+        self.validate_settings()?;
         if before_resolution {
             require(
                 self.argv.is_empty()
@@ -520,8 +523,6 @@ impl ExecutionIntentV1 {
             .map_err(|_| IntentError::InvalidIntent)?;
         let options = &self.initial_options.0;
         let launch = &confirmed.launch;
-        crate::control::bounded(&launch.command.cwd, 4096)
-            .map_err(|_| IntentError::InvalidIntent)?;
         let runtime = match options.runtime {
             RuntimeKind::Docker => RuntimeKindV1::Docker,
             RuntimeKind::Podman => RuntimeKindV1::Podman,
@@ -565,7 +566,13 @@ impl ExecutionIntentV1 {
             return Err(IntentError::UnsupportedVersion);
         }
         require(!self.operation_id.is_nil() && !self.session.is_nil())?;
-        self.initial_options.validate(false)?;
+        if self.legacy_named_launch.is_some() {
+            // A confirmed plan is inert until the independent decision. Its
+            // command uses the catalogue bounds checked by the sealed launch.
+            self.initial_options.0.validate_settings()?;
+        } else {
+            self.initial_options.validate(false)?;
+        }
         if let Some(egress) = &self.egress {
             egress.validate().map_err(|_| IntentError::InvalidIntent)?;
             let options = &self.initial_options.0;
