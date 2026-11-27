@@ -11,6 +11,9 @@ use crate::{
 };
 use chrono::{DateTime, Utc};
 
+#[cfg(test)]
+mod tests;
+
 const PREPARED: &str = "control.legacy_session_prepare.prepared";
 const CONFIRMED: &str = "control.legacy_session_prepare.confirmed";
 const FENCED: &str = "control.legacy_session_prepare.fenced";
@@ -380,18 +383,25 @@ impl Store {
         id: String,
         record: &impl Serialize,
     ) -> anyhow::Result<StoredEvent> {
-        let expected = serde_json::to_value(record)?;
         let mut event = Event::new(kind);
         event.id = id;
         event.timestamp = crate::broker_registry::format_time(clock.at());
         event.coverage = "native".into();
-        event.data = expected.clone();
+        event.data = serde_json::to_value(record)?;
+        let expected = serde_json::to_value(&event)?;
         let (event, payload) = self.prepare_event(event)?;
         anyhow::ensure!(
-            event.data == expected,
+            serde_json::to_value(&event)? == expected,
             "Legacy reference record requires redaction"
         );
-        self.append_authorized_in_transaction(tx, event, payload, clock)
+        self.append_with_authorized_capacity_class_at(
+            tx,
+            event,
+            payload,
+            capacity::Class::OrdinaryWrite,
+            clock,
+            Utc::now(),
+        )
     }
 
     pub(crate) fn legacy_session_prepare_local(
