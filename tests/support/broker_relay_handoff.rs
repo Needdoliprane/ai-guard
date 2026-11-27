@@ -406,12 +406,12 @@ impl Fixture {
             server_task,
         };
         if let Err(error) = fixture.start_broker().await {
-            let cleanup = fixture.close().await;
-            return Err(error.context(if cleanup.is_ok() {
-                "fixture broker did not start"
-            } else {
-                "fixture broker did not start and cleanup is unconfirmed"
-            }));
+            return Err(match fixture.close().await {
+                Ok(()) => error.context("fixture broker did not start"),
+                Err(cleanup) => error.context(format!(
+                    "fixture broker did not start and cleanup also failed: {cleanup:#}"
+                )),
+            });
         }
         Ok(fixture)
     }
@@ -456,6 +456,12 @@ impl Fixture {
         );
         Ok(())
     }
+    async fn bind_legacy_guardian(&mut self) -> Result<()> {
+        let broker = self.broker.as_mut().context("fixture broker owner")?;
+        self.legacy_guardian =
+            Some(OwnedLegacyGuardian::capture(&self.broker_root, broker, Path::new(BIN)).await?);
+        Ok(())
+    }
     pub async fn start_broker(&mut self) -> Result<()> {
         ensure!(self.broker.is_none(), "broker already owned");
         self.broker_tmp.revalidate()?;
@@ -495,6 +501,13 @@ impl Fixture {
                 {
                     bail!("phase=broker_ipc_preflight child_status={status}");
                 }
+                if first
+                    && self.legacy_guardian.is_none()
+                    && self.bind_legacy_guardian().await.is_err()
+                {
+                    sleep(Duration::from_millis(20)).await;
+                    continue;
+                }
                 if matches!(
                     service::request(
                         &self.broker_root,
@@ -508,19 +521,14 @@ impl Fixture {
                     .await,
                     Ok(BrokerReplyV1::Page { .. })
                 ) {
+                    let guardian = self
+                        .legacy_guardian
+                        .as_ref()
+                        .context("original fixture Legacy guardian custody unavailable")?;
                     if first {
-                        let broker = self.broker.as_mut().context("fixture broker owner")?;
-                        self.legacy_guardian = Some(
-                            OwnedLegacyGuardian::capture(&self.broker_root, broker, Path::new(BIN))
-                                .await
-                                .context("phase=legacy_guardian_custody")?,
-                        );
+                        guardian.require_fresh().await?;
                     } else {
-                        self.legacy_guardian
-                            .as_ref()
-                            .context("original fixture Legacy guardian custody unavailable")?
-                            .require_live()
-                            .await?;
+                        guardian.require_live().await?;
                     }
                     return Ok::<_, anyhow::Error>(());
                 }
@@ -536,9 +544,10 @@ impl Fixture {
             .context("original fixture Legacy guardian custody unavailable")?
             .require_live()
             .await?;
-        if let Some(mut child) = self.broker.take() {
+        if let Some(child) = self.broker.as_mut() {
             child.kill().await?;
             child.wait().await?;
+            self.broker = None;
         }
         self.start_broker().await
     }
@@ -897,6 +906,10 @@ impl Fixture {
         Ok(())
     }
     pub async fn close(mut self) -> Result<()> {
+        if self.legacy_start_attempted && self.legacy_guardian.is_none() {
+            // The original child may have announced just as readiness failed.
+            let _ = self.bind_legacy_guardian().await;
+        }
         if let Some(stop) = self.engine_stop.take() {
             let _ = stop.send(());
         }
@@ -910,51 +923,49 @@ impl Fixture {
         }
         let engine_closed =
             engine_joined && require_socket_closed(&self.root.join("r")).await.is_ok();
-        let guardian = async {
+        let processes = async {
             if !self.legacy_start_attempted {
-                return Ok::<_, anyhow::Error>("not_started");
+                return Ok::<_, anyhow::Error>(());
             }
             ensure!(engine_closed, "fixture runtime closure unconfirmed");
             let owner = self
                 .legacy_guardian
                 .as_ref()
                 .context("original fixture Legacy guardian custody unavailable")?;
-            timeout(Duration::from_secs(15), owner.close())
+            owner.require_cleanup_ready().await?;
+            // A live broker can restart its guardian on EOF. Reap the exact
+            // owned broker before allowing the original guardian to exit.
+            if let Some(broker) = self.broker.as_mut() {
+                if broker.try_wait()?.is_none() {
+                    broker.start_kill()?;
+                }
+                timeout(Duration::from_secs(5), broker.wait()).await??;
+            }
+            self.broker = None;
+            let category = timeout(Duration::from_secs(15), owner.close())
                 .await
-                .context("fixture Legacy guardian closure timeout")?
-        }
-        .await;
-        let broker = if let Ok(category) = &guardian {
+                .context("fixture Legacy guardian closure timeout")??;
             println!("phase=fixture_legacy_guardian_close category={category}");
             self.legacy_guardian = None;
             self.legacy_start_attempted = false;
-            async {
-                if let Some(owned) = self.broker.as_mut() {
-                    if owned.try_wait()?.is_none() {
-                        owned.start_kill()?;
-                    }
-                    timeout(Duration::from_secs(5), owned.wait()).await??;
-                }
-                self.broker = None;
-                Ok::<_, anyhow::Error>(())
-            }
-            .await
-        } else {
-            println!("phase=fixture_legacy_guardian_close category=custody_retained");
             Ok(())
-        };
+        }
+        .await;
         if let Some(stop) = self.server_stop.take() {
             let _ = stop.send(());
         }
         let server = timeout(Duration::from_secs(5), &mut self.server_task).await;
+        if server.is_err() {
+            self.server_task.abort();
+            let _ = timeout(Duration::from_secs(5), &mut self.server_task).await;
+        }
         let untouched = if self.faults.before_import.is_some() {
             self.assert_admission_engine_untouched().await
         } else {
             Ok(())
         };
         untouched?;
-        guardian?;
-        broker?;
+        processes?;
         server???;
         ensure!(engine_closed, "fixture runtime closure unconfirmed");
         ensure!(
@@ -967,7 +978,14 @@ impl Fixture {
 impl Drop for Fixture {
     fn drop(&mut self) {
         if self.legacy_start_attempted {
-            println!("phase=fixture_drop category=legacy_custody_retained");
+            println!(
+                "phase=fixture_drop category=legacy_reconciliation_required private_state_preserved=true guardian_attested={} broker_join_unconfirmed={} guardian_announcement={}",
+                self.legacy_guardian.is_some(),
+                self.broker.is_some(),
+                self.broker_root
+                    .join("enforcer/announcements/e-0001.json")
+                    .is_file()
+            );
         }
         if let Some(stop) = self.engine_stop.take() {
             let _ = stop.send(());

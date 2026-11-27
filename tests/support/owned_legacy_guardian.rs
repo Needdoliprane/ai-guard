@@ -41,6 +41,9 @@ impl NativeIdentity {
     async fn wait_exit(&self) -> Result<()> {
         anyhow::bail!("native Legacy guardian custody unavailable on this host");
     }
+    fn exited(&self) -> Result<bool> {
+        anyhow::bail!("native Legacy guardian custody unavailable on this host");
+    }
 }
 
 pub(super) fn require_fresh_role(root: &Path) -> Result<()> {
@@ -133,7 +136,7 @@ impl OwnedLegacyGuardian {
             "fixture runtime socket invalid"
         );
         let runtime_identity = (runtime.dev(), runtime.ino());
-        let mut stream = endpoint.connect_checked(&endpoints).await?;
+        let stream = endpoint.connect_checked(&endpoints).await?;
         let identity = NativeIdentity::capture(&stream, broker_pid, program)?;
         let owner = Self {
             role,
@@ -147,7 +150,17 @@ impl OwnedLegacyGuardian {
             runtime_identity,
             identity,
         };
-        let reply = owner
+        ensure!(
+            owned_broker_pid(broker)? == broker_pid,
+            "fixture Legacy guardian's spawning broker changed"
+        );
+        owner.revalidate()?;
+        Ok(owner)
+    }
+
+    pub(super) async fn require_fresh(&self) -> Result<()> {
+        let mut stream = self.checked_peer().await?;
+        let reply = self
             .rpc(&mut stream, json!({"kind":"prospective_capabilities"}))
             .await?;
         let observed = &reply["value"];
@@ -155,19 +168,17 @@ impl OwnedLegacyGuardian {
         ensure!(
             reply["kind"] == "prospective_capabilities"
                 && observed["version"] == 1
-                && observed["epoch"] == serde_json::to_value(owner.endpoint.epoch())?
+                && observed["epoch"] == serde_json::to_value(self.endpoint.epoch())?
                 && observed
                     .get("recovery_generation")
                     .is_some_and(Value::is_null)
                 && observed["recovery_incomplete"] == false
                 && observed["known_stop_slots"] == 0
                 && observed["owned_active"] == 0
-                && !nonce.is_nil()
-                && owned_broker_pid(broker)? == broker_pid,
+                && !nonce.is_nil(),
             "fixture Legacy guardian is not the broker's fresh empty instance"
         );
-        owner.revalidate()?;
-        Ok(owner)
+        self.revalidate()
     }
 
     fn revalidate(&self) -> Result<()> {
@@ -238,36 +249,65 @@ impl OwnedLegacyGuardian {
         Ok(())
     }
 
-    /// Called after the fixture has joined its synthetic runtime server.
-    /// Occupied Legacy slots are retained by design. A confirmed NotIdle
-    /// permits only teardown of the attested test-process identity.
-    pub(super) async fn close(&self) -> Result<&'static str> {
+    /// Verify custody after the runtime task joins and before stopping the
+    /// owning broker. The broker must be reaped before trying guardian exit.
+    pub(super) async fn require_cleanup_ready(&self) -> Result<()> {
         self.require_runtime_closed().await?;
-        let mut stream = self.checked_peer().await?;
-        let reply = self
-            .rpc(&mut stream, json!({"kind":"shutdown_if_idle"}))
-            .await?;
-        drop(stream);
-        let result = if reply == json!({"kind":"acknowledged"}) {
-            "idle_acknowledged_exit"
-        } else {
-            ensure!(
-                reply == json!({"kind":"error","code":"not_idle"}),
-                "fixture idle request unconfirmed"
-            );
-            self.require_runtime_closed().await?;
-            let stream = self.checked_peer().await?;
-            self.identity.signal_retained_peer(&stream)?;
-            "exact_fixture_signal_exit"
-        };
-        self.identity.wait_exit().await?;
+        self.revalidate()?;
+        self.cleanup_peer().await.map(drop)
+    }
+
+    async fn cleanup_peer(&self) -> Result<Option<UnixStream>> {
+        if !self.identity.exited()? {
+            match self.checked_peer().await {
+                Ok(stream) => return Ok(Some(stream)),
+                Err(error) if !self.identity.exited()? => return Err(error),
+                Err(_) => {}
+            }
+        }
+        self.require_guardian_socket_closed().await?;
+        Ok(None)
+    }
+
+    async fn require_guardian_socket_closed(&self) -> Result<()> {
         let socket = self
             .endpoints
             .path()
             .join(self.endpoint.directory_name())
             .join("s");
         require_socket_closed(&socket).await?;
+        self.revalidate()
+    }
+
+    /// Called after both the synthetic runtime and the recovering broker join.
+    /// Occupied Legacy slots may refuse idle shutdown. Native teardown still
+    /// requires the same attested fixture process on the retained endpoint.
+    pub(super) async fn close(&self) -> Result<&'static str> {
+        self.require_runtime_closed().await?;
         self.revalidate()?;
+        let Some(mut stream) = self.cleanup_peer().await? else {
+            return Ok("original_exit_observed");
+        };
+        let reply = self
+            .rpc(&mut stream, json!({"kind":"shutdown_if_idle"}))
+            .await;
+        drop(stream);
+        let result = if matches!(&reply, Ok(value) if value == &json!({"kind":"acknowledged"})) {
+            "idle_acknowledged_exit"
+        } else {
+            self.require_runtime_closed().await?;
+            let Some(stream) = self.cleanup_peer().await? else {
+                return Ok("original_exit_observed");
+            };
+            self.identity.signal_retained_peer(&stream)?;
+            if matches!(&reply, Ok(value) if value == &json!({"kind":"error","code":"not_idle"})) {
+                "exact_fixture_signal_exit"
+            } else {
+                "exact_fixture_signal_exit_idle_unconfirmed"
+            }
+        };
+        self.identity.wait_exit().await?;
+        self.require_guardian_socket_closed().await?;
         Ok(result)
     }
 }

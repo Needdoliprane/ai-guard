@@ -1245,6 +1245,13 @@ impl Fixture {
         Ok(())
     }
 
+    async fn bind_legacy_guardian(&mut self) -> Result<()> {
+        let broker = &mut self.broker.as_mut().context("broker owner")?.child;
+        self.legacy_guardian =
+            Some(OwnedLegacyGuardian::capture(&self.broker_root, broker, Path::new(BIN)).await?);
+        Ok(())
+    }
+
     async fn start_broker_mode(&mut self, role: Role, fresh: bool) -> Result<()> {
         ensure!(self.broker.is_none(), "broker already owned");
         self.broker_tmp.revalidate()?;
@@ -1316,6 +1323,13 @@ impl Fixture {
                     }
                     println!("phase=fixture_start_guardian category=identity_attested");
                 }
+                if first_legacy
+                    && self.legacy_guardian.is_none()
+                    && self.bind_legacy_guardian().await.is_err()
+                {
+                    sleep(Duration::from_millis(20)).await;
+                    continue;
+                }
                 last_list = match service::request(
                     &self.broker_root,
                     "a",
@@ -1328,23 +1342,16 @@ impl Fixture {
                 .await
                 {
                     Ok(BrokerReplyV1::Page { .. }) => {
-                        if first_legacy {
-                            let broker = &mut self.broker.as_mut().context("broker owner")?.child;
-                            self.legacy_guardian = Some(
-                                OwnedLegacyGuardian::capture(
-                                    &self.broker_root,
-                                    broker,
-                                    Path::new(BIN),
-                                )
-                                .await
-                                .context("phase=legacy_guardian_custody")?,
-                            );
-                        } else if self.legacy_start_attempted {
-                            self.legacy_guardian
+                        if self.legacy_start_attempted {
+                            let guardian = self
+                                .legacy_guardian
                                 .as_ref()
-                                .context("original fixture Legacy guardian custody unavailable")?
-                                .require_live()
-                                .await?;
+                                .context("original fixture Legacy guardian custody unavailable")?;
+                            if first_legacy {
+                                guardian.require_fresh().await?;
+                            } else {
+                                guardian.require_live().await?;
+                            }
                         }
                         return Ok::<_, anyhow::Error>(());
                     }
@@ -1391,8 +1398,9 @@ impl Fixture {
         if role == Role::FullB && !self.enforcers.iter().any(|(known, _)| *known == role) {
             self.start_guardian(role).await?;
         }
-        if let Some(mut broker) = self.broker.take() {
+        if let Some(broker) = self.broker.as_mut() {
             broker.stop().await?;
+            self.broker = None;
         }
         self.start_broker(role).await?;
         let after = self.broker_epoch()?;
@@ -2143,6 +2151,9 @@ impl Fixture {
         check_journal: Option<impl FnOnce(&Path)>,
     ) -> (Result<()>, usize) {
         let mut failed = false;
+        if self.legacy_start_attempted && self.legacy_guardian.is_none() {
+            let _ = self.bind_legacy_guardian().await;
+        }
         if let Some(stop) = self.engine_stop.take() {
             let _ = stop.send(());
         }
@@ -2185,40 +2196,20 @@ impl Fixture {
             );
         }
         let legacy_started = self.legacy_start_attempted;
-        let legacy_closed = if legacy_started {
-            let closed = async {
-                ensure!(engine_closed, "fixture runtime closure unconfirmed");
-                let guardian = self
-                    .legacy_guardian
-                    .as_ref()
-                    .context("original fixture Legacy guardian custody unavailable")?;
-                timeout(Duration::from_secs(15), guardian.close())
-                    .await
-                    .context("fixture Legacy guardian closure timeout")?
-            }
-            .await;
-            match closed {
-                Ok(category) => {
-                    println!("phase=fixture_legacy_guardian_close category={category}");
-                    self.legacy_guardian = None;
-                    self.legacy_start_attempted = false;
-                    true
-                }
-                Err(_) => {
-                    println!("phase=fixture_legacy_guardian_close category=custody_retained");
-                    false
-                }
+        let legacy_ready = if legacy_started {
+            match self.legacy_guardian.as_ref() {
+                Some(guardian) if engine_closed => guardian.require_cleanup_ready().await.is_ok(),
+                _ => false,
             }
         } else {
             true
         };
-        failed |= !legacy_closed;
-        let (broker_closed, read_closed_journal) = if (!self.fresh_start_attempted
+        let (broker_reaped, broker_closed, read_closed_journal) = if (!self.fresh_start_attempted
             || guardian_closed)
-            && legacy_closed
+            && legacy_ready
         {
-            match self.broker.take() {
-                Some(mut owner) => {
+            match self.broker.as_mut() {
+                Some(owner) => {
                     let endpoint = Directory::open_existing(&self.broker_root.join("broker"))
                         .and_then(|role| {
                             if legacy_started {
@@ -2232,7 +2223,7 @@ impl Fixture {
                         Err(_) => false,
                     };
                     let reaped = owner.stop().await.is_ok();
-                    let ipc_absent = if reaped && endpoint_is_bound {
+                    let ipc_absent = if reaped && (endpoint_is_bound || legacy_started) {
                         match endpoint {
                             Ok(endpoint) => endpoint.assert_closed().await.is_ok(),
                             Err(_) => false,
@@ -2241,21 +2232,45 @@ impl Fixture {
                         false
                     };
                     println!("phase=fixture_broker_close reaped={reaped} ipc_absent={ipc_absent}");
+                    if reaped {
+                        self.broker = None;
+                    }
                     let confirmed = reaped && ipc_absent;
-                    (confirmed, confirmed)
+                    (reaped, confirmed, confirmed)
                 }
                 None => {
                     println!("phase=fixture_broker_close category=not_started");
-                    (true, false)
+                    (true, true, false)
                 }
             }
         } else {
-            // A broker that is still live is the only reaper of this detached
-            // descendant. Preserve that custody if identity or exit is unknown.
-            println!("phase=fixture_broker_close category=retained_for_guardian_custody");
-            (false, false)
+            println!("phase=fixture_broker_close category=reconciliation_required");
+            (false, false, false)
         };
         failed |= !broker_closed;
+        if legacy_started && broker_reaped {
+            // Do not expose guardian exit to a broker watcher that could
+            // recreate the role. The native identity survives reparenting.
+            let closed = match self.legacy_guardian.as_ref() {
+                Some(guardian) => timeout(Duration::from_secs(15), guardian.close())
+                    .await
+                    .context("fixture Legacy guardian closure timeout")
+                    .and_then(|result| result),
+                None => Err(anyhow::anyhow!(
+                    "original fixture Legacy guardian custody unavailable"
+                )),
+            };
+            if let Ok(category) = closed {
+                println!("phase=fixture_legacy_guardian_close category={category}");
+                self.legacy_guardian = None;
+                self.legacy_start_attempted = false;
+            } else {
+                println!("phase=fixture_legacy_guardian_close category=not_confirmed");
+                failed = true;
+            }
+        } else if legacy_started {
+            failed = true;
+        }
         if read_closed_journal && let Some(check_journal) = check_journal {
             check_journal(&self.root);
         }
@@ -2338,8 +2353,21 @@ impl Drop for Fixture {
                 let _ = child.child.start_kill();
             }
         }
-        if self.legacy_start_attempted || self.selection == Role::Legacy {
-            println!("phase=fixture_drop category=legacy_custody_retained");
+        let legacy_pending = self.legacy_start_attempted
+            || (self.selection == Role::Legacy
+                && self
+                    .enforcers
+                    .iter()
+                    .any(|(_, child)| child.child.id().is_some()));
+        if legacy_pending {
+            println!(
+                "phase=fixture_drop category=legacy_reconciliation_required private_state_preserved=true guardian_attested={} broker_join_unconfirmed={} guardian_announcement={}",
+                self.legacy_guardian.is_some(),
+                self.broker.is_some(),
+                self.broker_root
+                    .join("enforcer/announcements/e-0001.json")
+                    .is_file()
+            );
         } else {
             for (_, child) in &mut self.enforcers {
                 if child.child.id().is_some() {

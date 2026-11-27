@@ -115,7 +115,7 @@ impl LinuxIdentity {
         Ok(identity)
     }
 
-    fn exited(&self) -> Result<bool> {
+    pub(super) fn exited(&self) -> Result<bool> {
         let mut poll = libc::pollfd {
             fd: self.pidfd.as_raw_fd(),
             events: libc::POLLIN,

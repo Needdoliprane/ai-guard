@@ -29,6 +29,29 @@ use std::{sync::atomic::Ordering, time::Duration};
 use tokio::time::{sleep, timeout};
 use uuid::Uuid;
 
+// Outer software fixture ceiling. The original Arms and individual waits
+// still decide their respective exercise outcomes.
+const EXERCISE_TIMEOUT: Duration = Duration::from_secs(300);
+
+async fn with_fixture(
+    worker_timeout: u32,
+    scenario: impl AsyncFnOnce(&mut Fixture) -> Result<()>,
+) -> Result<()> {
+    let mut fixture = Fixture::new(worker_timeout).await?;
+    let exercise = timeout(EXERCISE_TIMEOUT, scenario(&mut fixture))
+        .await
+        .context("Handoff fixture exercise deadline")
+        .and_then(|result| result);
+    let cleanup = fixture.close().await;
+    match (exercise, cleanup) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+        (Err(error), Err(cleanup)) => {
+            Err(error.context(format!("owned fixture cleanup also failed: {cleanup:#}")))
+        }
+    }
+}
+
 #[test]
 fn software_runtime_witness_refuses_contradictory_create_flags_before_mutation() -> Result<()> {
     harness::contradictory_create_flags_are_refused_before_fixture_mutation()
@@ -36,7 +59,10 @@ fn software_runtime_witness_refuses_contradictory_create_flags_before_mutation()
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn software_broker_started_late_issue_two_endpoints_share_tenant_io() -> Result<()> {
-    let fixture = Fixture::new(90).await?;
+    with_fixture(90, late_issue_two_endpoints).await
+}
+
+async fn late_issue_two_endpoints(fixture: &mut Fixture) -> Result<()> {
     let first = fixture.submit("a", 90).await?;
     let second = fixture.submit("a", 90).await?;
     let source = fixture.wait_endpoint(first).await?;
@@ -69,7 +95,7 @@ async fn software_broker_started_late_issue_two_endpoints_share_tenant_io() -> R
     );
     fixture.tenant_directory()?;
 
-    let permission = grant(&fixture, source.clone(), destination.clone()).await?;
+    let permission = grant(fixture, source.clone(), destination.clone()).await?;
     let (mut sender, send_channel, send_epoch) = fixture.helper_connection(&source).await?;
     let (mut receiver, inbox_channel, inbox_epoch) =
         fixture.helper_connection(&destination).await?;
@@ -186,7 +212,7 @@ async fn software_broker_started_late_issue_two_endpoints_share_tenant_io() -> R
     // journal. Local EOF or fixture-process cleanup is insufficient.
     fixture.closed(first).await?;
     fixture.closed(second).await?;
-    fixture.close().await
+    Ok(())
 }
 
 fn authority_refusal(attempt: RelayAttempt) -> Result<()> {
@@ -223,7 +249,10 @@ fn original_arm_still_live(fixture: &Fixture, job: Uuid) -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn software_broker_ready_binding_revocation_refuses_helper_send_and_ack_before_dispatch()
 -> Result<()> {
-    let fixture = Fixture::new(90).await?;
+    with_fixture(90, ready_binding_revocation).await
+}
+
+async fn ready_binding_revocation(fixture: &mut Fixture) -> Result<()> {
     let source_job = fixture.submit("a", 90).await?;
     let destination_job = fixture.submit("a", 90).await?;
     let source = fixture.wait_endpoint(source_job).await?;
@@ -236,7 +265,7 @@ async fn software_broker_ready_binding_revocation_refuses_helper_send_and_ack_be
         fixture.exec_count().await == 2 && fixture.committed_claims()? == 2,
         "this parent requires two actual Ready owners, not lost Fresh claims"
     );
-    let permission = grant(&fixture, source.clone(), destination.clone()).await?;
+    let permission = grant(fixture, source.clone(), destination.clone()).await?;
     let (mut sender, send_channel, send_epoch) = fixture.helper_connection(&source).await?;
     let (mut receiver, inbox_channel, inbox_epoch) =
         fixture.helper_connection(&destination).await?;
@@ -293,7 +322,7 @@ async fn software_broker_ready_binding_revocation_refuses_helper_send_and_ack_be
     );
 
     fixture.revoke(&source_credential).await?;
-    original_arm_still_live(&fixture, source_job)?;
+    original_arm_still_live(fixture, source_job)?;
     let checks_before = fixture.faults.claims.load(Ordering::SeqCst);
     let denied_send = RelaySendV1 {
         operation_id: Uuid::new_v4().to_string(),
@@ -308,7 +337,7 @@ async fn software_broker_ready_binding_revocation_refuses_helper_send_and_ack_be
         )
         .await?,
     )?;
-    original_arm_still_live(&fixture, source_job)?;
+    original_arm_still_live(fixture, source_job)?;
     ensure!(
         fixture.faults.claims.load(Ordering::SeqCst) > checks_before,
         "request through the real helper must attempt current Core authority validation"
@@ -324,7 +353,7 @@ async fn software_broker_ready_binding_revocation_refuses_helper_send_and_ack_be
     );
 
     fixture.revoke(&destination_credential).await?;
-    original_arm_still_live(&fixture, destination_job)?;
+    original_arm_still_live(fixture, destination_job)?;
     let checks_before = fixture.faults.claims.load(Ordering::SeqCst);
     let denied_ack = RelayAckV1 {
         version: 1,
@@ -340,7 +369,7 @@ async fn software_broker_ready_binding_revocation_refuses_helper_send_and_ack_be
         )
         .await?,
     )?;
-    original_arm_still_live(&fixture, destination_job)?;
+    original_arm_still_live(fixture, destination_job)?;
     ensure!(
         fixture.faults.claims.load(Ordering::SeqCst) > checks_before,
         "recipient request must also revalidate current authority"
@@ -376,12 +405,15 @@ async fn software_broker_ready_binding_revocation_refuses_helper_send_and_ack_be
     worker_terminal(&fixture.a, &destination).await?;
     // Current binding loss can retain Unknown channel cleanup. Never invent a
     // Core revision or discard the original records to make this test close.
-    fixture.close().await
+    Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn software_broker_lost_claim_recovery_retains_history_without_exec() -> Result<()> {
-    let mut fixture = Fixture::new(90).await?;
+    with_fixture(90, lost_claim_recovery).await
+}
+
+async fn lost_claim_recovery(fixture: &mut Fixture) -> Result<()> {
     let job = fixture.submit("a", 90).await?;
     let endpoint = fixture.wait_endpoint(job).await?;
     fixture.faults.lose_claim.store(true, Ordering::SeqCst);
@@ -490,12 +522,15 @@ async fn software_broker_lost_claim_recovery_retains_history_without_exec() -> R
         fixture.latest_fact(job)?["claim"] == claim,
         "unknown claim identity survives terminal worker observation"
     );
-    fixture.close().await
+    Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn software_broker_scoped_relay_ipc_refuses_before_private_detail() -> Result<()> {
-    let fixture = Fixture::new(90).await?;
+    with_fixture(90, scoped_relay_ipc).await
+}
+
+async fn scoped_relay_ipc(fixture: &mut Fixture) -> Result<()> {
     let a_job = fixture.submit("a", 90).await?;
     let a_endpoint = fixture.wait_endpoint(a_job).await?;
     let b_job = fixture.submit("b", 90).await?;
@@ -570,12 +605,15 @@ async fn software_broker_scoped_relay_ipc_refuses_before_private_detail() -> Res
     fixture.cancel("b", b_job).await?;
     worker_terminal(&fixture.a, &a_endpoint).await?;
     worker_terminal(&fixture.b, &b_endpoint).await?;
-    fixture.close().await
+    Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn software_broker_missing_receipt_expires_under_original_arm_without_exec() -> Result<()> {
-    let fixture = Fixture::new(12).await?;
+    with_fixture(12, missing_receipt_expiry).await
+}
+
+async fn missing_receipt_expiry(fixture: &mut Fixture) -> Result<()> {
     let job = fixture.submit("a", 12).await?;
     let endpoint = fixture.wait_endpoint(job).await?;
     let fact = fixture.latest_fact(job)?;
@@ -619,5 +657,5 @@ async fn software_broker_missing_receipt_expires_under_original_arm_without_exec
         !fixture.operations[0].exists() && !fixture.operations[1].exists(),
         "the product does not auto-provision credentials while awaiting"
     );
-    fixture.close().await
+    Ok(())
 }

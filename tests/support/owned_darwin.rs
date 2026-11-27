@@ -324,6 +324,10 @@ impl DarwinIdentity {
         self.exit.wait().await
     }
 
+    pub(super) fn exited(&self) -> Result<bool> {
+        self.exit.exited()
+    }
+
     /// Legacy restart can reparent the same detached child. Verify its
     /// original kernel token and executable on the retained endpoint.
     pub(super) fn revalidate_retained_peer(&self, stream: &UnixStream) -> Result<()> {
