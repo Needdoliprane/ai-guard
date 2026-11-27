@@ -6,12 +6,13 @@ use crate::{
     broker::{
         checkpoint::LegacyNamedAdmissionCheckpoint,
         enforcer::{
-            EnforcerClient, EnforcerError, ExecutionEnforcerV1, ProspectiveArmExchange,
-            ProspectiveRegistrationV1,
+            EnforcerClient, EnforcerError, ExecutionEnforcerV1, LegacyNamedProspectiveFailure,
+            ProspectiveArmExchange, ProspectiveRegistrationV1,
         },
         journal::{CancelStopProjectionV1, JournalError, JournalScopeV1, canonical},
         lifecycle::LocalCommandRequestV1,
         presence::http::{Client, Limits},
+        writer::NamedImportArmWriteFailure,
     },
     control::{AdmissionRefusalV1, MutationResultV1, RuntimeKindV1, WorkerV1, session_control::*},
 };
@@ -310,29 +311,32 @@ pub(super) async fn record_import_arm<'enforcer>(
     if retained.plan() != plan
         || retained.archive_digest() != Some(archive_digest)
         || retained.import_arm().is_some()
-        || canonical(owned).map_err(named_write_error)?
-            != canonical(target.owned()).map_err(named_write_error)?
+        || canonical(owned).map_err(import_arm_journal_error)?
+            != canonical(target.owned()).map_err(import_arm_journal_error)?
     {
         // Historical pending and acknowledged Arms are reconciliation only.
         return Err(PresenceError::Conflict);
     }
     retained
         .with_import_arm(target.arm().clone())
-        .map_err(named_write_error)?;
+        .map_err(import_arm_journal_error)?;
     enforcer
         .legacy_require_new_prearm_identity()
         .map_err(prospective_error)?;
     require_arm_generation(cancel, expected)?;
     let recorded = match writer
-        .record_legacy_named_import_arm(plan, archive_digest, target.arm().clone())
+        .record_legacy_named_import_arm_diagnosed(plan, archive_digest, target.arm().clone())
         .await
     {
         Ok(recorded) => recorded,
-        Err(JournalError::Interrupted) => return Err(PresenceError::Stopped),
-        Err(_) => {
-            // The exact write may have committed even when its ACK or head
-            // confirmation is missing. The Writer's current error loses the
-            // phase of the CAS and its confirmation read.
+        Err(NamedImportArmWriteFailure::BeforePublication(error)) => {
+            return Err(import_arm_journal_error(error));
+        }
+        Err(
+            NamedImportArmWriteFailure::PublicationUnconfirmed(_)
+            | NamedImportArmWriteFailure::ReloadAfterPublication(_),
+        ) => {
+            // A durable pending Arm may exist without a confirmed ticket.
             enforcer
                 .legacy_fence_unknown_prearm_write()
                 .map_err(prospective_error)?;
@@ -377,57 +381,35 @@ pub(super) async fn arm_import(
         .legacy_require_new_prearm_identity()
         .map_err(prospective_error)?;
     require_arm_generation(&cancel, expected)?;
-    // The Legacy client already targets STOP on a reservation ACK it
-    // received with a stale generation. An unknown reservation grants no
-    // authorization to select another native owner for cancellation.
-    enforcer
-        .legacy_reserve_prospective_diagnosed(target.clone(), cancel.clone(), false)
+    let reserved = enforcer
+        .legacy_reserve_named_prospective(target.clone(), &cancel, expected)
         .await
-        .map_err(|refusal| prospective_error(refusal.code()))?;
-    let dispatched = async {
-        require_arm_generation(&cancel, expected)?;
-        let exchange = enforcer
-            .legacy_begin_prospective_arm_exchange(&target, &cancel)
-            .await
-            .map_err(prospective_error)?;
-        require_arm_generation(&cancel, expected)?;
-        if !exchange.permits_original() {
-            // A replayed native exchange cannot authorize the first POST.
-            return Err(PresenceError::Conflict);
-        }
-        require_pending_import_arm(&writer, operation, &request, &target).await?;
-        let result = send_import_arm(&client, presence, &request, Some((&cancel, expected)))
-            .await?
-            .ok_or(PresenceError::AdmissionOutcomeUnknown)?;
-        writer
-            .acknowledge_legacy_named_import_arm(operation, &request, result.clone())
-            .await
-            .map_err(|_| PresenceError::AdmissionOutcomeUnknown)?;
-        let exchange = if result.replayed {
-            exchange.into_restrictive()
-        } else {
-            exchange
-        };
-        Ok((result, exchange))
+        .map_err(named_prospective_error)?;
+    let exchange = enforcer
+        .legacy_begin_named_prospective_arm_exchange(reserved)
+        .await
+        .map_err(named_prospective_error)?;
+    require_arm_generation(&cancel, expected)?;
+    if !exchange.permits_original() {
+        return Err(PresenceError::Conflict);
     }
-    .await;
-    // Settle any received HTTP result before notifying the exact prospective
-    // owner. An unknown Arm still requires reconciliation after native STOP.
-    if matches!(&dispatched, Err(PresenceError::Stopped))
-        || require_arm_generation(&cancel, expected).is_err()
-    {
-        enforcer
-            .legacy_cancel_prospective(&target, cancel.current())
-            .await
-            .map_err(prospective_error)?;
-        return match dispatched {
-            Err(PresenceError::AdmissionOutcomeUnknown) => {
-                Err(PresenceError::AdmissionOutcomeUnknown)
-            }
-            _ => Err(PresenceError::Stopped),
-        };
-    }
-    dispatched
+    require_pending_import_arm(&writer, operation, &request, &target).await?;
+    let result = send_import_arm(&client, presence, &request, Some((&cancel, expected)))
+        .await?
+        .ok_or(PresenceError::AdmissionOutcomeUnknown)?;
+    writer
+        .acknowledge_legacy_named_import_arm(operation, &request, result.clone())
+        .await
+        .map_err(|_| PresenceError::AdmissionOutcomeUnknown)?;
+    // Keep the exact reply even if STOP won during transport. STOP notification
+    // belongs to the durable projection, and a stale exchange grants no start.
+    require_arm_generation(&cancel, expected)?;
+    let exchange = if result.replayed {
+        exchange.into_restrictive()
+    } else {
+        exchange
+    };
+    Ok((result, exchange))
 }
 
 async fn open_named_import(
@@ -438,7 +420,7 @@ async fn open_named_import(
     let job = writer
         .load(operation)
         .await
-        .map_err(named_write_error)?
+        .map_err(import_arm_journal_error)?
         .ok_or(PresenceError::Conflict)?;
     let checkpoint = job.broker_checkpoint_v3().ok_or(PresenceError::Conflict)?;
     if checkpoint
@@ -457,7 +439,7 @@ async fn open_named_import(
         .ok_or(PresenceError::Conflict)?;
     retained
         .require_import_creation_binding(target.authority())
-        .map_err(named_write_error)?;
+        .map_err(import_arm_journal_error)?;
     Ok(retained)
 }
 
@@ -473,8 +455,8 @@ async fn require_pending_import_arm(
         .import_arm_request()
         .ok_or(PresenceError::Conflict)?;
     if arm.receipt().is_some()
-        || canonical(&exact).map_err(named_write_error)?
-            != canonical(request).map_err(named_write_error)?
+        || canonical(&exact).map_err(import_arm_journal_error)?
+            != canonical(request).map_err(import_arm_journal_error)?
     {
         return Err(PresenceError::Conflict);
     }
@@ -498,6 +480,27 @@ fn prospective_error(error: EnforcerError) -> PresenceError {
     }
 }
 
+fn named_prospective_error(failure: LegacyNamedProspectiveFailure) -> PresenceError {
+    match failure {
+        LegacyNamedProspectiveFailure::OutcomeUnknown(_) => PresenceError::AdmissionOutcomeUnknown,
+        LegacyNamedProspectiveFailure::StaleAcknowledged(EnforcerError::NotReady) => {
+            PresenceError::Stopped
+        }
+        LegacyNamedProspectiveFailure::BeforeSend(code)
+        | LegacyNamedProspectiveFailure::StaleAcknowledged(code) => prospective_error(code),
+        LegacyNamedProspectiveFailure::Refused(refusal) => prospective_error(refusal.code()),
+    }
+}
+
+fn import_arm_journal_error(error: JournalError) -> PresenceError {
+    match error {
+        JournalError::Conflict => PresenceError::Conflict,
+        JournalError::Busy => PresenceError::Unavailable,
+        JournalError::LimitExceeded => PresenceError::Capacity,
+        _ => PresenceError::UnsafeState,
+    }
+}
+
 pub(super) async fn reconcile_import_arm(
     presence: &PresenceAuthority,
     writer: &WriterClient,
@@ -507,7 +510,7 @@ pub(super) async fn reconcile_import_arm(
     let Some((request, _)) = writer
         .load_legacy_named_import_arm(operation)
         .await
-        .map_err(named_write_error)?
+        .map_err(import_arm_journal_error)?
     else {
         return Ok(None);
     };
@@ -1027,20 +1030,44 @@ mod tests {
         assert!(matches!(blocked, Err(PresenceError::Stopped)));
         assert!(!submitted.load(Ordering::SeqCst));
 
-        let cancel = CancelGeneration::new();
-        let (started, wait_started) = tokio::sync::oneshot::channel();
-        let (reply, wait_reply) = tokio::sync::oneshot::channel();
-        let send = dispatch_before_stop(&cancel, cancel.current(), async {
-            started.send(()).unwrap();
-            Ok(wait_reply.await.unwrap())
-        });
-        let stop_then_reply = async {
-            wait_started.await.unwrap();
-            cancel.invalidate();
-            reply.send(1u8).unwrap();
-        };
-        let (receipt, ()) = tokio::join!(send, stop_then_reply);
-        assert_eq!(receipt, Ok(1));
+        for outcome in [Ok(1u8), Err(PresenceError::AdmissionOutcomeUnknown)] {
+            let cancel = CancelGeneration::new();
+            let (started, wait_started) = tokio::sync::oneshot::channel();
+            let (reply, wait_reply) = tokio::sync::oneshot::channel();
+            let send = dispatch_before_stop(&cancel, cancel.current(), async {
+                started.send(()).unwrap();
+                wait_reply.await.unwrap()
+            });
+            let stop_then_reply = async {
+                wait_started.await.unwrap();
+                cancel.invalidate();
+                reply.send(outcome).unwrap();
+            };
+            let (settled, ()) = tokio::join!(send, stop_then_reply);
+            assert_eq!(settled, outcome);
+        }
+    }
+
+    #[test]
+    fn named_import_distinguishes_writer_interruption_from_stop() {
+        let interrupted = import_arm_journal_error(JournalError::Interrupted);
+        assert_eq!(interrupted, PresenceError::UnsafeState);
+        assert!(!interrupted.fences_admission());
+        let saturated = import_arm_journal_error(JournalError::Busy);
+        assert_eq!(saturated, PresenceError::Unavailable);
+        assert!(!saturated.fences_admission());
+        assert_eq!(
+            named_prospective_error(LegacyNamedProspectiveFailure::StaleAcknowledged(
+                EnforcerError::NotReady,
+            )),
+            PresenceError::Stopped,
+        );
+        assert_eq!(
+            named_prospective_error(LegacyNamedProspectiveFailure::OutcomeUnknown(
+                EnforcerError::NotReady,
+            )),
+            PresenceError::AdmissionOutcomeUnknown,
+        );
     }
     use crate::broker::presence::preparation_tests::Fixture;
 
