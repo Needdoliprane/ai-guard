@@ -75,6 +75,7 @@ mod checkpoint_source;
 
 #[path = "legacy_named_launch.rs"]
 mod legacy_named_launch;
+pub(in crate::broker) use legacy_named_launch::PendingLegacyNamedImportClaim;
 
 /// Proposed owned broker-supervision publisher, selected only by a presence
 /// file naming its exact profile. It shares the publication owner above.

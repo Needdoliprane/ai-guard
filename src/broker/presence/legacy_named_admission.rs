@@ -628,10 +628,6 @@ enum ImportClaimDispatch<'a> {
 
 /// Kept inside Presence for the live Service ticket. The caller must retain
 /// the exact Writer receipt before handing off a fresh disposition.
-#[allow(
-    dead_code,
-    reason = "the live Service ticket consumer is composed separately"
-)]
 pub(super) async fn submit_import_claim(
     presence: &PresenceAuthority,
     request: &LegacyNamedImportClaimRequestV1,

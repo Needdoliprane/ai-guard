@@ -8,8 +8,9 @@ use crate::{
     },
     broker::presence::LegacyNamedAdmissionOutcome,
     control::{
-        ArmSubjectV1, ArmV1, HelperPermissionV1, HelperPurposeV1, HelperStartClaimV1,
-        MutationReceiptV1, WorkerMutationV1, WorkerStateV1, WorkerTransitionV1, WorkerV1,
+        ArmSubjectV1, ArmV1, ClaimDispositionV1, HelperPermissionV1, HelperPurposeV1,
+        HelperStartClaimV1, MutationReceiptV1, WorkerMutationV1, WorkerStateV1, WorkerTransitionV1,
+        WorkerV1,
         session_control::{
             LegacyConfirmedLaunchSpecV1, LegacyConfirmedPlanV1, LegacyNamedAdmissionReceiptV1,
             LegacyNamedImportArmRequestV1, LegacyNamedImportClaimRequestV1,
@@ -128,10 +129,27 @@ pub(super) struct BoundLegacyNamedImport {
 }
 
 /// The original live owner and the exact Writer-confirmed claim request.
-#[allow(dead_code, reason = "the named claim dispatch is composed separately")]
-pub(super) struct PendingLegacyNamedImportClaim {
+pub(in crate::broker) struct PendingLegacyNamedImportClaim {
     bound: BoundLegacyNamedImport,
-    request: LegacyNamedImportClaimRequestV1,
+    request: Option<LegacyNamedImportClaimRequestV1>,
+}
+
+impl PendingLegacyNamedImportClaim {
+    pub(in crate::broker) fn take_transport(
+        &mut self,
+    ) -> Option<(
+        LegacyNamedImportClaimRequestV1,
+        &LegacyNamedProspectiveBindAck,
+    )> {
+        Some((self.request.take()?, &self.bound.acknowledgement))
+    }
+}
+
+/// The original owner and the durable receipt of a first claim.
+#[allow(dead_code, reason = "the named Import start is composed separately")]
+pub(super) struct ConfirmedLegacyNamedImportClaim {
+    bound: BoundLegacyNamedImport,
+    receipt: MutationReceiptV1,
 }
 
 impl Service {
@@ -910,7 +928,91 @@ impl Service {
                     if self.stopping.load(Ordering::SeqCst) || self.fenced.load(Ordering::SeqCst) {
                         return Err(BrokerErrorCodeV1::NeedsReconciliation);
                     }
-                    Ok(PendingLegacyNamedImportClaim { bound, request })
+                    Ok(PendingLegacyNamedImportClaim {
+                        bound,
+                        request: Some(request),
+                    })
+                })
+                .map_err(|_| BrokerErrorCodeV1::Interrupted)?
+        }
+        .await;
+        job.result(result.as_ref().err().copied());
+        result
+    }
+
+    /// Use the live claim once. Record the exact Core response before handing
+    /// off its original owner. A stale owner leaves only the durable receipt.
+    #[allow(dead_code, reason = "the named Import start is composed separately")]
+    pub(super) async fn submit_bound_legacy_named_import_claim(
+        &self,
+        mut pending: PendingLegacyNamedImportClaim,
+    ) -> Result<ConfirmedLegacyNamedImportClaim, BrokerErrorCodeV1> {
+        let admission = &pending.bound.created.admission;
+        let job = Arc::clone(&admission.job);
+        let jobs = Arc::clone(&admission.request.jobs);
+        let writer = admission.request.writer.clone();
+        let operation = admission.accepted.operation_id();
+        let (cancel, generation) = pending.bound.acknowledgement.generation();
+        let cancel = cancel.clone();
+        let result = async {
+            self.require_starts().await?;
+            self.validate_control().await?;
+            require_generation(&cancel, generation)?;
+            let retained = writer
+                .load_legacy_named_admission(operation)
+                .await
+                .map_err(jobs::journal_error)?;
+            let saved = retained
+                .import_claim()
+                .ok_or(BrokerErrorCodeV1::NeedsReconciliation)?;
+            let exact = pending
+                .request
+                .as_ref()
+                .ok_or(BrokerErrorCodeV1::NeedsReconciliation)?;
+            if saved.receipt().is_some()
+                || canonical(saved.request()).map_err(jobs::journal_error)?
+                    != canonical(exact).map_err(jobs::journal_error)?
+            {
+                return Err(BrokerErrorCodeV1::Conflict);
+            }
+            let control = jobs
+                .named_control
+                .get()
+                .ok_or(BrokerErrorCodeV1::IncompatibleControl)?;
+            let (request, acknowledged) = control
+                .submit_legacy_named_import_claim(&mut pending)
+                .await
+                .map_err(named_effect_error)?;
+            writer
+                .acknowledge_legacy_named_import_claim(
+                    operation,
+                    &request,
+                    acknowledged.receipt.clone(),
+                )
+                .await
+                .map_err(|_| BrokerErrorCodeV1::NeedsReconciliation)?;
+            if acknowledged.disposition != ClaimDispositionV1::EmitOnce {
+                return Err(BrokerErrorCodeV1::NeedsReconciliation);
+            }
+            let clock = crate::broker::clock::NativeHostClock::new()
+                .and_then(|clock| clock.sample())
+                .map_err(|_| BrokerErrorCodeV1::Unavailable)?;
+            pending
+                .bound
+                .acknowledgement
+                .registration()
+                .arm()
+                .validate_clock_check(&clock)
+                .map_err(|_| BrokerErrorCodeV1::NeedsReconciliation)?;
+            cancel
+                .with_current_generation(generation, || {
+                    if self.stopping.load(Ordering::SeqCst) || self.fenced.load(Ordering::SeqCst) {
+                        return Err(BrokerErrorCodeV1::NeedsReconciliation);
+                    }
+                    Ok(ConfirmedLegacyNamedImportClaim {
+                        bound: pending.bound,
+                        receipt: acknowledged.receipt,
+                    })
                 })
                 .map_err(|_| BrokerErrorCodeV1::Interrupted)?
         }

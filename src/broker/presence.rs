@@ -1,12 +1,16 @@
 //! Authenticated presence of the trusted service, independent of job admission.
 //! Local receipts are immutable recovery evidence, never execution authority.
 use crate::{
-    broker::{enforcer::CancelGeneration, journal::CancelStopProjectionV1, writer::WriterClient},
+    broker::{
+        enforcer::CancelGeneration, journal::CancelStopProjectionV1,
+        service::PendingLegacyNamedImportClaim, writer::WriterClient,
+    },
     broker_registry::{BrokerAuthorityV1, BrokerRuntimeKindV1},
     control::{
-        ArmResultV1, MutationReceiptV1,
+        ArmResultV1, HelperClaimResultV1, MutationReceiptV1,
         session_control::{
-            LegacyConfirmedLaunchSpecV1, LegacyConfirmedPlanV1, LegacyNamedInitialDecisionV1,
+            LegacyConfirmedLaunchSpecV1, LegacyConfirmedPlanV1, LegacyNamedImportClaimRequestV1,
+            LegacyNamedInitialDecisionV1,
         },
     },
     control_fs::{Directory, PrivateFile},
@@ -516,6 +520,21 @@ impl LegacyNamedControl {
     ) -> Result<Option<ArmResultV1>> {
         self.0.revalidate()?;
         legacy_named_admission::reconcile_import_arm(&self.0, writer, operation).await
+    }
+
+    pub(in crate::broker) async fn submit_legacy_named_import_claim(
+        &self,
+        pending: &mut PendingLegacyNamedImportClaim,
+    ) -> Result<(LegacyNamedImportClaimRequestV1, HelperClaimResultV1)> {
+        let (request, acknowledgement) = pending.take_transport().ok_or(PresenceError::Conflict)?;
+        let result = legacy_named_admission::submit_import_claim(
+            &self.0,
+            &request,
+            acknowledgement.registration(),
+            acknowledgement.generation(),
+        )
+        .await?;
+        Ok((request, result))
     }
 
     /// Reconcile the exact retained claim and retain its receipt even after STOP.
