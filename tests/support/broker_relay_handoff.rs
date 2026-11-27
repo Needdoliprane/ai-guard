@@ -4,10 +4,7 @@
 use agentsandbox::{
     api::{GatewayState, TenantGateway, gateway_router},
     audit::Store,
-    broker::{
-        local_ipc::{EndpointRecordV1, read_frame, write_frame},
-        service::{self, RequestedExecutionV1, SubmitV1, encode_submit, protocol::*},
-    },
+    broker::service::{self, RequestedExecutionV1, SubmitV1, encode_submit, protocol::*},
     control::{WorkerMutationV1, WorkerStateV1, WorkerTransitionV1},
     control_fs::Directory,
     operations::initialize_config,
@@ -24,7 +21,6 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
     io,
@@ -166,40 +162,14 @@ fn fresh(root: &Path, tenant: &str) -> Result<Arc<Store>> {
     store.migrate_workload_v6(&root.join(format!("{tenant}-before6.sqlite")))?;
     Ok(Arc::new(store))
 }
-async fn start_fixture_enforcer(root: &Path, broker_root: &Path) -> Result<Child> {
-    let enforcer_root = private_dir(broker_root, "enforcer")?;
-    // The relay fixture retains its existing guardian configuration.
-    private_file(&enforcer_root.join("auth"), &[0x51; 32])?;
-    let mut enforcer = Command::new(BIN)
-        .args(["__broker-enforcer", "--root"])
-        .arg(&enforcer_root)
-        .args(["--max-slots", "32"])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(diagnostic(&root.join("enforcer.stderr"))?)
-        .env_clear()
-        .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
-        .env("HOME", root)
-        .current_dir(root)
-        .kill_on_drop(true)
-        .spawn()?;
-    timeout(Duration::from_secs(10), async {
-        loop {
-            if let Some(status) = enforcer.try_wait()? {
-                bail!("phase=enforcer_announcement_wait child_status={status}");
-            }
-            if std::fs::read_dir(enforcer_root.join("announcements"))
-                .is_ok_and(|mut entries| entries.next().is_some())
-            {
-                return Ok::<_, anyhow::Error>(());
-            }
-            sleep(Duration::from_millis(20)).await;
-        }
-    })
-    .await
-    .context("phase=enforcer_announcement_wait timed out")??;
-    Ok(enforcer)
-}
+#[path = "owned_legacy_guardian.rs"]
+mod owned_legacy_guardian;
+use owned_legacy_guardian::{OwnedLegacyGuardian, require_fresh_role, require_socket_closed};
+#[cfg(target_os = "macos")]
+#[allow(dead_code)]
+#[path = "owned_darwin.rs"]
+mod owned_darwin;
+
 #[path = "broker_relay_runtime.rs"]
 mod runtime;
 use runtime::{Engine, EngineFailure, engine_connection};
@@ -220,7 +190,8 @@ pub struct Fixture {
     registry: PathBuf,
     runner_a: PathBuf,
     broker: Option<Child>,
-    enforcer: Option<Child>,
+    legacy_guardian: Option<OwnedLegacyGuardian>,
+    legacy_start_attempted: bool,
     engine: Arc<Mutex<Engine>>,
     engine_stop: Option<oneshot::Sender<()>>,
     engine_task: JoinHandle<()>,
@@ -414,12 +385,6 @@ impl Fixture {
                 &json!({"version":2,"installation_id":Uuid::new_v4(),"root":broker_root,"max_enforcer_slots":32,"profiles":profiles,"additional_control_secret_files":[]}),
             )?,
         )?;
-        let enforcer = if admission_only {
-            // The actual broker must create and attest the new role itself.
-            None
-        } else {
-            Some(start_fixture_enforcer(root.as_path(), &broker_root).await?)
-        };
         let mut fixture = Self {
             root,
             a,
@@ -432,7 +397,8 @@ impl Fixture {
             registry,
             runner_a,
             broker: None,
-            enforcer,
+            legacy_guardian: None,
+            legacy_start_attempted: false,
             engine,
             engine_stop: Some(engine_stop),
             engine_task,
@@ -440,15 +406,12 @@ impl Fixture {
             server_task,
         };
         if let Err(error) = fixture.start_broker().await {
-            if admission_only {
-                let cleanup = fixture.close().await;
-                return Err(error.context(if cleanup.is_ok() {
-                    "admission fixture broker did not start"
-                } else {
-                    "admission fixture broker did not start and cleanup is unconfirmed"
-                }));
-            }
-            return Err(error);
+            let cleanup = fixture.close().await;
+            return Err(error.context(if cleanup.is_ok() {
+                "fixture broker did not start"
+            } else {
+                "fixture broker did not start and cleanup is unconfirmed"
+            }));
         }
         Ok(fixture)
     }
@@ -496,6 +459,16 @@ impl Fixture {
     pub async fn start_broker(&mut self) -> Result<()> {
         ensure!(self.broker.is_none(), "broker already owned");
         self.broker_tmp.revalidate()?;
+        let first = !self.legacy_start_attempted;
+        if first {
+            require_fresh_role(&self.broker_root)?;
+        } else {
+            self.legacy_guardian
+                .as_ref()
+                .context("original fixture Legacy guardian custody unavailable")?
+                .require_live()
+                .await?;
+        }
         self.broker = Some(
             Command::new(BIN)
                 .args(["broker", "serve", "--config"])
@@ -508,15 +481,20 @@ impl Fixture {
                 .env("HOME", self.root.as_path())
                 .env("TMPDIR", self.broker_tmp.path())
                 .current_dir(self.root.as_path())
-                .kill_on_drop(true)
+                .kill_on_drop(false)
                 .spawn()?,
         );
+        self.legacy_start_attempted = true;
         timeout(Duration::from_secs(10), async {
             loop {
-                ensure!(
-                    self.broker.as_mut().unwrap().try_wait()?.is_none(),
-                    "fixture broker exited before IPC ready"
-                );
+                if let Some(status) = self
+                    .broker
+                    .as_mut()
+                    .context("fixture broker owner")?
+                    .try_wait()?
+                {
+                    bail!("phase=broker_ipc_preflight child_status={status}");
+                }
                 if matches!(
                     service::request(
                         &self.broker_root,
@@ -530,6 +508,20 @@ impl Fixture {
                     .await,
                     Ok(BrokerReplyV1::Page { .. })
                 ) {
+                    if first {
+                        let broker = self.broker.as_mut().context("fixture broker owner")?;
+                        self.legacy_guardian = Some(
+                            OwnedLegacyGuardian::capture(&self.broker_root, broker, Path::new(BIN))
+                                .await
+                                .context("phase=legacy_guardian_custody")?,
+                        );
+                    } else {
+                        self.legacy_guardian
+                            .as_ref()
+                            .context("original fixture Legacy guardian custody unavailable")?
+                            .require_live()
+                            .await?;
+                    }
                     return Ok::<_, anyhow::Error>(());
                 }
                 sleep(Duration::from_millis(20)).await;
@@ -539,6 +531,11 @@ impl Fixture {
         Ok(())
     }
     pub async fn restart_broker(&mut self) -> Result<()> {
+        self.legacy_guardian
+            .as_ref()
+            .context("original fixture Legacy guardian custody unavailable")?
+            .require_live()
+            .await?;
         if let Some(mut child) = self.broker.take() {
             child.kill().await?;
             child.wait().await?;
@@ -900,33 +897,56 @@ impl Fixture {
         Ok(())
     }
     pub async fn close(mut self) -> Result<()> {
-        for child in [&mut self.broker, &mut self.enforcer] {
-            if let Some(mut owned) = child.take() {
-                if owned.try_wait()?.is_none() {
-                    owned.start_kill()?;
-                    timeout(Duration::from_secs(5), owned.wait()).await??;
-                }
-            }
-        }
-        let guardian = if self.faults.before_import.is_some() {
-            timeout(
-                Duration::from_secs(15),
-                close_admission_guardian(&self.broker_root),
-            )
-            .await
-            .context("admission guardian cleanup was not confirmed")
-            .and_then(|result| result)
-        } else {
-            Ok(())
-        };
         if let Some(stop) = self.engine_stop.take() {
             let _ = stop.send(());
         }
-        timeout(Duration::from_secs(5), &mut self.engine_task).await??;
+        let engine_joined = matches!(
+            timeout(Duration::from_secs(5), &mut self.engine_task).await,
+            Ok(Ok(()))
+        );
+        if !engine_joined {
+            self.engine_task.abort();
+            let _ = timeout(Duration::from_secs(5), &mut self.engine_task).await;
+        }
+        let engine_closed =
+            engine_joined && require_socket_closed(&self.root.join("r")).await.is_ok();
+        let guardian = async {
+            if !self.legacy_start_attempted {
+                return Ok::<_, anyhow::Error>("not_started");
+            }
+            ensure!(engine_closed, "fixture runtime closure unconfirmed");
+            let owner = self
+                .legacy_guardian
+                .as_ref()
+                .context("original fixture Legacy guardian custody unavailable")?;
+            timeout(Duration::from_secs(15), owner.close())
+                .await
+                .context("fixture Legacy guardian closure timeout")?
+        }
+        .await;
+        let broker = if let Ok(category) = &guardian {
+            println!("phase=fixture_legacy_guardian_close category={category}");
+            self.legacy_guardian = None;
+            self.legacy_start_attempted = false;
+            async {
+                if let Some(owned) = self.broker.as_mut() {
+                    if owned.try_wait()?.is_none() {
+                        owned.start_kill()?;
+                    }
+                    timeout(Duration::from_secs(5), owned.wait()).await??;
+                }
+                self.broker = None;
+                Ok::<_, anyhow::Error>(())
+            }
+            .await
+        } else {
+            println!("phase=fixture_legacy_guardian_close category=custody_retained");
+            Ok(())
+        };
         if let Some(stop) = self.server_stop.take() {
             let _ = stop.send(());
         }
-        timeout(Duration::from_secs(5), &mut self.server_task).await???;
+        let server = timeout(Duration::from_secs(5), &mut self.server_task).await;
         let untouched = if self.faults.before_import.is_some() {
             self.assert_admission_engine_untouched().await
         } else {
@@ -934,6 +954,9 @@ impl Fixture {
         };
         untouched?;
         guardian?;
+        broker?;
+        server???;
+        ensure!(engine_closed, "fixture runtime closure unconfirmed");
         ensure!(
             self.engine.lock().await.errors.is_empty(),
             "synthetic runtime fixture errors"
@@ -941,106 +964,10 @@ impl Fixture {
         Ok(())
     }
 }
-async fn close_admission_guardian(broker_root: &Path) -> Result<()> {
-    let role = broker_root.join("enforcer");
-    match std::fs::symlink_metadata(&role) {
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(error.into()),
-        Ok(_) => {}
-    }
-    let role = Directory::open_existing(&role)?;
-    let announcements = Directory::open_existing(&role.path().join("announcements"))?;
-    ensure!(
-        std::fs::read_dir(announcements.path())?.count() == 1,
-        "fresh admission guardian did not publish exactly one endpoint"
-    );
-    let publication = announcements.read_private_file("e-0001.json", 4096)?;
-    let record: Value = serde_json::from_slice(publication.bytes())?;
-    ensure!(
-        record["version"] == 1 && record["sequence"] == 1,
-        "invalid guardian publication"
-    );
-    let endpoint: EndpointRecordV1 = serde_json::from_value(record["endpoint"].clone())?;
-    let endpoints = Directory::open_existing(&role.path().join("endpoints"))?;
-    let capability = role.read_private_file("auth", 32)?;
-    ensure!(
-        capability.bytes().len() == 32,
-        "invalid private fixture capability size"
-    );
-
-    // This one request uses only the already published endpoint. It cannot
-    // start or reconnect to a replacement process. The guardian enforces idle.
-    let wait = Duration::from_secs(3);
-    let mut stream = endpoint.connect_checked(&endpoints).await?;
-    let challenge: Value = read_frame(&mut stream, 1024, wait).await?;
-    let epoch = serde_json::from_value::<Uuid>(challenge["epoch"].clone())?;
-    let nonce = serde_json::from_value::<Uuid>(challenge["nonce"].clone())?;
-    ensure!(
-        epoch == endpoint.epoch() && !nonce.is_nil(),
-        "guardian epoch differs from its publication"
-    );
-    capability.revalidate()?;
-    publication.revalidate()?;
-    let mut proof = Sha256::new();
-    proof.update(b"ai-guard:enforcer-auth:v1\0");
-    proof.update(capability.bytes());
-    proof.update(epoch.as_bytes());
-    proof.update(nonce.as_bytes());
-    write_frame(
-        &mut stream,
-        &json!({"proof": format!("{:x}", proof.finalize())}),
-        1024,
-        wait,
-    )
-    .await?;
-    write_frame(
-        &mut stream,
-        &json!({"kind": "shutdown_if_idle"}),
-        1024,
-        wait,
-    )
-    .await?;
-    let reply: Value = read_frame(&mut stream, 1024, wait).await?;
-    ensure!(
-        reply == json!({"kind": "acknowledged"}),
-        "idle guardian shutdown refused"
-    );
-    drop(stream);
-
-    let socket = endpoints.path().join(endpoint.directory_name()).join("s");
-    timeout(Duration::from_secs(5), async {
-        loop {
-            match UnixStream::connect(&socket).await {
-                Ok(stream) => drop(stream),
-                Err(error)
-                    if matches!(
-                        error.kind(),
-                        io::ErrorKind::ConnectionRefused | io::ErrorKind::NotFound
-                    ) =>
-                {
-                    endpoints.revalidate()?;
-                    publication.revalidate()?;
-                    ensure!(
-                        std::fs::read_dir(announcements.path())?.count() == 1,
-                        "guardian was replaced during shutdown"
-                    );
-                    return Ok::<_, anyhow::Error>(());
-                }
-                Err(error) => return Err(error.into()),
-            }
-            sleep(Duration::from_millis(50)).await;
-        }
-    })
-    .await
-    .context("guardian acknowledged shutdown but its IPC remained reachable")?
-}
 impl Drop for Fixture {
     fn drop(&mut self) {
-        if let Some(child) = self.broker.as_mut() {
-            let _ = child.start_kill();
-        }
-        if let Some(child) = self.enforcer.as_mut() {
-            let _ = child.start_kill();
+        if self.legacy_start_attempted {
+            println!("phase=fixture_drop category=legacy_custody_retained");
         }
         if let Some(stop) = self.engine_stop.take() {
             let _ = stop.send(());

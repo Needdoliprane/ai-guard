@@ -324,6 +324,22 @@ impl DarwinIdentity {
         self.exit.wait().await
     }
 
+    /// Legacy restart can reparent the same detached child. Verify its
+    /// original kernel token and executable on the retained endpoint.
+    pub(super) fn revalidate_retained_peer(&self, stream: &UnixStream) -> Result<()> {
+        let (token, pid) = peer_identity(stream)?;
+        ensure!(
+            token == self.token && pid == self.guardian.pid && !self.exit.exited()?,
+            "category=guardian_peer_identity_changed"
+        );
+        compare_executable(pid, token, &self.exe)
+    }
+
+    pub(super) fn signal_retained_peer(&self, stream: &UnixStream) -> Result<()> {
+        self.revalidate_retained_peer(stream)?;
+        self.signal_token()
+    }
+
     pub(super) fn capture(
         stream: &UnixStream,
         broker_pid: u32,
@@ -391,6 +407,10 @@ impl DarwinIdentity {
     fn signal(&self, stream: &UnixStream, broker_pid: u32, expected_exe: &Path) -> Result<()> {
         self.revalidate(stream, broker_pid, expected_exe)?;
         ensure!(!self.exit.exited()?, "category=guardian_already_exited");
+        self.signal_token()
+    }
+
+    fn signal_token(&self) -> Result<()> {
         let mut exact_token = self.token;
         // SAFETY: the native kernel operation validates the process identity
         // from the token. The PID is never used as a signal argument.
