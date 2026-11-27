@@ -24,6 +24,8 @@ The response prepares the broker's comparison. Admission resolves the same durab
 
 The same private route prefix exposes `GET …/{binding_ref}/launch-spec` for the exact LaunchSpec and `POST …/{binding_ref}/initial-decision` with an empty body for the Initial decision. The gateway derives the request from the confirmed launch and retains the receipt under broker identity. An initial write returns HTTP 201 and a replay returns HTTP 200. This step also records review and deny decisions. A separate admission request reserves quota. The Writer and application flow still need to be connected.
 
+`POST …/{binding_ref}/admission/cancel-reserved` handles cancellation of an untouched reservation under the same broker identity. The request binds the original admission receipt, namespace, worker, attempt and revision to a stable cancellation operation. The broker must first establish that no runtime work has begun. The Store checks the exact reserved predecessor and records cancellation and quota release atomically, including after the initiator’s authority has been revoked. Reconciliation of the same cancellation returns the recorded receipt. The broker’s STOP flow still needs to supply this request.
+
 ## A real conversation channel
 
 [Protocol and test design note in French](evidence/2026-11-25/provider-conversation.fr.md).

@@ -44,6 +44,12 @@ Le CLI Legacy utilise un compte local nominatif et un contexte personnel doté d
      --target-file "$target_file" --confirm-control-stopped
    ```
 
+   Pour lier une révision de cible au projet local du broker, ajoutez `--broker-registry "$broker_registry"`. Utilisez l’hôte du broker et le montage prévu pour le projet. Conservez le registre JSON V2 dans un répertoire privé et le fichier en mode `0600`. Dans le profil désigné par le `broker_profile_id` de la cible, ajoutez une entrée `legacy_named_sources` avec le `launch_target_id` exact, la nouvelle révision du catalogue dans `target_revision` et le chemin absolu `source` sous l’une des racines `source_roots` du profil. Le tenant et le namespace de contrôle du profil doivent correspondre à ceux de la base.
+
+   L’option calcule l’identité de la source et publie une cible V2 à partir d’un fichier V1. Pour un fichier V2, elle vérifie le `source_identity_hash` fourni contre le même mappage local. Rejouez avec le même fichier et la même option. Sans l’option, un fichier historique V1 conserve son format et un opérateur autorisé peut provisionner ou rejouer un fichier V2 existant avec son empreinte retenue. Publiez une nouvelle révision pour changer de source ou ajouter son identité à une cible V1 existante. Si le système de fichiers ne fournit pas la date de création du répertoire source, la commande refuse la publication. Conservez `workspace_manifest_digest` dans la spécification de lancement pour identifier le contenu filtré.
+
+   Mettez à jour les lecteurs avant la première publication d’une cible V2. Un lecteur antérieur refuse cet historique même lorsque la version du schéma SQLite concorde. Les lecteurs autorisés de l’audit du tenant peuvent voir l’empreinte opaque. Conservez les chemins hôte dans le registre privé du broker.
+
    Le reçu JSON contient `target_id`, `target_revision`, `audit_seq` et `audit_hash`. Réutiliser le même fichier de cible et la même révision restitue le reçu d’audit d’origine avec `replayed: true`. Transmettez l’identifiant et la révision de la cible à l’utilisateur nominatif. Remettez le gateway Legacy en service pour les demandes humaines ci-dessous.
 
    La publication d’une cible active, la préparation d’un lancement et sa première confirmation nécessitent un credential workload valide pour le broker et l’incarnation désignés par le grant. Après une révocation, rétablissez un binding de broker valide. Publiez une nouvelle révision de cible si la révision du grant change.

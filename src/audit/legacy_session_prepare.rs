@@ -10,8 +10,7 @@ use uuid::Uuid;
 #[cfg(test)]
 pub(super) mod bootstrap;
 mod confirmation;
-#[cfg(test)]
-pub(super) use confirmation::LegacyNamedCancelReservationV1;
+pub(crate) use confirmation::LegacyNamedCancelReservationV1;
 pub(super) use confirmation::{
     ADMITTED, LEGACY_NAMED_ARM_KIND, REFERENCE_KINDS, legacy_named_arm_predecessor, protect_manual,
     protect_manual_at, require_named_admission_link, session_is_fenced,

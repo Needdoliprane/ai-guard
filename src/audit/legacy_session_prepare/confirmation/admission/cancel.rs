@@ -139,7 +139,6 @@ impl Store {
     /// including after human authority was withdrawn or supervision reopened.
     /// The Store establishes the absence of a durable arm or claim. The broker
     /// must independently establish that no runtime work preceded this boundary.
-    #[allow(dead_code, reason = "private named cancellation transport is pending")]
     pub(crate) fn cancel_legacy_named_reservation(
         &self,
         broker: &BrokerIdentityV1,
@@ -158,6 +157,12 @@ impl Store {
         );
         let clock = workload::capture_control_time(&tx)?;
         workload::revalidate_broker_identity_checked(&tx, broker, clock.at())?;
+        let before_seq = audit_head(&tx)?
+            .0
+            .checked_add(1)
+            .context("audit sequence exhausted")?;
+        let fact = cancellation_admission(&tx, request.binding_ref, before_seq)?;
+        anyhow::ensure!(fact.actor.matches_binding(broker), ControlFailure::NotFound);
 
         let result = if let Some((stored, record)) =
             supervision::load_record(&tx, &request.mutation.operation_id)?
@@ -170,12 +175,6 @@ impl Store {
             conflict(cancel.request.input_hash()? == input_hash)?;
             cancellation_result(&stored, &record)?
         } else {
-            let before_seq = audit_head(&tx)?
-                .0
-                .checked_add(1)
-                .context("audit sequence exhausted")?;
-            let fact = cancellation_admission(&tx, request.binding_ref, before_seq)?;
-            anyhow::ensure!(fact.actor.matches_binding(broker), ControlFailure::NotFound);
             let parent = control_store::worker_at(&tx, &request.mutation.worker_id, before_seq)?
                 .ok_or(ControlFailure::NotFound)?;
             require_cancel_predecessor(&tx, &fact, request, &parent)?;

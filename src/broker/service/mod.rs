@@ -20,6 +20,7 @@ mod unit_plan;
 pub use client::{BrokerClient, encode_submit, request};
 pub use client_selection::BrokerClientSelection;
 pub use preclaim::{AbandonBeforeClaimV1, PreclaimStateV1};
+pub(crate) use profile::with_legacy_target_source;
 pub use profile::{RequestedExecutionV1, SubmitV1};
 pub use server::{ServiceShutdown, serve_selected_owned};
 pub use server::{serve, serve_recovery, serve_selected};

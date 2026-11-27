@@ -1,6 +1,8 @@
 use super::{ApplyArgs, LegacySessionTargetArgs, OfflineArgs, ProvisionArgs, ResumeProvisionArgs};
 use crate::{
     audit::{DEFAULT_PHYSICAL_BYTES, Store},
+    broker::service::with_legacy_target_source,
+    control::session_control::{ProvisionLegacySessionTargetV1, canonical_uuid},
     control_fs::{Directory, PrivateFile, absolute_path},
     identity::*,
     redaction::Redactor,
@@ -473,12 +475,24 @@ pub(super) fn print_json(value: &serde_json::Value) -> Result<()> {
 pub(super) fn provision_legacy_session_target(args: LegacySessionTargetArgs) -> Result<()> {
     let control = open_with_capacity(&args.offline, args.audit_max_bytes)?;
     let file = PrivateFile::open(&absolute_path(&args.target_file)?, 65_536)?;
-    let input: crate::control::session_control::ProvisionLegacySessionTargetV1 =
-        serde_json::from_slice(file.bytes())
-            .map_err(|_| anyhow::anyhow!("invalid Legacy session target file"))?;
-    file.revalidate()?;
-    let receipt = control
-        .store
-        .provision_legacy_session_target(control.actor, input)?;
+    let input: ProvisionLegacySessionTargetV1 = serde_json::from_slice(file.bytes())
+        .map_err(|_| anyhow::anyhow!("invalid Legacy session target file"))?;
+    let publish = |input| {
+        file.revalidate()?;
+        control
+            .store
+            .provision_legacy_session_target(control.actor, input)
+    };
+    let receipt = if let Some(registry) = args.broker_registry {
+        with_legacy_target_source(
+            &registry,
+            control.store.tenant_id(),
+            canonical_uuid(&control.namespace)?,
+            input,
+            publish,
+        )?
+    } else {
+        publish(input)?
+    };
     print_json(&serde_json::to_value(receipt)?)
 }

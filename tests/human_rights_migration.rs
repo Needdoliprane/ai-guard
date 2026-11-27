@@ -620,6 +620,150 @@ async fn legacy_local_confirmation_survives_reopen_without_admission() {
     assert!(reopened.integrity().unwrap().valid);
     assert_eq!(reopened.head().unwrap(), before + 1);
     assert!(reopened.workers().unwrap().is_empty());
+    let namespace = reopened
+        .supervision_state()
+        .unwrap()
+        .control_namespace_uuid
+        .unwrap();
+    drop(reopened);
+
+    let source_root = files.path().canonicalize().unwrap().join("sources");
+    let source = source_root.join("project");
+    let copy = source_root.join("copy");
+    for directory in [&source, &copy] {
+        std::fs::create_dir_all(directory).unwrap();
+        std::fs::write(directory.join("same.txt"), b"identical project contents").unwrap();
+    }
+    let base = source_root.parent().unwrap();
+    let registry_path = base.join("broker-registry.json");
+    let source_target_id = Uuid::new_v4();
+    let mut source_target = input.clone();
+    source_target["target"]["catalogue"]["launch_target_id"] = serde_json::json!(source_target_id);
+    source_target["target"]["launch"]["session_id"] = serde_json::json!(source_target_id);
+    let registry = serde_json::json!({
+        "version": 2,
+        "installation_id": Uuid::new_v4(),
+        "root": base.join("broker-state"),
+        "max_enforcer_slots": 8,
+        "profiles": [{
+            "id": "fixture-profile", "gateway": "http://127.0.0.1:8787",
+            "tenant_id": "tenant-a", "control_namespace_uuid": namespace,
+            "config_dir": base.join("unused-broker-config"),
+            "runner_token_file": base.join("unused-runner-file"),
+            "runtime": "docker", "runtime_program": base.join("unused-runtime"),
+            "runtime_endpoint": "unix:///unused/docker.sock", "image": "worker:fixture",
+            "policy_profile": "observe", "network": "none", "allow_rootful_runtime": false,
+            "max_timeout_seconds": 60, "allow_capture_output": false, "managed_clients": false,
+            "source_roots": [&source_root], "export_roots": [base.join("exports")],
+            "prearmed_start_profile": {"version": 1, "mode": "legacy"},
+            "legacy_named_sources": [{
+                "launch_target_id": source_target_id, "target_revision": 1, "source": source
+            }]
+        }]
+    });
+    let apply_with_registry = |input: &serde_json::Value, registry: &serde_json::Value| {
+        let registry_file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .mode(0o600)
+            .open(&registry_path)
+            .unwrap();
+        serde_json::to_writer(registry_file, registry).unwrap();
+        provision_target(input)
+            .arg("--audit-max-bytes")
+            .arg(LEGACY_AUDIT_MAX_BYTES.to_string())
+            .arg("--audit-capacity-file")
+            .arg(&capacity)
+            .arg("--broker-registry")
+            .arg(&registry_path)
+            .output()
+            .unwrap()
+    };
+    let mut wrong_tenant = registry.clone();
+    wrong_tenant["profiles"][0]["tenant_id"] = "tenant-b".into();
+    assert_cli_refusal(
+        apply_with_registry(&source_target, &wrong_tenant),
+        "named broker profile tenant or control namespace does not match the offline database",
+    );
+    let mut wrong_namespace = registry.clone();
+    wrong_namespace["profiles"][0]["control_namespace_uuid"] = serde_json::json!(Uuid::new_v4());
+    assert_cli_refusal(
+        apply_with_registry(&source_target, &wrong_namespace),
+        "named broker profile tenant or control namespace does not match the offline database",
+    );
+    let mut wrong_revision = registry.clone();
+    wrong_revision["profiles"][0]["legacy_named_sources"][0]["target_revision"] = 2.into();
+    assert_cli_refusal(
+        apply_with_registry(&source_target, &wrong_revision),
+        "named broker source has no matching target revision",
+    );
+    let mut wrong_target = registry.clone();
+    wrong_target["profiles"][0]["legacy_named_sources"][0]["launch_target_id"] =
+        serde_json::json!(Uuid::new_v4());
+    assert_cli_refusal(
+        apply_with_registry(&source_target, &wrong_target),
+        "named broker source has no matching target revision",
+    );
+    assert_eq!(reopen().head().unwrap(), before + 1);
+
+    let accepted = apply_with_registry(&source_target, &registry);
+    assert!(
+        accepted.status.success(),
+        "the offline target command refused the configured source"
+    );
+    let source_receipt: serde_json::Value = serde_json::from_slice(&accepted.stdout).unwrap();
+    assert_eq!(source_receipt["target_id"], source_target_id.to_string());
+    assert_eq!(source_receipt["replayed"], false);
+    assert!(source_receipt.get("source_identity_hash").is_none());
+    let reopened = reopen();
+    let source_events = reopened
+        .events(&EventQuery {
+            kind: Some("control.legacy_session_prepare.target".into()),
+            after: Some(before + 1),
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(source_events.len(), 1);
+    let source_event = &source_events[0];
+    assert_eq!(
+        source_event.hash,
+        source_receipt["audit_hash"].as_str().unwrap()
+    );
+    let source_record = source_event.event.data["command"].clone();
+    assert_eq!(source_record["target"]["version"], 2);
+    assert_eq!(
+        source_record["target"]["source_identity_hash"]
+            .as_str()
+            .unwrap()
+            .len(),
+        64
+    );
+    let source_path = source.to_str().unwrap();
+    assert!(!String::from_utf8_lossy(&accepted.stdout).contains(source_path));
+    assert!(!source_event.event.data.to_string().contains(source_path));
+    let source_head = reopened.head().unwrap();
+    drop(reopened);
+
+    for replay in [
+        apply_with_registry(&source_target, &registry),
+        apply_with_registry(&source_record, &registry),
+        apply(&source_record),
+    ] {
+        assert!(replay.status.success());
+        let mut replay: serde_json::Value = serde_json::from_slice(&replay.stdout).unwrap();
+        assert_eq!(replay["replayed"], true);
+        replay["replayed"] = false.into();
+        assert_eq!(replay, source_receipt);
+    }
+    let mut remapped = registry;
+    remapped["profiles"][0]["legacy_named_sources"][0]["source"] = serde_json::json!(copy);
+    assert_cli_refusal(
+        apply_with_registry(&source_record, &remapped),
+        "named broker source identity conflicts with the target",
+    );
+    let reopened = reopen();
+    assert_eq!(reopened.head().unwrap(), source_head);
 
     async fn call(
         router: &Router,

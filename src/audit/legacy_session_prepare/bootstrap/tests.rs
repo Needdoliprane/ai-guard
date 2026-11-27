@@ -169,6 +169,37 @@ impl Fixture {
         startup.provision_target(self.operator.clone(), self.target.clone())
     }
 
+    fn issue_additional_broker(&self, store: &Store, token: &str) {
+        let broker_id = Uuid::new_v4().to_string();
+        let incarnation_id = Uuid::new_v4().to_string();
+        let credential_id = Uuid::new_v4().to_string();
+        store
+            .issue_workload_binding(&WorkloadBindingIssueV1 {
+                operation_id: Uuid::new_v4().to_string(),
+                credential_id: credential_id.clone(),
+                subject: WorkloadSubjectV1::Broker {
+                    broker_id: broker_id.clone(),
+                    incarnation_id: incarnation_id.clone(),
+                },
+                sha256_digest: hex::encode(Sha256::digest(token)),
+                ..self.credential.clone()
+            })
+            .unwrap();
+        store
+            .mutate_broker_grant(&BrokerGrantMutationV1 {
+                operation_id: Uuid::new_v4().to_string(),
+                broker_id,
+                incarnation_id,
+                credential_id,
+                authorities: vec![BrokerAuthorityV1 {
+                    authority_id: Uuid::new_v4().to_string(),
+                    runtime_kind: BrokerRuntimeKindV1::Docker,
+                }],
+                ..self.grant.clone()
+            })
+            .unwrap();
+    }
+
     fn reopen(&self) -> Store {
         Store::open_existing_for_tenant(
             &self.source,
@@ -924,10 +955,40 @@ fn legacy_named_reservation_refuses_generic_prepare_and_stays_cancellable() {
     assert_eq!(integrity.head_hash, cancelled.receipt.audit_hash);
 }
 
-#[test]
-fn legacy_named_cancel_releases_an_unarmed_reservation_after_revocation() {
+#[tokio::test]
+async fn legacy_named_cancel_releases_an_unarmed_reservation_after_revocation() {
+    use crate::{
+        api::{GatewayState, TenantGateway, gateway_router},
+        control::MutationResultV1,
+    };
+    use axum::{
+        body::{Body, to_bytes},
+        http::{Request, StatusCode, header},
+    };
+    use std::sync::Arc;
+    use tower::ServiceExt;
+
+    const RUNNER: &str = "synthetic-named-cancel-runner-fixture";
+    const OTHER_BROKER: &str = "synthetic-named-cancel-other-broker-fixture";
+    let router = |store: Arc<Store>| {
+        gateway_router(
+            GatewayState::for_tenants(
+                vec![TenantGateway {
+                    tenant_id: TENANT.into(),
+                    store,
+                    runner_token: RUNNER.into(),
+                    viewer_token: "synthetic-named-cancel-viewer-fixture".into(),
+                }],
+                Policy::default(),
+                None,
+                Redactor::new(vec![]),
+            )
+            .unwrap(),
+        )
+    };
     let f = Fixture::new();
     let (store, _) = f.provision(f.create().unwrap()).unwrap();
+    f.issue_additional_broker(&store, OTHER_BROKER);
     let (request, mut credential) = f.confirmed_request(&store);
     let Some(AuthenticatedWorkload::Broker(broker)) =
         store.authenticate_workload_token(BROKER_TOKEN).unwrap()
@@ -1024,9 +1085,42 @@ fn legacy_named_cancel_releases_an_unarmed_reservation_after_revocation() {
             .is_none()
     );
 
-    let committed = store
-        .cancel_legacy_named_reservation(&broker, &cancel)
+    let store = Arc::new(store);
+    let app = router(Arc::clone(&store));
+    let public_path = format!(
+        "/api/v1/control/session-confirmations/{}/admission/cancel-reserved",
+        cancel.binding_ref
+    );
+    let private_path = format!("/control{public_path}");
+    let wrong_path = format!(
+        "/control/api/v1/control/session-confirmations/{}/admission/cancel-reserved",
+        Uuid::new_v4()
+    );
+    let post = |path: &str, token: &str| {
+        Request::post(path)
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(serde_json::to_vec(&cancel).unwrap()))
+            .unwrap()
+    };
+    for (path, token, status) in [
+        (public_path.as_str(), BROKER_TOKEN, StatusCode::NOT_FOUND),
+        (private_path.as_str(), RUNNER, StatusCode::FORBIDDEN),
+        (private_path.as_str(), OTHER_BROKER, StatusCode::NOT_FOUND),
+        (wrong_path.as_str(), BROKER_TOKEN, StatusCode::BAD_REQUEST),
+    ] {
+        let refusal = app.clone().oneshot(post(path, token)).await.unwrap();
+        assert_eq!(refusal.status(), status);
+    }
+    assert_eq!(store.integrity().unwrap().head_hash, revoked.audit_hash);
+    assert_eq!(store.worker_quota(&quota).unwrap().held_workers, 1);
+    let response = app
+        .oneshot(post(&private_path, BROKER_TOKEN))
+        .await
         .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let committed: MutationResultV1 =
+        serde_json::from_slice(&to_bytes(response.into_body(), 128 * 1024).await.unwrap()).unwrap();
     assert!(committed.disposition.is_none());
     assert_eq!(committed.worker.state, WorkerStateV1::Cancelled);
     assert_eq!(committed.worker.revision, reserved.revision + 1);
@@ -1035,10 +1129,14 @@ fn legacy_named_cancel_releases_an_unarmed_reservation_after_revocation() {
     assert_eq!(store.worker_quota(&quota).unwrap().held_workers, 0);
     drop(store);
 
-    let reopened = f.reopen();
-    let replay = reopened
-        .cancel_legacy_named_reservation(&broker, &cancel)
+    let reopened = Arc::new(f.reopen());
+    let response = router(Arc::clone(&reopened))
+        .oneshot(post(&private_path, BROKER_TOKEN))
+        .await
         .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let replay: MutationResultV1 =
+        serde_json::from_slice(&to_bytes(response.into_body(), 128 * 1024).await.unwrap()).unwrap();
     assert!(replay.disposition.is_none());
     assert_eq!(replay.receipt, committed.receipt);
     assert!(
@@ -1354,34 +1452,7 @@ async fn legacy_named_admission_route_replays_the_committed_receipt_after_reopen
         audit_seq: manual_decision.seq,
         audit_hash: manual_decision.hash,
     };
-    let broker_id = Uuid::new_v4().to_string();
-    let incarnation_id = Uuid::new_v4().to_string();
-    let credential_id = Uuid::new_v4().to_string();
-    store
-        .issue_workload_binding(&WorkloadBindingIssueV1 {
-            operation_id: Uuid::new_v4().to_string(),
-            credential_id: credential_id.clone(),
-            subject: WorkloadSubjectV1::Broker {
-                broker_id: broker_id.clone(),
-                incarnation_id: incarnation_id.clone(),
-            },
-            sha256_digest: hex::encode(Sha256::digest(OTHER_BROKER)),
-            ..f.credential.clone()
-        })
-        .unwrap();
-    store
-        .mutate_broker_grant(&BrokerGrantMutationV1 {
-            operation_id: Uuid::new_v4().to_string(),
-            broker_id,
-            incarnation_id,
-            credential_id,
-            authorities: vec![BrokerAuthorityV1 {
-                authority_id: Uuid::new_v4().to_string(),
-                runtime_kind: BrokerRuntimeKindV1::Docker,
-            }],
-            ..f.grant.clone()
-        })
-        .unwrap();
+    f.issue_additional_broker(&store, OTHER_BROKER);
     let store = Arc::new(store);
     let app = make_router(Arc::clone(&store));
     let path = format!(
