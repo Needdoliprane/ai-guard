@@ -25,13 +25,14 @@ pub(super) async fn read_plan(
     expected_broker_profile_id: &str,
     binding_ref: Uuid,
 ) -> Result<LegacyConfirmedPlanV1> {
-    read_confirmation(
+    exchange_confirmation(
         presence,
+        Method::GET,
         binding_ref,
         "",
         RESPONSE_BYTES,
         |status, bytes| {
-            let value = decode_confirmation(presence, status, bytes)?;
+            let value = decode_confirmation(presence, status, bytes, &[StatusCode::OK])?;
             let plan = serde_json::from_value(value).map_err(|_| PresenceError::Protocol)?;
             validate_plan_scope(
                 &presence.scope.control_namespace_uuid.to_string(),
@@ -53,8 +54,9 @@ pub(super) async fn read_launch_spec(
     if presence.scope.profile_id != expected_broker_profile_id {
         return Err(PresenceError::Forbidden);
     }
-    read_confirmation(
+    exchange_confirmation(
         presence,
+        Method::GET,
         binding_ref,
         "/launch-spec",
         LEGACY_CONFIRMED_LAUNCH_SPEC_RESPONSE_BYTES as u64,
@@ -63,8 +65,30 @@ pub(super) async fn read_launch_spec(
     .await
 }
 
-async fn read_confirmation<T>(
+pub(super) async fn initial_decision(
     presence: &PreparedPresence,
+    expected_broker_profile_id: &str,
+    material: &LegacyConfirmedLaunchSpecV1,
+) -> Result<LegacyNamedInitialDecisionV1> {
+    if presence.scope.profile_id != expected_broker_profile_id {
+        return Err(PresenceError::Forbidden);
+    }
+    let binding_ref = material.plan.binding_ref;
+    require_launch_scope(presence, binding_ref, material)?;
+    exchange_confirmation(
+        presence,
+        Method::POST,
+        binding_ref,
+        "/initial-decision",
+        LEGACY_CONFIRMED_LAUNCH_SPEC_RESPONSE_BYTES as u64,
+        |status, bytes| decode_initial_decision(presence, material, status, bytes),
+    )
+    .await
+}
+
+async fn exchange_confirmation<T>(
+    presence: &PreparedPresence,
+    method: Method,
     binding_ref: Uuid,
     suffix: &str,
     success_bytes: u64,
@@ -78,7 +102,7 @@ async fn read_confirmation<T>(
     let before = checked_identity(&client, presence).await?;
     let (status, bytes) = client
         .send_session_bounded(
-            Method::GET,
+            method,
             &path,
             None,
             Limits {
@@ -203,13 +227,21 @@ fn decode_confirmation(
     presence: &PreparedPresence,
     status: StatusCode,
     bytes: &[u8],
+    expected_statuses: &[StatusCode],
 ) -> Result<Value> {
     let value = crate::json::decode_unique(bytes, 64).map_err(|_| PresenceError::Protocol)?;
-    if status != StatusCode::OK {
+    if !expected_statuses.contains(&status) {
         return Err(super::http::remote_error(status, &value));
     }
     presence.screen(&value)?;
     Ok(value)
+}
+
+fn require_unmasked_document(presence: &PreparedPresence, value: &Value) -> Result<()> {
+    if Redactor::new(presence.secrets.clone()).value_unclipped(value) != *value {
+        return Err(PresenceError::Protocol);
+    }
+    Ok(())
 }
 
 fn decode_launch_spec(
@@ -218,12 +250,19 @@ fn decode_launch_spec(
     status: StatusCode,
     bytes: &[u8],
 ) -> Result<LegacyConfirmedLaunchSpecV1> {
-    let value = decode_confirmation(presence, status, bytes)?;
-    if Redactor::new(presence.secrets.clone()).value_unclipped(&value) != value {
-        return Err(PresenceError::Protocol);
-    }
+    let value = decode_confirmation(presence, status, bytes, &[StatusCode::OK])?;
+    require_unmasked_document(presence, &value)?;
     let material: LegacyConfirmedLaunchSpecV1 =
         serde_json::from_value(value).map_err(|_| PresenceError::Protocol)?;
+    require_launch_scope(presence, binding_ref, &material)?;
+    Ok(material)
+}
+
+fn require_launch_scope(
+    presence: &PreparedPresence,
+    binding_ref: Uuid,
+    material: &LegacyConfirmedLaunchSpecV1,
+) -> Result<()> {
     validate_plan_scope(
         &presence.scope.control_namespace_uuid.to_string(),
         &presence.scope.profile_id,
@@ -240,7 +279,54 @@ fn decode_launch_spec(
     {
         return Err(PresenceError::Forbidden);
     }
-    Ok(material)
+    Ok(())
+}
+
+fn initial_decision_request_id(binding_ref: Uuid) -> String {
+    crate::audit::session_prepare::bound_event_id(
+        b"ai-guard:legacy-named-initial-policy-request:v1",
+        binding_ref,
+    )
+}
+
+fn decode_initial_decision(
+    presence: &PreparedPresence,
+    material: &LegacyConfirmedLaunchSpecV1,
+    status: StatusCode,
+    bytes: &[u8],
+) -> Result<LegacyNamedInitialDecisionV1> {
+    let value = decode_confirmation(
+        presence,
+        status,
+        bytes,
+        &[StatusCode::OK, StatusCode::CREATED],
+    )?;
+    require_unmasked_document(presence, &value)?;
+    // Decision is shared by older routes. Here all response fields are closed,
+    // including fields the historical Decision deserializer would ignore.
+    let mut ignored = false;
+    let result: LegacyNamedInitialDecisionV1 =
+        serde_ignored::deserialize(value, |_| ignored = true)
+            .map_err(|_| PresenceError::Protocol)?;
+    result.validate().map_err(|_| PresenceError::Protocol)?;
+    let request = &result.request;
+    if ignored
+        || result.replayed != (status == StatusCode::OK)
+        || result.binding_ref != material.plan.binding_ref
+        || request.request_id != initial_decision_request_id(material.plan.binding_ref)
+        || request.command != material.launch.command
+        || request.profile != material.launch.profile
+        || request.session_id.as_deref() != Some(material.launch.session_id.as_str())
+        || request.project_id.is_some()
+        || request.sandbox_id.is_some()
+        || request.agent_id.is_some()
+        || request.trace_id.is_some()
+        || request.execution_mode.is_some()
+        || request.provider_resolution != material.launch.provider_resolution
+    {
+        return Err(PresenceError::Protocol);
+    }
+    Ok(result)
 }
 
 async fn checked_identity(
@@ -322,6 +408,7 @@ fn response_status(admission: &crate::control::AdmissionResultV1) -> StatusCode 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::broker::presence::preparation_tests::Fixture;
 
     fn plan() -> LegacyConfirmedPlanV1 {
         LegacyConfirmedPlanV1 {
@@ -382,10 +469,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn launch_spec_decoder_requires_exact_private_material() {
+    fn launch_material() -> (Fixture, PreparedPresence, LegacyConfirmedLaunchSpecV1) {
         use crate::{
-            broker::presence::preparation_tests::Fixture,
             control::{LaunchSpecV1, NetworkV1, RestartPolicyV1, RuntimeKindV1, SecurityPresetV1},
             model::CommandSpec,
         };
@@ -399,7 +484,6 @@ mod tests {
         let mut plan = plan();
         plan.broker_profile_id = scope.profile_id;
         plan.control_namespace_uuid = scope.control_namespace_uuid.to_string();
-        let binding_ref = plan.binding_ref;
         let launch = LaunchSpecV1 {
             version: 1,
             session_id: plan.session_id.to_string(),
@@ -429,11 +513,18 @@ mod tests {
             egress: None,
         };
         plan.launch_spec_hash = launch.spec_hash().unwrap();
-        let mut material = LegacyConfirmedLaunchSpecV1 {
+        let material = LegacyConfirmedLaunchSpecV1 {
             version: 1,
             plan,
             launch,
         };
+        (fixture, presence, material)
+    }
+
+    #[test]
+    fn launch_spec_decoder_requires_exact_private_material() {
+        let (_fixture, presence, mut material) = launch_material();
+        let binding_ref = material.plan.binding_ref;
         let decode = |body: &[u8]| decode_launch_spec(&presence, binding_ref, StatusCode::OK, body);
         let body = serde_json::to_string(&material).unwrap();
         let decoded = decode(body.as_bytes()).unwrap();
@@ -472,6 +563,93 @@ mod tests {
         material.plan.launch_spec_hash = material.launch.spec_hash().unwrap();
         assert!(matches!(
             decode(&serde_json::to_vec(&material).unwrap()),
+            Err(PresenceError::Protocol)
+        ));
+    }
+
+    #[test]
+    fn initial_decision_decoder_binds_status_request_and_receipt() {
+        use crate::{
+            control::{DecisionPhaseV1, DecisionReceiptV1},
+            model::{Decision, DecisionRequest, Outcome as PolicyOutcome},
+        };
+
+        let (_fixture, presence, material) = launch_material();
+        let binding_ref = material.plan.binding_ref;
+        let request = DecisionRequest {
+            request_id: initial_decision_request_id(binding_ref),
+            profile: material.launch.profile.clone(),
+            command: material.launch.command.clone(),
+            project_id: None,
+            sandbox_id: None,
+            agent_id: None,
+            session_id: Some(material.launch.session_id.clone()),
+            correlation_id: Some(binding_ref.to_string()),
+            trace_id: None,
+            human_approved: false,
+            approval_hash: None,
+            execution_mode: None,
+            provider_resolution: None,
+        };
+        let mut response = LegacyNamedInitialDecisionV1 {
+            version: 1,
+            binding_ref,
+            receipt: DecisionReceiptV1 {
+                version: 1,
+                request_id: request.request_id.clone(),
+                request_hash: crate::policy::request_hash(&request),
+                phase: DecisionPhaseV1::Initial,
+                audit_seq: 17,
+                audit_hash: "a".repeat(64),
+            },
+            request,
+            decision: Decision::new(PolicyOutcome::Deny, "fixture", "The policy refused."),
+            replayed: false,
+        };
+        let decode =
+            |status, bytes: &[u8]| decode_initial_decision(&presence, &material, status, bytes);
+        let fresh = serde_json::to_vec(&response).unwrap();
+        let recorded = decode(StatusCode::CREATED, &fresh).unwrap();
+        assert_eq!(recorded.decision.outcome, PolicyOutcome::Deny);
+        assert!(!recorded.replayed);
+        assert!(matches!(
+            decode(StatusCode::OK, &fresh),
+            Err(PresenceError::Protocol)
+        ));
+
+        response.replayed = true;
+        let replay = serde_json::to_vec(&response).unwrap();
+        let retained = decode(StatusCode::OK, &replay).unwrap();
+        assert!(retained.replayed);
+        assert_eq!(retained.decision.outcome, PolicyOutcome::Deny);
+        assert_eq!(
+            serde_json::to_value(recorded.receipt).unwrap(),
+            serde_json::to_value(retained.receipt).unwrap()
+        );
+        response.decision = Decision::new(PolicyOutcome::Review, "fixture", "Review is required.");
+        response.receipt.audit_seq += 1;
+        let review = decode(StatusCode::OK, &serde_json::to_vec(&response).unwrap()).unwrap();
+        assert_eq!(review.decision.outcome, PolicyOutcome::Review);
+
+        let mut unknown: Value = serde_json::from_slice(&replay).unwrap();
+        unknown["decision"]["runtime_allowed"] = Value::Bool(false);
+        assert!(matches!(
+            decode(StatusCode::OK, &serde_json::to_vec(&unknown).unwrap()),
+            Err(PresenceError::Protocol)
+        ));
+        response.request.command.argv.push("--version".into());
+        response.receipt.request_hash = crate::policy::request_hash(&response.request);
+        assert!(matches!(
+            decode(StatusCode::OK, &serde_json::to_vec(&response).unwrap()),
+            Err(PresenceError::Protocol)
+        ));
+
+        response.request.command = material.launch.command.clone();
+        response.request.request_id = Uuid::new_v4().to_string();
+        response.receipt.request_id = response.request.request_id.clone();
+        response.receipt.request_hash = crate::policy::request_hash(&response.request);
+        assert!(matches!(
+            decode(StatusCode::OK, &serde_json::to_vec(&response).unwrap()),
             Err(PresenceError::Protocol)
         ));
     }

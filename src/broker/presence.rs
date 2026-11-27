@@ -3,7 +3,8 @@
 use crate::{
     broker_registry::{BrokerAuthorityV1, BrokerRuntimeKindV1},
     control::session_control::{
-        LegacyConfirmedLaunchSpecV1, LegacyConfirmedPlanV1, LegacyNamedSupervisedAdmissionV1,
+        LegacyConfirmedLaunchSpecV1, LegacyConfirmedPlanV1, LegacyNamedInitialDecisionV1,
+        LegacyNamedSupervisedAdmissionV1,
     },
     control_fs::{Directory, PrivateFile},
     redaction::Redactor,
@@ -355,6 +356,20 @@ impl PreparedPresence {
         self.revalidate()?;
         legacy_named_admission::read_launch_spec(self, expected_broker_profile_id, binding_ref)
             .await
+    }
+    /// Request the Initial decision for this material. To recover a lost
+    /// reply, explicitly call again with the same confirmation and material.
+    #[allow(
+        dead_code,
+        reason = "the broker admission caller is a separate G04 integration"
+    )]
+    pub(crate) async fn legacy_named_initial_decision(
+        &self,
+        expected_broker_profile_id: &str,
+        material: &LegacyConfirmedLaunchSpecV1,
+    ) -> Result<LegacyNamedInitialDecisionV1> {
+        self.revalidate()?;
+        legacy_named_admission::initial_decision(self, expected_broker_profile_id, material).await
     }
     /// Submit the exact plan and request after the caller records them durably.
     #[allow(
