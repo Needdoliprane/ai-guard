@@ -241,11 +241,18 @@ audit chain and head, and the empty projections. An exact match returns the
 same publication head. An incomplete, foreign or divergent target, or a
 target that has advanced beyond initial publication, is refused and preserved.
 
-The command performs no automatic SQLite or MySQL migration. Gateway
-admission, including its owner epoch, and restoration require separate
-qualification. CLI qualification is pending.
-[Existing publication evidence](../../../docs/engineering/VALIDATION.md#27-novembre-2026--publication-unique-mysql-owned-14-et-15)
+On MySQL 8.4.13 under Docker Desktop ARM64, `prepare-mysql-owned` built from
+`38b64857` passed fresh publication and exact replay for format 14 with
+password and TLS and format 15 with password and mTLS. Both replays returned
+identical receipt bytes and preserved the initial audit head and projections.
+The CLI refused a different server UUID, mismatched registry targets and a
+foreign nonempty schema without changing the inspected state.
+[CLI receipt and separate libtest evidence](OWNED_PREPARATION.md#recettes-physiques)
+
+The operator handles any historical data transfer when changing storage.
+Owned gateway admission, its owner epoch, restoration and the application
+tests SQL-04 through SQL-06 still require separate evidence.
 
 ## What this preflight does not cover
 
-It proves that the server, accounts and certificates behave as the gateway tests expect. It does not prove ai-guard behaviour: the gateway startup with each profile, the refusal of a wrong password, CA, server name or client certificate with no business audit row, and the SQL-04 to SQL-06 application scenarios are separate verdicts recorded in `docs/engineering/`. An expired client certificate is not issued by the helpers above: issue one with a validity window in the past (for example with `openssl ca -startdate/-enddate`) in a private directory when that case is needed.
+The connection preflight verifies the server, accounts and certificates. Gateway startup with each profile, the refusal of a wrong password, CA, server name or client certificate with no business audit row, and the SQL-04 to SQL-06 application scenarios have separate verdicts in `docs/engineering/`. An expired client certificate is not issued by the helpers above: issue one with a validity window in the past (for example with `openssl ca -startdate/-enddate`) in a private directory when that case is needed.
