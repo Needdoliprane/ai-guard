@@ -2,7 +2,9 @@
 //! Local receipts are immutable recovery evidence, never execution authority.
 use crate::{
     broker_registry::{BrokerAuthorityV1, BrokerRuntimeKindV1},
-    control::session_control::{LegacyConfirmedPlanV1, LegacyNamedSupervisedAdmissionV1},
+    control::session_control::{
+        LegacyConfirmedLaunchSpecV1, LegacyConfirmedPlanV1, LegacyNamedSupervisedAdmissionV1,
+    },
     control_fs::{Directory, PrivateFile},
     redaction::Redactor,
 };
@@ -339,6 +341,20 @@ impl PreparedPresence {
     ) -> Result<LegacyConfirmedPlanV1> {
         self.revalidate()?;
         legacy_named_admission::read_plan(self, expected_broker_profile_id, binding_ref).await
+    }
+    /// Read the target's exact launch parameters under the configured broker scope.
+    #[allow(
+        dead_code,
+        reason = "the broker admission caller is a separate G04 integration"
+    )]
+    pub(crate) async fn read_legacy_confirmed_launch_spec(
+        &self,
+        expected_broker_profile_id: &str,
+        binding_ref: Uuid,
+    ) -> Result<LegacyConfirmedLaunchSpecV1> {
+        self.revalidate()?;
+        legacy_named_admission::read_launch_spec(self, expected_broker_profile_id, binding_ref)
+            .await
     }
     /// Submit the exact plan and request after the caller records them durably.
     #[allow(

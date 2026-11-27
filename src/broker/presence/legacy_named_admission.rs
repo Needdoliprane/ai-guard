@@ -3,7 +3,7 @@
 use super::*;
 use crate::{
     broker::presence::http::{Client, Limits},
-    control::{AdmissionRefusalV1, hash, session_control::*},
+    control::{AdmissionRefusalV1, RuntimeKindV1, hash, session_control::*},
 };
 use reqwest::{Method, StatusCode};
 
@@ -25,25 +25,76 @@ pub(super) async fn read_plan(
     expected_broker_profile_id: &str,
     binding_ref: Uuid,
 ) -> Result<LegacyConfirmedPlanV1> {
+    read_confirmation(
+        presence,
+        binding_ref,
+        "",
+        RESPONSE_BYTES,
+        |status, bytes| {
+            let value = decode_confirmation(presence, status, bytes)?;
+            let plan = serde_json::from_value(value).map_err(|_| PresenceError::Protocol)?;
+            validate_plan_scope(
+                &presence.scope.control_namespace_uuid.to_string(),
+                expected_broker_profile_id,
+                binding_ref,
+                &plan,
+            )?;
+            Ok(plan)
+        },
+    )
+    .await
+}
+
+pub(super) async fn read_launch_spec(
+    presence: &PreparedPresence,
+    expected_broker_profile_id: &str,
+    binding_ref: Uuid,
+) -> Result<LegacyConfirmedLaunchSpecV1> {
+    if presence.scope.profile_id != expected_broker_profile_id {
+        return Err(PresenceError::Forbidden);
+    }
+    read_confirmation(
+        presence,
+        binding_ref,
+        "/launch-spec",
+        LEGACY_CONFIRMED_LAUNCH_SPEC_RESPONSE_BYTES as u64,
+        |status, bytes| decode_launch_spec(presence, binding_ref, status, bytes),
+    )
+    .await
+}
+
+async fn read_confirmation<T>(
+    presence: &PreparedPresence,
+    binding_ref: Uuid,
+    suffix: &str,
+    success_bytes: u64,
+    decode: impl FnOnce(StatusCode, &[u8]) -> Result<T>,
+) -> Result<T> {
     if binding_ref.is_nil() {
         return Err(PresenceError::Protocol);
     }
-    let path = format!("/api/v1/control/session-confirmations/{binding_ref}");
+    let path = format!("/api/v1/control/session-confirmations/{binding_ref}{suffix}");
     let client = Client::new(presence)?;
     let before = checked_identity(&client, presence).await?;
-    let plan = confirmed_plan(&client, presence, &path).await?;
-    validate_plan_scope(
-        &presence.scope.control_namespace_uuid.to_string(),
-        expected_broker_profile_id,
-        binding_ref,
-        &plan,
-    )?;
+    let (status, bytes) = client
+        .send_session_bounded(
+            Method::GET,
+            &path,
+            None,
+            Limits {
+                request: 0,
+                success: success_bytes,
+                error: RESPONSE_BYTES,
+            },
+        )
+        .await?;
+    let confirmed = decode(status, &bytes)?;
     let after = checked_identity(&client, presence).await?;
     if before != after {
         return Err(PresenceError::Conflict);
     }
     presence.revalidate()?;
-    Ok(plan)
+    Ok(confirmed)
 }
 
 pub(super) async fn admit(
@@ -148,30 +199,48 @@ fn decode_receipt(
     Ok(Some(receipt))
 }
 
-async fn confirmed_plan(
-    client: &Client,
+fn decode_confirmation(
     presence: &PreparedPresence,
-    path: &str,
-) -> Result<LegacyConfirmedPlanV1> {
-    let (status, bytes) = client
-        .send_session_bounded(
-            Method::GET,
-            path,
-            None,
-            Limits {
-                request: 0,
-                success: RESPONSE_BYTES,
-                error: RESPONSE_BYTES,
-            },
-        )
-        .await?;
+    status: StatusCode,
+    bytes: &[u8],
+) -> Result<Value> {
+    let value = crate::json::decode_unique(bytes, 64).map_err(|_| PresenceError::Protocol)?;
     if status != StatusCode::OK {
-        let value = crate::json::decode_unique(&bytes, 64).map_err(|_| PresenceError::Protocol)?;
         return Err(super::http::remote_error(status, &value));
     }
-    let value = crate::json::decode_unique(&bytes, 64).map_err(|_| PresenceError::Protocol)?;
     presence.screen(&value)?;
-    serde_json::from_value(value).map_err(|_| PresenceError::Protocol)
+    Ok(value)
+}
+
+fn decode_launch_spec(
+    presence: &PreparedPresence,
+    binding_ref: Uuid,
+    status: StatusCode,
+    bytes: &[u8],
+) -> Result<LegacyConfirmedLaunchSpecV1> {
+    let value = decode_confirmation(presence, status, bytes)?;
+    if Redactor::new(presence.secrets.clone()).value_unclipped(&value) != value {
+        return Err(PresenceError::Protocol);
+    }
+    let material: LegacyConfirmedLaunchSpecV1 =
+        serde_json::from_value(value).map_err(|_| PresenceError::Protocol)?;
+    validate_plan_scope(
+        &presence.scope.control_namespace_uuid.to_string(),
+        &presence.scope.profile_id,
+        binding_ref,
+        &material.plan,
+    )?;
+    material.validate().map_err(|_| PresenceError::Protocol)?;
+    let runtime = match material.launch.runtime_kind {
+        RuntimeKindV1::Docker => BrokerRuntimeKindV1::Docker,
+        RuntimeKindV1::Podman => BrokerRuntimeKindV1::Podman,
+    };
+    if material.launch.authority_id != presence.config.authority_id
+        || runtime != presence.scope.runtime_kind
+    {
+        return Err(PresenceError::Forbidden);
+    }
+    Ok(material)
 }
 
 async fn checked_identity(
@@ -311,6 +380,100 @@ mod tests {
             .unwrap_err(),
             PresenceError::Forbidden
         );
+    }
+
+    #[test]
+    fn launch_spec_decoder_requires_exact_private_material() {
+        use crate::{
+            broker::presence::preparation_tests::Fixture,
+            control::{LaunchSpecV1, NetworkV1, RestartPolicyV1, RuntimeKindV1, SecurityPresetV1},
+            model::CommandSpec,
+        };
+
+        let mut fixture = Fixture::new();
+        let authority = Uuid::new_v4().to_string();
+        fixture.value["authority_id"] = serde_json::json!(authority);
+        fixture.write_config();
+        let scope = fixture.scope();
+        let presence = PreparedPresence::load(&fixture.config, scope.clone(), vec![]).unwrap();
+        let mut plan = plan();
+        plan.broker_profile_id = scope.profile_id;
+        plan.control_namespace_uuid = scope.control_namespace_uuid.to_string();
+        let binding_ref = plan.binding_ref;
+        let launch = LaunchSpecV1 {
+            version: 1,
+            session_id: plan.session_id.to_string(),
+            command: CommandSpec {
+                argv: vec!["/usr/bin/id".into(), "-u".into()],
+                cwd: "/workspace/demo".into(),
+            },
+            profile: "observe".into(),
+            runtime_kind: RuntimeKindV1::Docker,
+            authority_id: authority,
+            image_ref: "worker:fixture".into(),
+            image_id: format!("sha256:{}", "b".repeat(64)),
+            network: NetworkV1::None,
+            cpu_millis: 2000,
+            memory_bytes: 1_073_741_824,
+            pids_limit: 256,
+            timeout_seconds: 60,
+            security_preset: SecurityPresetV1::FixedSandboxV2,
+            restart_policy: RestartPolicyV1::No,
+            workspace_manifest_digest: "c".repeat(64),
+            workspace_import_policy_version: 1,
+            provider: "generic".into(),
+            capture_output: false,
+            credential_binding_id: None,
+            credential_names: vec![],
+            provider_resolution: None,
+            egress: None,
+        };
+        plan.launch_spec_hash = launch.spec_hash().unwrap();
+        let mut material = LegacyConfirmedLaunchSpecV1 {
+            version: 1,
+            plan,
+            launch,
+        };
+        let decode = |body: &[u8]| decode_launch_spec(&presence, binding_ref, StatusCode::OK, body);
+        let body = serde_json::to_string(&material).unwrap();
+        let decoded = decode(body.as_bytes()).unwrap();
+        assert_eq!(decoded.plan, material.plan);
+        assert_eq!(decoded.launch.command.cwd, "/workspace/demo");
+
+        let duplicate = format!(r#"{{"version":1,{}"#, body.strip_prefix('{').unwrap());
+        assert!(matches!(
+            decode(duplicate.as_bytes()),
+            Err(PresenceError::Protocol)
+        ));
+        let mut unrecognized: Value = serde_json::from_str(&body).unwrap();
+        unrecognized["launch"]["host_source"] = serde_json::json!("/fixture/host-project");
+        assert!(matches!(
+            decode(&serde_json::to_vec(&unrecognized).unwrap()),
+            Err(PresenceError::Protocol)
+        ));
+        material.launch.timeout_seconds += 1;
+        assert!(matches!(
+            decode(&serde_json::to_vec(&material).unwrap()),
+            Err(PresenceError::Protocol)
+        ));
+
+        material.launch.authority_id = Uuid::new_v4().to_string();
+        material.plan.launch_spec_hash = material.launch.spec_hash().unwrap();
+        assert!(matches!(
+            decode(&serde_json::to_vec(&material).unwrap()),
+            Err(PresenceError::Forbidden)
+        ));
+        material.launch.authority_id = presence.config.authority_id.clone();
+        material
+            .launch
+            .command
+            .argv
+            .extend(["--token".to_owned(), "synthetic-fixture-value".to_owned()]);
+        material.plan.launch_spec_hash = material.launch.spec_hash().unwrap();
+        assert!(matches!(
+            decode(&serde_json::to_vec(&material).unwrap()),
+            Err(PresenceError::Protocol)
+        ));
     }
 
     #[test]
