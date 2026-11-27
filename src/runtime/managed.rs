@@ -1776,6 +1776,12 @@ impl ManagedRuntime {
                 && self.binding.docker_launch_profile.is_none(),
             "guarded import creation requires an ordinary confined helper"
         );
+        ensure!(
+            spec.image
+                .strip_prefix("sha256:")
+                .is_some_and(valid_immutable_id),
+            "guarded import creation requires the admitted immutable image ID"
+        );
         let mut scoped = self.clone();
         scoped.runtime = self.runtime.observed_operation(spec.operation_id());
         let handle = scoped
