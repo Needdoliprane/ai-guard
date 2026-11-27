@@ -1,7 +1,10 @@
 //! Audited supervision on explicitly admitted Store transactions. No automatic migration.
 use super::*;
 use crate::audit::{
-    legacy_session_prepare::{LEGACY_NAMED_ARM_KIND, LegacyNamedArmV1, LegacyNamedCancelV1},
+    legacy_session_prepare::{
+        LEGACY_NAMED_ARM_KIND, LEGACY_NAMED_IMPORT_CLAIM_KIND, LegacyNamedArmV1,
+        LegacyNamedCancelV1, LegacyNamedImportClaimV1, legacy_named_import_claim_predecessor,
+    },
     supervision_admission::{self as admission_codec, Binding, receipt_for},
     supervision_genesis,
 };
@@ -84,6 +87,7 @@ pub(crate) enum Input {
     LegacyNamedCancel(Box<LegacyNamedCancelV1>),
     WorkerClaim(Box<ArmedStartClaimV1>),
     HelperClaim(Box<HelperStartClaimV1>),
+    LegacyNamedImportClaim(Box<LegacyNamedImportClaimV1>),
     HelperObservation(Box<HelperObservationV1>),
     HelperCleanup(Box<HelperCleanupV1>),
     Export(Box<ExportRequestV1>),
@@ -117,6 +121,7 @@ impl Input {
             Self::LegacyNamedCancel(r) => &r.request.mutation.operation_id,
             Self::WorkerClaim(r) => &r.operation_id,
             Self::HelperClaim(r) => &r.operation_id,
+            Self::LegacyNamedImportClaim(r) => &r.request.claim.operation_id,
             Self::HelperObservation(r) => &r.operation_id,
             Self::HelperCleanup(r) => &r.operation_id,
             Self::Export(r) => &r.operation_id,
@@ -131,7 +136,7 @@ impl Input {
             Self::LegacyNamedArm(_) => "prepare",
             Self::LegacyNamedCancel(_) => "cancel_reserved",
             Self::WorkerClaim(_) => "armed_start_claim",
-            Self::HelperClaim(_) => "helper_start_claim",
+            Self::HelperClaim(_) | Self::LegacyNamedImportClaim(_) => "helper_start_claim",
             Self::HelperObservation(_) => "helper_observe",
             Self::HelperCleanup(_) => "helper_cleanup",
             Self::Export(_) => "export_request",
@@ -141,6 +146,7 @@ impl Input {
         match self {
             Self::Arm(_) => "control.execution.arm",
             Self::LegacyNamedArm(_) => LEGACY_NAMED_ARM_KIND,
+            Self::LegacyNamedImportClaim(_) => LEGACY_NAMED_IMPORT_CLAIM_KIND,
             _ => admission_codec::KIND,
         }
     }
@@ -153,6 +159,7 @@ impl Input {
             Self::LegacyNamedCancel(r) => r.input_hash(),
             Self::WorkerClaim(r) => r.input_hash(),
             Self::HelperClaim(r) => r.input_hash(),
+            Self::LegacyNamedImportClaim(r) => r.input_hash(),
             Self::HelperObservation(r) => r.input_hash(),
             Self::HelperCleanup(r) => r.input_hash(),
             Self::Export(r) => r.input_hash(),
@@ -171,6 +178,7 @@ impl Input {
             Self::LegacyNamedCancel(r) => Some(&r.request.mutation.worker_id),
             Self::WorkerClaim(r) => Some(&r.worker_id),
             Self::HelperClaim(r) => Some(&r.arm_receipt.worker_id),
+            Self::LegacyNamedImportClaim(r) => Some(&r.request.claim.arm_receipt.worker_id),
             Self::HelperObservation(r) => Some(&r.arm_receipt.worker_id),
             Self::HelperCleanup(r) => Some(&r.arm_receipt.worker_id),
             Self::Export(r) => Some(&r.worker_id),
@@ -201,7 +209,10 @@ pub(in crate::audit) fn load_record(
         .map(|stored: StoredEvent| {
             conflict(matches!(
                 stored.event.kind.as_str(),
-                "control.execution.arm" | LEGACY_NAMED_ARM_KIND | "control.supervision.transition"
+                "control.execution.arm"
+                    | LEGACY_NAMED_ARM_KIND
+                    | LEGACY_NAMED_IMPORT_CLAIM_KIND
+                    | "control.supervision.transition"
             ))?;
             let record: Record = serde_json::from_value(stored.event.data.clone())?;
             invalid(record.version == 2 && record.input.kind() == stored.event.kind)?;
@@ -669,6 +680,44 @@ impl Replay {
         );
         Ok(())
     }
+    fn record_helper_claim(
+        &mut self,
+        db: &Connection,
+        stored: &StoredEvent,
+        workers: &BTreeMap<String, WorkerV1>,
+        request: &HelperStartClaimV1,
+        named: Option<&LegacyNamedImportClaimV1>,
+    ) -> anyhow::Result<()> {
+        let entry = self.checked_arm(&request.arm_receipt)?;
+        conflict(entry.legacy_named == named.is_some())?;
+        let parent = self.parent(workers, &entry.request.worker_id)?;
+        if let Some(named) = named {
+            legacy_named_import_claim_predecessor(db, stored, named, parent)?;
+        }
+        self.bound(parent, &entry.request.intent_hash)?;
+        request.validate_for_arm(&entry.request)?;
+        entry.request.validate_for_parent(parent)?;
+        self.permission(db, parent, &entry.request, stored.seq)?;
+        conflict(!self.claims.contains_key(&request.helper_id))?;
+        self.expected
+            .get_mut("helper_claims")
+            .context("missing table")?
+            .insert(
+                request.helper_id.clone(),
+                vec![
+                    sql_text(&request.helper_id),
+                    sql_text(&request.arm_receipt.arm_id),
+                    sql_text(&request.operation_id),
+                    sql_text(&request.emitter_id),
+                    sql_text(serde_json::to_string(request)?),
+                    rusqlite::types::Value::Integer(stored.seq),
+                ],
+            );
+        self.claims
+            .insert(request.helper_id.clone(), request.clone());
+        Ok(())
+    }
+
     pub(super) fn apply(
         &mut self,
         db: &Connection,
@@ -785,29 +834,11 @@ impl Replay {
             }
             Input::HelperClaim(request) => {
                 invalid(record.worker_record.is_none())?;
-                let entry = self.checked_manual_arm(&request.arm_receipt)?;
-                let parent = self.parent(workers, &entry.request.worker_id)?;
-                self.bound(parent, &entry.request.intent_hash)?;
-                request.validate_for_arm(&entry.request)?;
-                entry.request.validate_for_parent(parent)?;
-                self.permission(db, parent, &entry.request, stored.seq)?;
-                conflict(!self.claims.contains_key(&request.helper_id))?;
-                self.expected
-                    .get_mut("helper_claims")
-                    .context("missing table")?
-                    .insert(
-                        request.helper_id.clone(),
-                        vec![
-                            sql_text(&request.helper_id),
-                            sql_text(&request.arm_receipt.arm_id),
-                            sql_text(&request.operation_id),
-                            sql_text(&request.emitter_id),
-                            sql_text(serde_json::to_string(request)?),
-                            rusqlite::types::Value::Integer(stored.seq),
-                        ],
-                    );
-                self.claims
-                    .insert(request.helper_id.clone(), request.as_ref().clone());
+                self.record_helper_claim(db, stored, workers, request, None)?;
+            }
+            Input::LegacyNamedImportClaim(named) => {
+                invalid(record.worker_record.is_none())?;
+                self.record_helper_claim(db, stored, workers, &named.request.claim, Some(named))?;
             }
             Input::HelperObservation(request) => {
                 invalid(record.worker_record.is_none())?;
