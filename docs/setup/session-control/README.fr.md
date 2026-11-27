@@ -70,7 +70,9 @@ agentsandbox human confirm-legacy-session --gateway "$gateway" \
 
 Le reçu de confirmation contient `binding_ref`, `session_id`, `audit_seq` et `audit_hash`. Il atteste uniquement d’une confirmation retenue. L’admission par le broker, le grant, la réservation du worker et le claim de démarrage restent à établir.
 
-L’audit conserve la révision d’autorisation à la confirmation et la plus proche des échéances de la préparation, du contexte personnel et du credential local. Le rejeu du reçu conserve ces bornes d’origine.
+Les nouvelles confirmations utilisent la version 2 de l’enregistrement d’audit. Le contrôle conserve la révision d’autorisation et la plus proche des échéances de la préparation, du contexte personnel et du credential local. Le rejeu du reçu conserve ces bornes. Une confirmation de version 1 reste rejouable avec une échéance d’admission inconnue.
+
+Mettez à jour les lecteurs avant la première confirmation de version 2. Un lecteur antérieur déclare la source non saine après cette écriture, même à version de schéma SQLite identique. Utilisez la sauvegarde compatible et réconciliez l’autorité retenue avant un retour de version. [Guide d’exploitation](../../operations.md)
 
 En cas de réponse perdue, conservez le fichier de demande et rejouez la même commande avec l’identifiant d’opération et le contenu d’origine. Un rejeu réussi indique `replayed: true` et restitue le reçu d’audit d’origine. Le gateway revérifie l’identité locale, l’appartenance et les droits courants sur la cible. Utilisez `human identity` pour obtenir un contexte personnel frais si nécessaire. Rejouer Prepare exige une échéance de demande encore valide. Le gateway peut restituer une confirmation déjà validée après l’expiration de la préparation. Une demande divergente ou un refus d’autorisation laissent l’issue initiale indéterminée.
 

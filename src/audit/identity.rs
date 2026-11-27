@@ -327,6 +327,23 @@ pub(super) fn validate_human_access_capability(
     Ok(())
 }
 
+/// Read the revision of the identity prefix ending immediately before `seq`.
+/// Full identity replay verifies the revisions carried by these mutations.
+pub(super) fn authorization_revision_before(db: &Connection, seq: i64) -> anyhow::Result<u64> {
+    let previous = db
+        .query_row(
+            "SELECT seq,received_at,prev_hash,hash,payload FROM events \
+             WHERE kind='control.identity.mutation' AND seq<?1 ORDER BY seq DESC LIMIT 1",
+            [seq],
+            row_event,
+        )
+        .optional()?;
+    match previous {
+        Some(stored) => Ok(Record::decode_replay(&stored.event.data)?.authorization_revision),
+        None => Ok(0),
+    }
+}
+
 /// Full replay is an integrity/startup operation, never a human read query.
 pub(super) fn validate(db: &Connection) -> anyhow::Result<()> {
     let version: i64 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;

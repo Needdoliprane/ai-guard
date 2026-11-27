@@ -415,6 +415,40 @@ fn legacy_confirmation_keeps_its_shorter_deadline_after_reopen_and_replay() {
         preparation_operation_id: prepared.operation_id,
         preparation_input_hash: prepared.input_hash,
     };
+    let prepared_revision = f.scope.authorization_revision();
+    f.store
+        .mutate_identity(&IdentityMutationV1 {
+            version: 1,
+            operation_id: Uuid::new_v4().to_string(),
+            actor: PrincipalRefV1::LegacyControl {
+                credential_id: "fixture-control".into(),
+                role: LegacyControlRoleV1::Runner,
+            },
+            change: IdentityChangeV1::Account {
+                expected_revision: 0,
+                account: HumanAccountV1 {
+                    version: 1,
+                    principal: PrincipalRefV1::HumanLocal {
+                        installation_id: Uuid::new_v4().to_string(),
+                        account_id: Uuid::new_v4().to_string(),
+                    },
+                    display_name: "Unrelated account".into(),
+                    revision: 1,
+                    active: true,
+                },
+            },
+        })
+        .unwrap();
+    f.scope = f
+        .store
+        .authorize_human_context(
+            f.scope.principal(),
+            f.scope.membership_id(),
+            f.scope.membership_revision(),
+            ContextModeV1::Personal,
+        )
+        .unwrap();
+    assert_eq!(f.scope.authorization_revision(), prepared_revision + 1);
     let confirmation_deadline = "2124-01-01T00:00:00.123456789Z";
     let proof = LegacySessionLocalProof {
         context_expires_at: confirmation_deadline,
@@ -461,6 +495,79 @@ fn legacy_confirmation_keeps_its_shorter_deadline_after_reopen_and_replay() {
     let replayed = f.store.events(&query).unwrap();
     assert_eq!(replayed.len(), 1);
     assert_eq!(replayed[0].event.data, event.data);
+}
+
+#[test]
+fn legacy_confirmation_replays_the_v1_receipt_after_reopen() {
+    let mut f = Fixture::new();
+    let prepared = f
+        .store
+        .legacy_session_prepare_local(f.proof(), f.request())
+        .unwrap();
+    let request = SessionLaunchRequestV1 {
+        version: 1,
+        operation_id: Uuid::new_v4(),
+        launch_target_id: f.target_id,
+        expected_target_revision: 1,
+        preparation_operation_id: prepared.operation_id,
+        preparation_input_hash: prepared.input_hash,
+    };
+    let original = {
+        let mut db = f.store.db.lock().unwrap();
+        let tx = f.store.begin_checked(&mut db).unwrap();
+        let clock = workload::capture_control_time(&tx).unwrap();
+        let preparation = event_by_id(&tx, &prepared.preparation_id).unwrap().unwrap();
+        let id = confirmation_ref(&preparation, prepared.operation_id);
+        let record = Confirmed {
+            version: 1,
+            request: request.clone(),
+            preparation_id: prepared.preparation_id,
+            preparation_audit_hash: preparation.hash,
+            session_id: session_id(request.operation_id).unwrap(),
+            admission_authority: None,
+        };
+        let retained = f
+            .store
+            .append_legacy_session_record(&tx, &clock, CONFIRMED, id.clone(), &record)
+            .unwrap();
+        assert!(retained.event.data.get("admission_authority").is_none());
+        for kind in [FenceKind::Operation, FenceKind::Session] {
+            f.store
+                .append_legacy_session_record(
+                    &tx,
+                    &clock,
+                    FENCED,
+                    fence_id(kind, &record),
+                    &Fence {
+                        version: 1,
+                        binding_ref: id.clone(),
+                        kind,
+                    },
+                )
+                .unwrap();
+        }
+        f.store.commit_authorized(tx, &clock).unwrap();
+        confirmed_receipt(&retained, &record, false)
+    };
+    let path = f
+        .directory
+        .path()
+        .canonicalize()
+        .unwrap()
+        .join("legacy.sqlite");
+    drop(f.store);
+    f.store = Fixture::open(&path, Redactor::new(vec![]));
+    assert!(f.store.integrity().unwrap().valid);
+    let head = f.store.head().unwrap();
+    let replay = f
+        .store
+        .legacy_session_confirm_local(f.proof(), request)
+        .unwrap();
+    assert!(replay.replayed);
+    assert_eq!(replay.session_id, original.session_id);
+    assert_eq!(replay.binding_ref, original.binding_ref);
+    assert_eq!(replay.audit_hash, original.audit_hash);
+    assert_eq!(f.store.head().unwrap(), head);
 }
 
 #[test]

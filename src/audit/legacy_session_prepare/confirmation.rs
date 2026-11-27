@@ -357,6 +357,8 @@ pub(in crate::audit) fn validate_reference_event(
                         && authority.expires_at <= prepare_deadline
                         && authority.authorization_revision
                             >= preparation.initiator.authorization_revision
+                        && authority.authorization_revision
+                            == identity::authorization_revision_before(tx, stored.seq)?
                 }
                 _ => false,
             };

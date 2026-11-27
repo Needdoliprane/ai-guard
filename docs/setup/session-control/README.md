@@ -70,7 +70,9 @@ agentsandbox human confirm-legacy-session --gateway "$gateway" \
 
 The confirmation receipt records `binding_ref`, `session_id`, `audit_seq` and `audit_hash`. It attests to a retained confirmation only. The broker admission, grant, worker reservation and start claim have yet to occur.
 
-The audit record retains the authorization revision at confirmation and the earliest expiry of the preparation, personal context and local credential. Receipt replay preserves those original bounds.
+New confirmations use audit record version 2. The control retains the authorization revision and the earliest expiry of the preparation, personal context and local credential. Receipt replay preserves those bounds. A version 1 confirmation remains replayable with an unknown admission expiry.
+
+Update readers before the first version 2 confirmation. A reader that predates the record reports the source as unhealthy after this write, even at the same SQLite schema version. Use the compatible backup and reconcile the retained authority before a downgrade. [Operations guide](../../operations.md)
 
 After a lost response, keep the request file and replay the same command with the original operation ID and content. A successful replay sets `replayed: true` and returns the original audit receipt. The gateway rechecks the local identity, membership and current target permissions. Use `human identity` to obtain a fresh personal context if needed. Replaying Prepare still requires a valid request expiry. The gateway can return an already committed confirmation after the preparation expires. A conflicting request or an authorization refusal leaves the original outcome unresolved.
 
