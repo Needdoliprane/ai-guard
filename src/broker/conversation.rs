@@ -341,7 +341,7 @@ impl<'a> SessionConversationComposerV1<'a> {
         session_id: &str,
         expected_input_epoch: u64,
         channel: SessionConversationChannelV1,
-        stdio: StdioConversation,
+        mut stdio: StdioConversation,
     ) -> anyhow::Result<SessionConversationBindingV1> {
         canonical_uuid(session_id)?;
         channel.validate()?;
