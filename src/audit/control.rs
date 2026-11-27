@@ -521,6 +521,14 @@ pub(super) fn validate(db: &Connection) -> anyhow::Result<()> {
                 "invalid control revision or immutable identity"
             );
             if let Some(previous) = previous {
+                if stored.event.kind == "control.worker.transition" && record.action == "prepare" {
+                    super::legacy_session_prepare::protect_manual_at(
+                        db,
+                        &previous.admission_operation_id,
+                        &previous.launch.session_id,
+                        stored.seq,
+                    )?;
+                }
                 worker_transition::replay_record(previous, &record)?;
             } else {
                 anyhow::ensure!(
@@ -1595,6 +1603,13 @@ impl Store {
                 &mutation.transition,
                 WorkerTransitionV1::StartClaim { .. }
             ))?;
+            if matches!(&mutation.transition, WorkerTransitionV1::Prepare) {
+                super::legacy_session_prepare::protect_manual(
+                    &tx,
+                    &worker.admission_operation_id,
+                    &worker.launch.session_id,
+                )?;
+            }
             if matches!(&mutation.transition, WorkerTransitionV1::CreateIssued) {
                 supervision::can_create(&tx, &worker)?;
             }

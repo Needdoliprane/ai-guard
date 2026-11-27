@@ -4,7 +4,8 @@ use crate::{
     control::{
         AdmissionRefusalV1, AdmissionV1, ControlFailure, DecisionPhaseV1, DecisionReceiptV1,
         LaunchSpecV1, NetworkV1, QuotaPolicyV1, RestartPolicyV1, SecurityPresetV1,
-        SupervisedAdmissionV1, SupervisionProtocolV1, WorkerV1,
+        SupervisedAdmissionV1, SupervisionProtocolV1, WorkerMutationV1, WorkerStateV1,
+        WorkerTransitionV1, WorkerV1,
         session_control::{
             LegacyNamedSupervisedAdmissionV1, LegacySessionTargetV1, SessionLaunchPrepareRequestV1,
             SessionLaunchRequestV1, SessionLaunchTargetRecordV1,
@@ -269,8 +270,27 @@ impl Fixture {
                 },
             )
             .unwrap();
+        let request = LegacyNamedSupervisedAdmissionV1 {
+            version: 1,
+            binding_ref: Uuid::parse_str(&confirmation.binding_ref).unwrap(),
+            broker_profile_id: self.target.target.broker_profile_id.clone(),
+            admission: self.supervised_request(
+                store,
+                confirmation.operation_id,
+                confirmation.session_id,
+            ),
+        };
+        (request, credential)
+    }
+
+    fn supervised_request(
+        &self,
+        store: &Store,
+        operation_id: Uuid,
+        session_id: String,
+    ) -> SupervisedAdmissionV1 {
         let mut launch = self.target.target.launch.clone();
-        launch.session_id = confirmation.session_id;
+        launch.session_id = session_id;
         let decision_request = DecisionRequest {
             request_id: Uuid::new_v4().to_string(),
             profile: launch.profile.clone(),
@@ -291,31 +311,25 @@ impl Fixture {
             .decision(&decision_request, Some((decision, Value::Null)))
             .unwrap()
             .unwrap();
-        let request = LegacyNamedSupervisedAdmissionV1 {
+        SupervisedAdmissionV1 {
             version: 1,
-            binding_ref: Uuid::parse_str(&confirmation.binding_ref).unwrap(),
-            broker_profile_id: self.target.target.broker_profile_id.clone(),
-            admission: SupervisedAdmissionV1 {
+            protocol: SupervisionProtocolV1::BrokerSupervisionV1,
+            intent_hash: "c".repeat(64),
+            admission: AdmissionV1 {
                 version: 1,
-                protocol: SupervisionProtocolV1::BrokerSupervisionV1,
-                intent_hash: "c".repeat(64),
-                admission: AdmissionV1 {
+                operation_id: operation_id.to_string(),
+                receipt: DecisionReceiptV1 {
                     version: 1,
-                    operation_id: confirmation.operation_id.to_string(),
-                    receipt: DecisionReceiptV1 {
-                        version: 1,
-                        request_id: decision_request.request_id.clone(),
-                        request_hash: policy::request_hash(&decision_request),
-                        phase: DecisionPhaseV1::Initial,
-                        audit_seq: decision_event.seq,
-                        audit_hash: decision_event.hash,
-                    },
-                    decision_request,
-                    launch,
+                    request_id: decision_request.request_id.clone(),
+                    request_hash: policy::request_hash(&decision_request),
+                    phase: DecisionPhaseV1::Initial,
+                    audit_seq: decision_event.seq,
+                    audit_hash: decision_event.hash,
                 },
+                decision_request,
+                launch,
             },
-        };
-        (request, credential)
+        }
     }
 }
 
@@ -607,6 +621,92 @@ fn legacy_named_execution_rechecks_authority_after_reopen() {
         assert_eq!(reopened.head().unwrap(), revoked.audit_seq);
         assert_eq!(reopened.worker_quota(&quota).unwrap().held_workers, 1);
     }
+}
+
+#[test]
+fn legacy_named_reservation_refuses_generic_prepare_and_stays_cancellable() {
+    let f = Fixture::new();
+    let (store, _) = f.provision(f.create().unwrap()).unwrap();
+    let (request, _) = f.confirmed_request(&store);
+    let Some(AuthenticatedWorkload::Broker(broker)) =
+        store.authenticate_workload_token(BROKER_TOKEN).unwrap()
+    else {
+        panic!("fixture broker identity");
+    };
+    let policy = Policy::default();
+    let quota = QuotaPolicyV1::default();
+    let named = store
+        .admit_legacy_named(
+            &broker,
+            &request,
+            &policy,
+            policy::evaluate(&policy, &request.admission.admission.decision_request),
+            Value::Null,
+            &quota,
+        )
+        .unwrap()
+        .admission
+        .worker
+        .unwrap();
+    let mutation_for = |worker: &WorkerV1, transition| WorkerMutationV1 {
+        version: 1,
+        operation_id: Uuid::new_v4().to_string(),
+        worker_id: worker.worker_id.clone(),
+        attempt_id: worker.attempt.attempt_id.clone(),
+        expected_revision: worker.revision,
+        transition,
+    };
+
+    assert_eq!(named.state, WorkerStateV1::Reserved);
+    let before = store.head().unwrap();
+    let named_prepare = mutation_for(&named, WorkerTransitionV1::Prepare);
+    assert_eq!(
+        store
+            .mutate_worker(&named_prepare)
+            .unwrap_err()
+            .downcast_ref::<ControlFailure>(),
+        Some(&ControlFailure::Conflict)
+    );
+    assert_eq!(store.head().unwrap(), before);
+    let retained = store.worker(&named.worker_id).unwrap().unwrap();
+    assert_eq!(retained.state, WorkerStateV1::Reserved);
+    assert_eq!(retained.revision, named.revision);
+    assert!(retained.quota_held);
+
+    let mut manual_request =
+        f.supervised_request(&store, Uuid::new_v4(), Uuid::new_v4().to_string());
+    manual_request.intent_hash = "d".repeat(64);
+    let manual = store
+        .admit_supervised(
+            &manual_request,
+            &policy,
+            policy::evaluate(&policy, &manual_request.admission.decision_request),
+            Value::Null,
+            &quota,
+        )
+        .unwrap()
+        .worker
+        .unwrap();
+    let manual_prepare = mutation_for(&manual, WorkerTransitionV1::Prepare);
+    let prepared = store.mutate_worker(&manual_prepare).unwrap();
+    assert_eq!(prepared.worker.state, WorkerStateV1::Preparing);
+    assert!(prepared.worker.quota_held);
+
+    let cancel = mutation_for(&named, WorkerTransitionV1::CancelReserved);
+    let cancelled = store.mutate_worker(&cancel).unwrap();
+    assert_eq!(cancelled.worker.state, WorkerStateV1::Cancelled);
+    assert!(!cancelled.worker.quota_held);
+    assert_eq!(store.worker_quota(&quota).unwrap().held_workers, 1);
+    drop(store);
+
+    let reopened = f.reopen();
+    let replayed_prepare = reopened.mutate_worker(&manual_prepare).unwrap();
+    let replayed_cancel = reopened.mutate_worker(&cancel).unwrap();
+    assert_eq!(replayed_prepare.receipt, prepared.receipt);
+    assert_eq!(replayed_cancel.receipt, cancelled.receipt);
+    let integrity = reopened.integrity().unwrap();
+    assert!(integrity.valid);
+    assert_eq!(integrity.head_hash, cancelled.receipt.audit_hash);
 }
 
 #[test]
