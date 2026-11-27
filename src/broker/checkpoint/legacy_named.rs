@@ -1443,7 +1443,7 @@ mod tests {
             );
             assert_eq!(named_import.admission().plan(), &plan);
             assert!(equal(named_import.evidence().owned(), &owned)?);
-            assert!(equal(named_import.evidence().arm(), &submitted)?);
+            assert!(equal(named_import.evidence().arm(), &submitted.arm)?);
             assert_eq!(named_import.evidence().receipt(), None);
             assert_eq!(
                 named_import.evidence().handle_fingerprint(),

@@ -525,7 +525,8 @@ impl Service {
         let scope = &admitted.request.verified.scope;
         if plan.binding_ref.is_nil()
             || plan.operation_id != admitted.accepted.operation_id()
-            || admitted.accepted.scope() != scope
+            || canonical(admitted.accepted.scope()).map_err(jobs::journal_error)?
+                != canonical(scope).map_err(jobs::journal_error)?
             || admitted.accepted.intent().legacy_named_plan() != Some(plan)
             || plan.broker_profile_id != scope.profile_id()
             || plan.control_namespace_uuid != scope.control_namespace_uuid().to_string()
