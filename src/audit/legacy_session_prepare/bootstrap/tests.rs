@@ -4,7 +4,7 @@ use crate::{
     control::{
         AdmissionRefusalV1, AdmissionV1, ControlFailure, DecisionPhaseV1, DecisionReceiptV1,
         LaunchSpecV1, NetworkV1, QuotaPolicyV1, RestartPolicyV1, SecurityPresetV1,
-        SupervisedAdmissionV1, SupervisionProtocolV1,
+        SupervisedAdmissionV1, SupervisionProtocolV1, WorkerV1,
         session_control::{
             LegacyNamedSupervisedAdmissionV1, LegacySessionTargetV1, SessionLaunchPrepareRequestV1,
             SessionLaunchRequestV1, SessionLaunchTargetRecordV1,
@@ -499,6 +499,114 @@ fn legacy_named_admission_commits_a_grant_and_replays_after_reopen() {
     assert_eq!(reopened.integrity().unwrap().head_hash, retired.audit_hash);
     assert_eq!(reopened.worker_quota(&quota).unwrap().held_workers, 1);
     assert!(apply(&reopened, &divergent).is_err());
+}
+
+#[test]
+fn legacy_named_execution_rechecks_authority_after_reopen() {
+    for revoke_grant in [false, true] {
+        let f = Fixture::new();
+        let (store, _) = f.provision(f.create().unwrap()).unwrap();
+        let (request, mut credential) = f.confirmed_request(&store);
+        let Some(AuthenticatedWorkload::Broker(broker)) =
+            store.authenticate_workload_token(BROKER_TOKEN).unwrap()
+        else {
+            panic!("fixture broker identity");
+        };
+        let policy = Policy::default();
+        let quota = QuotaPolicyV1::default();
+        let admit = |store: &Store| {
+            store.admit_legacy_named(
+                &broker,
+                &request,
+                &policy,
+                policy::evaluate(&policy, &request.admission.admission.decision_request),
+                Value::Null,
+                &quota,
+            )
+        };
+        let committed = admit(&store).unwrap();
+        let worker = committed.admission.worker.as_ref().unwrap();
+        let namespace = store
+            .supervision_state()
+            .unwrap()
+            .control_namespace_uuid
+            .unwrap();
+        let check = |store: &Store, namespace: &str, worker: &WorkerV1| {
+            let mut db = store.db.lock().unwrap();
+            let tx = store.begin_checked(&mut db)?;
+            let clock = workload::capture_control_time(&tx)?;
+            let deadlines = store.require_legacy_named_execution(
+                &tx,
+                &broker,
+                request.binding_ref,
+                namespace,
+                worker,
+                &clock,
+            )?;
+            store.commit_checked(tx)?;
+            Ok::<_, anyhow::Error>(deadlines)
+        };
+        let before_reopen = check(&store, &namespace, worker).unwrap();
+        drop(store);
+        let reopened = f.reopen();
+        assert!(!reopened.supervision_state().unwrap().active);
+        assert_eq!(check(&reopened, &namespace, worker).unwrap(), before_reopen);
+        let mut other_attempt = worker.clone();
+        other_attempt.attempt.attempt_id = Uuid::new_v4().to_string();
+        assert!(check(&reopened, &namespace, &other_attempt).is_err());
+        let mut other_worker = worker.clone();
+        other_worker.worker_id = Uuid::new_v4().to_string();
+        assert!(check(&reopened, &namespace, &other_worker).is_err());
+        let mut other_session = worker.clone();
+        other_session.launch.session_id = Uuid::new_v4().to_string();
+        assert!(check(&reopened, &namespace, &other_session).is_err());
+        assert!(check(&reopened, &Uuid::new_v4().to_string(), worker).is_err());
+        assert_eq!(reopened.head().unwrap(), committed.audit_seq);
+
+        let change = if revoke_grant {
+            let resource = ResourceRefV1 {
+                kind: ResourceKindV1::Session,
+                resource_id: worker.launch.session_id.clone(),
+            };
+            let mut grant = reopened
+                .identity_resource_grant(&resource)
+                .unwrap()
+                .unwrap();
+            grant.active = false;
+            grant.revision = 2;
+            IdentityChangeV1::ResourceGrant {
+                expected_revision: 1,
+                grant,
+            }
+        } else {
+            credential.active = false;
+            credential.revision = 2;
+            IdentityChangeV1::Credential {
+                expected_revision: 1,
+                binding: credential,
+            }
+        };
+        let revoked = reopened
+            .mutate_identity(&IdentityMutationV1 {
+                version: 1,
+                operation_id: Uuid::new_v4().to_string(),
+                actor: f.operator.clone(),
+                change,
+            })
+            .unwrap();
+        assert_eq!(
+            check(&reopened, &namespace, worker)
+                .unwrap_err()
+                .downcast_ref::<ControlFailure>(),
+            Some(&ControlFailure::NotFound)
+        );
+        let replay = admit(&reopened).unwrap();
+        assert!(replay.admission.replayed);
+        assert_eq!(replay.admission.receipt, committed.admission.receipt);
+        assert_eq!(replay.audit_hash, committed.audit_hash);
+        assert_eq!(reopened.head().unwrap(), revoked.audit_seq);
+        assert_eq!(reopened.worker_quota(&quota).unwrap().held_workers, 1);
+    }
 }
 
 #[test]

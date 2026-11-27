@@ -13,6 +13,8 @@ use crate::{
     workload::WorkloadFailureV1,
 };
 
+mod execution;
+
 pub(in crate::audit) const ADMITTED: &str = "control.legacy_session_prepare.admission";
 
 #[derive(Serialize, Deserialize)]
@@ -83,6 +85,22 @@ fn fact_id(binding_ref: Uuid) -> String {
     key("ai-guard:legacy-named-admission-result:v1", binding_ref)
 }
 
+fn session_owner_grant(tenant: &str, initiator: &Initiator, session_id: Uuid) -> ResourceGrantV1 {
+    ResourceGrantV1 {
+        version: 1,
+        tenant_id: tenant.into(),
+        organization_scope: initiator.organization.clone(),
+        resource: ResourceRefV1 {
+            kind: ResourceKindV1::Session,
+            resource_id: session_id.to_string(),
+        },
+        owner: initiator.principal.clone(),
+        revision: 1,
+        active: true,
+        shares: vec![],
+    }
+}
+
 fn session_grant(
     tenant: &str,
     initiator: &Initiator,
@@ -98,19 +116,7 @@ fn session_grant(
         },
         change: IdentityChangeV1::ResourceGrant {
             expected_revision: 0,
-            grant: ResourceGrantV1 {
-                version: 1,
-                tenant_id: tenant.into(),
-                organization_scope: initiator.organization.clone(),
-                resource: ResourceRefV1 {
-                    kind: ResourceKindV1::Session,
-                    resource_id: session_id.to_string(),
-                },
-                owner: initiator.principal.clone(),
-                revision: 1,
-                active: true,
-                shares: vec![],
-            },
+            grant: session_owner_grant(tenant, initiator, session_id),
         },
     }
 }
@@ -330,7 +336,12 @@ impl Store {
             conflict(fact.binding_ref == request.binding_ref && fact.input_hash == input_hash)?;
             let (admission, record) = admission_record(&tx, &fact)?;
             let result = admission_codec::result(&admission, &record, true)?;
-            self.commit_named_admission(tx, &clock, broker, None)?;
+            self.commit_named_admission(tx, &clock, |tx, current| {
+                Ok((
+                    None,
+                    workload::broker_identity_deadline_checked(tx, broker, current.at())?,
+                ))
+            })?;
             return Ok(LegacyNamedAdmissionCommit {
                 admission: result,
                 grant: fact.grant,
@@ -385,7 +396,24 @@ impl Store {
         };
         let stored = self.append_legacy_session_record(&tx, &clock, ADMITTED, event_id, &fact)?;
         self.validate_supervision_write(&tx)?;
-        self.commit_named_admission(tx, &clock, broker, Some(request))?;
+        self.commit_named_admission(tx, &clock, |tx, current| {
+            if let Some(worker) = &result.worker {
+                let (human_deadline, broker_deadline) = self.require_legacy_named_execution(
+                    tx,
+                    broker,
+                    request.binding_ref,
+                    &resolved.plan.control_namespace_uuid,
+                    worker,
+                    current,
+                )?;
+                Ok((Some(human_deadline), broker_deadline))
+            } else {
+                let resolved =
+                    self.resolve_legacy_confirmed_plan(tx, broker, request.binding_ref, current)?;
+                request.require_plan(&resolved.plan)?;
+                Ok((Some(resolved.plan.expires_at), resolved.broker_deadline))
+            }
+        })?;
         Ok(LegacyNamedAdmissionCommit {
             admission: result,
             grant: fact.grant,
@@ -398,22 +426,14 @@ impl Store {
         &self,
         tx: CheckedTransaction<'_>,
         clock: &workload::AuthorizedControlTimeV1,
-        broker: &BrokerIdentityV1,
-        fresh: Option<&LegacyNamedSupervisedAdmissionV1>,
+        authorize: impl FnOnce(
+            &CheckedTransaction<'_>,
+            &workload::AuthorizedControlTimeV1,
+        ) -> anyhow::Result<(Option<DateTime<Utc>>, DateTime<Utc>)>,
     ) -> anyhow::Result<()> {
         self.commit_checked_guarded(tx, |tx| {
             let current = workload::capture_control_time(tx)?;
-            let (human_deadline, broker_deadline) = if let Some(request) = fresh {
-                let resolved =
-                    self.resolve_legacy_confirmed_plan(tx, broker, request.binding_ref, &current)?;
-                request.require_plan(&resolved.plan)?;
-                (Some(resolved.plan.expires_at), resolved.broker_deadline)
-            } else {
-                (
-                    None,
-                    workload::broker_identity_deadline_checked(tx, broker, current.at())?,
-                )
-            };
+            let (human_deadline, broker_deadline) = authorize(tx, &current)?;
             let validated_at = Utc::now();
             workload::validate_fresh_control_time_at(tx, clock, validated_at)?;
             let now = Utc::now();
