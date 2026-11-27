@@ -710,6 +710,144 @@ fn conversation_destination_read_requires_the_owner_and_tracks_the_audited_state
     );
 }
 
+#[test]
+fn message_receipt_reconciles_delivery_facts_and_retains_ack_after_stop() {
+    let harness = Harness::new();
+    harness.install_markers();
+    let retained = harness.retained("composition-message-receipt.json");
+    let (owner, membership) = provision_membership(&retained).unwrap();
+    let scope = personal_scope(&retained, &owner, &membership);
+    let session = launched_session(&retained, &scope, &owner);
+    let session_uuid = Uuid::parse_str(&session.session_id).unwrap();
+    let scope = personal_scope(&retained, &owner, &membership);
+    let binding = {
+        let epoch = retained.owner.try_write_epoch().unwrap();
+        retained
+            .store
+            .bind_session_conversation_scoped(
+                &epoch,
+                &retained.source,
+                &BindSessionConversationV1 {
+                    version: 1,
+                    operation_id: Uuid::new_v4(),
+                    session_id: session.session_id.clone(),
+                    expected_input_epoch: 0,
+                    channel: channel_facts("receipt-read"),
+                },
+            )
+            .unwrap()
+    };
+
+    let operation_id = Uuid::new_v4();
+    let read = || {
+        let epoch = retained.owner.try_read_epoch()?;
+        let access = HumanSourceAccess::read(&epoch, &retained.source)?;
+        retained
+            .store
+            .modern_session_message_receipt(&access, &scope, &operation_id.to_string())
+    };
+    let mut expected = send_message(
+        &retained,
+        &scope,
+        operation_id,
+        session_uuid,
+        binding.input_epoch,
+        "synthetic instruction for receipt reconciliation",
+    )
+    .unwrap();
+    assert_eq!(expected.status, SessionMessageStatusV1::Queued);
+    expected.replayed = true;
+    assert_eq!(read().unwrap(), expected);
+
+    {
+        let epoch = retained.owner.try_write_epoch().unwrap();
+        retained
+            .store
+            .issue_session_message_emission_scoped(
+                &epoch,
+                &retained.source,
+                &IssueSessionMessageEmissionV1 {
+                    version: 1,
+                    operation_id,
+                    expected_binding_fingerprint: expected.binding_fingerprint.clone(),
+                },
+            )
+            .unwrap();
+    }
+    expected.status = SessionMessageStatusV1::Unknown;
+    assert_eq!(read().unwrap(), expected);
+
+    let transmitted = {
+        let epoch = retained.owner.try_write_epoch().unwrap();
+        retained
+            .store
+            .record_session_message_transmitted_scoped(&epoch, &retained.source, operation_id)
+            .unwrap()
+    };
+    expected.status = SessionMessageStatusV1::Transmitted;
+    assert_eq!(read().unwrap(), expected);
+
+    let ack = SessionMessageAckV1 {
+        rpc_id: 1,
+        turn_id: "retained-turn".into(),
+    };
+    let acknowledged = {
+        let epoch = retained.owner.try_write_epoch().unwrap();
+        let acknowledged = retained
+            .store
+            .record_session_message_acknowledged_scoped(
+                &epoch,
+                &retained.source,
+                operation_id,
+                &ack,
+            )
+            .unwrap();
+        let closed = retained
+            .store
+            .close_session_conversation_scoped(
+                &epoch,
+                &retained.source,
+                &CloseSessionConversationV1 {
+                    version: 1,
+                    operation_id: Uuid::new_v4(),
+                    session_id: session.session_id,
+                },
+            )
+            .unwrap();
+        assert_eq!(closed.status, SessionConversationStatusV1::Closed);
+        acknowledged
+    };
+    expected.status = SessionMessageStatusV1::Acknowledged;
+    expected.ack = Some(ack);
+    assert_eq!(read().unwrap(), expected);
+
+    // Neither a different ACK nor a stale receipt of this operation may
+    // supersede the durable acknowledgement, even with the right enqueue.
+    let mut divergent = acknowledged;
+    divergent.ack.as_mut().unwrap().turn_id = "different-turn".into();
+    for projection in [divergent, transmitted] {
+        let updated = retained
+            .store
+            .db
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE session_messages SET status=?1,receipt_json=?2 WHERE operation_id=?3",
+                params![
+                    status_str(projection.status),
+                    serde_json::to_string(&projection).unwrap(),
+                    operation_id.to_string()
+                ],
+            )
+            .unwrap();
+        assert_eq!(updated, 1);
+        assert_eq!(
+            read().unwrap_err().downcast_ref::<IdentityFailureV1>(),
+            Some(&IdentityFailureV1::Conflict)
+        );
+    }
+}
+
 /// The composed journey: launch retains the binding, the admission binds the
 /// exact channel durably, two queued instructions reach the fixture worker as
 /// complete framed turns and are acknowledged by the exact correlated

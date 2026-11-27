@@ -30,6 +30,11 @@ pub(crate) const ACKNOWLEDGED_KIND: &str = "control.session_message.acknowledged
 pub(crate) const CONVERSATION_BOUND_KIND: &str = "control.session_message.conversation_bound";
 pub(crate) const CONVERSATION_CLOSED_KIND: &str = "control.session_message.conversation_closed";
 
+const ENQUEUED_ID_DOMAIN: &[u8] = b"ai-guard:session-message:v1";
+const EMISSION_ID_DOMAIN: &[u8] = b"ai-guard:session-message-emission:v1";
+const TRANSMITTED_ID_DOMAIN: &[u8] = b"ai-guard:session-message-transmitted:v1";
+const ACKNOWLEDGED_ID_DOMAIN: &[u8] = b"ai-guard:session-message-ack:v1";
+
 const CONVERSATIONS_TABLE: &str = "session_conversations";
 const MESSAGES_TABLE: &str = "session_messages";
 
@@ -345,6 +350,104 @@ fn message_event_id(domain: &[u8], operation_id: Uuid) -> String {
     super::session_prepare::bound_event_id(domain, operation_id)
 }
 
+/// Verify the projected receipt against at most four indexed event reads in
+/// the same authorized transaction. The facts remain readable after STOP or
+/// rebind and keep the original enqueue's audit coordinates.
+fn read_message_receipt(
+    tx: &Connection,
+    operation_id: Uuid,
+    row: &MessageRow,
+) -> anyhow::Result<SessionMessageReceiptV1> {
+    let operation = operation_id.to_string();
+    let validate = |stored: &StoredEvent, id: &str, kind: &str| -> anyhow::Result<()> {
+        anyhow::ensure!(
+            stored.event.id == id
+                && stored.event.kind == kind
+                && stored.event.data["operation_id"].as_str() == Some(operation.as_str())
+                && stored.event.data["session_id"].as_str() == Some(row.session_id.as_str()),
+            IdentityFailureV1::Conflict
+        );
+        validate_replay_event(tx, stored)
+    };
+    let enqueue = stored_event(tx, row.event_seq)?;
+    validate(
+        &enqueue,
+        &message_event_id(ENQUEUED_ID_DOMAIN, operation_id),
+        ENQUEUED_KIND,
+    )?;
+    let record: Enqueued = serde_json::from_value(enqueue.event.data)?;
+    anyhow::ensure!(
+        enqueue.hash == row.event_hash
+            && record.principal_key == row.principal_key
+            && record.membership_id == row.membership_id
+            && record.organization_scope == row.organization_scope
+            && record.input_hash == row.input_hash
+            && record.content_hash == row.content_hash
+            && record.binding_fingerprint == row.binding_fingerprint
+            && u64::try_from(row.input_epoch).ok() == Some(record.input_epoch),
+        IdentityFailureV1::Conflict
+    );
+
+    let delivery_event = |domain: &[u8], kind: &str| -> anyhow::Result<Option<StoredEvent>> {
+        let id = message_event_id(domain, operation_id);
+        let stored = event_by_id(tx, &id)?;
+        if let Some(event) = &stored {
+            validate(event, &id, kind)?;
+        }
+        Ok(stored)
+    };
+    let emission = delivery_event(EMISSION_ID_DOMAIN, EMISSION_ISSUED_KIND)?;
+    if let Some(issued) = &emission {
+        let emission: EmissionIssued = serde_json::from_value(issued.event.data.clone())?;
+        anyhow::ensure!(
+            enqueue.seq < issued.seq
+                && emission.principal_key == record.principal_key
+                && emission.binding_fingerprint == record.binding_fingerprint
+                && emission.input_epoch == record.input_epoch
+                && emission.content_hash == record.content_hash,
+            IdentityFailureV1::Conflict
+        );
+    }
+    let transmitted = delivery_event(TRANSMITTED_ID_DOMAIN, TRANSMITTED_KIND)?;
+    let acknowledged = delivery_event(ACKNOWLEDGED_ID_DOMAIN, ACKNOWLEDGED_KIND)?;
+    let (status, ack) = match (emission, transmitted, acknowledged) {
+        (None, None, None) => (SessionMessageStatusV1::Queued, None),
+        (Some(_), None, None) => (SessionMessageStatusV1::Unknown, None),
+        (Some(issued), Some(sent), None) if issued.seq < sent.seq => {
+            (SessionMessageStatusV1::Transmitted, None)
+        }
+        (Some(issued), Some(sent), Some(acknowledged))
+            if issued.seq < sent.seq && sent.seq < acknowledged.seq =>
+        {
+            let record: Acknowledged = serde_json::from_value(acknowledged.event.data)?;
+            (SessionMessageStatusV1::Acknowledged, Some(record.ack))
+        }
+        _ => return Err(failure(IdentityFailureV1::Conflict)),
+    };
+    let audited = SessionMessageReceiptV1 {
+        version: record.version,
+        operation_id,
+        message_id: enqueue.event.id,
+        session_id: Uuid::parse_str(&record.session_id)?,
+        input_hash: record.input_hash,
+        content_hash: record.content_hash,
+        binding_fingerprint: record.binding_fingerprint,
+        input_epoch: record.input_epoch,
+        status,
+        ack,
+        audit_seq: enqueue.seq,
+        audit_hash: enqueue.hash,
+        replayed: true,
+    };
+    let mut projected: SessionMessageReceiptV1 = serde_json::from_str(&row.receipt_json)?;
+    projected.replayed = true;
+    anyhow::ensure!(
+        projected == audited && row.status == status_str(status),
+        IdentityFailureV1::Conflict
+    );
+    Ok(audited)
+}
+
 fn receipt_with(
     row: &MessageRow,
     status: SessionMessageStatusV1,
@@ -602,7 +705,7 @@ impl Store {
         );
         let binding_fingerprint = binding.fingerprint()?;
         let mut event = Event::new(ENQUEUED_KIND);
-        event.id = message_event_id(b"ai-guard:session-message:v1", request.operation_id);
+        event.id = message_event_id(ENQUEUED_ID_DOMAIN, request.operation_id);
         event.timestamp = crate::broker_registry::format_time(clock.at());
         event.coverage = "native".into();
         event.session_id = Some(session_id.clone());
@@ -680,11 +783,7 @@ impl Store {
             let row = message_row(tx, &operation.to_string())?
                 .ok_or(failure(IdentityFailureV1::NotFound))?;
             require_session_owner(tx, &current, &row.session_id)?;
-            let event = stored_event(tx, row.event_seq)?;
-            anyhow::ensure!(event.hash == row.event_hash, IdentityFailureV1::Conflict);
-            let mut receipt: SessionMessageReceiptV1 = serde_json::from_str(&row.receipt_json)?;
-            receipt.replayed = true;
-            Ok(receipt)
+            read_message_receipt(tx, operation, &row)
         })
     }
 
@@ -852,10 +951,7 @@ impl Store {
         let operation_id = command.operation_id.to_string();
         let row = message_row(&tx, &operation_id)?.ok_or(failure(IdentityFailureV1::NotFound))?;
         // A retained issue is never re-emitted, whatever the current status.
-        let issue_id = message_event_id(
-            b"ai-guard:session-message-emission:v1",
-            command.operation_id,
-        );
+        let issue_id = message_event_id(EMISSION_ID_DOMAIN, command.operation_id);
         anyhow::ensure!(
             event_by_id(&tx, &issue_id)?.is_none()
                 && row.status == status_str(SessionMessageStatusV1::Queued),
@@ -929,10 +1025,7 @@ impl Store {
                     && row.content_hash == emission.content_hash,
                 SessionMessageFailureV1::BindingChanged
             );
-            let issue_id = message_event_id(
-                b"ai-guard:session-message-emission:v1",
-                emission.operation_id,
-            );
+            let issue_id = message_event_id(EMISSION_ID_DOMAIN, emission.operation_id);
             anyhow::ensure!(
                 row.status == status_str(SessionMessageStatusV1::Unknown)
                     && event_by_id(tx, &issue_id)?
@@ -963,7 +1056,7 @@ impl Store {
         }
         let row = message_row(&tx, &operation_id.to_string())?
             .ok_or(failure(IdentityFailureV1::NotFound))?;
-        let event_id = message_event_id(b"ai-guard:session-message-transmitted:v1", operation_id);
+        let event_id = message_event_id(TRANSMITTED_ID_DOMAIN, operation_id);
         if event_by_id(&tx, &event_id)?.is_some() {
             let mut receipt: SessionMessageReceiptV1 = serde_json::from_str(&row.receipt_json)?;
             receipt.replayed = true;
@@ -1030,7 +1123,7 @@ impl Store {
         }
         let row = message_row(&tx, &operation_id.to_string())?
             .ok_or(failure(IdentityFailureV1::NotFound))?;
-        let event_id = message_event_id(b"ai-guard:session-message-ack:v1", operation_id);
+        let event_id = message_event_id(ACKNOWLEDGED_ID_DOMAIN, operation_id);
         if let Some(stored) = event_by_id(&tx, &event_id)? {
             let record: Acknowledged = serde_json::from_value(stored.event.data.clone())?;
             anyhow::ensure!(record.ack == *ack, IdentityFailureV1::Conflict);
