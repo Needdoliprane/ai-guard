@@ -15,7 +15,7 @@ use crate::{
     workload::{WorkloadBindingIssueV1, WorkloadSubjectV1},
 };
 use sha2::{Digest, Sha256};
-use std::path::Path;
+use std::{os::unix::fs::PermissionsExt, path::Path};
 
 const MAX_EVENTS: u64 = 128;
 const DEADLINE: &str = "2126-01-01T00:00:00Z";
@@ -36,7 +36,10 @@ impl Fixture {
     }
 
     fn new() -> Self {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = tempfile::Builder::new()
+            .permissions(std::fs::Permissions::from_mode(0o700))
+            .tempdir()
+            .unwrap();
         let path = directory
             .path()
             .canonicalize()
