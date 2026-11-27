@@ -880,8 +880,33 @@ impl Store {
         max_events: u64,
         backup_path: &Path,
     ) -> anyhow::Result<Self> {
+        Self::create_supervised_for_tenant_with_capacity(
+            path,
+            tenant_id,
+            redactor,
+            AuditCapacityV1 {
+                events: max_events,
+                bytes: DEFAULT_PHYSICAL_BYTES,
+            },
+            None,
+            backup_path,
+        )
+    }
+
+    fn create_supervised_for_tenant_with_capacity(
+        path: &Path,
+        tenant_id: &str,
+        redactor: Redactor,
+        limits: AuditCapacityV1,
+        policy: Option<AuditCapacityPolicyV1>,
+        backup_path: &Path,
+    ) -> anyhow::Result<Self> {
         validate_tenant_id(tenant_id)?;
-        anyhow::ensure!(max_events <= i64::MAX as u64, "invalid audit capacity");
+        anyhow::ensure!(limits.events <= i64::MAX as u64, "invalid audit capacity");
+        capacity::validate_sqlite_physical_bytes(limits.bytes)?;
+        if let Some(policy) = &policy {
+            policy.validate_for(limits.events, limits.bytes)?;
+        }
         let (backing, initialization_guard) = StoreStorage::create_new(path)?;
         let target_parent = crate::control_fs::Directory::open_existing(
             backing
@@ -895,9 +920,18 @@ impl Store {
             initialization_guard,
             tenant_id,
             redactor,
-            max_events,
+            limits.events,
             true,
         )?;
+        let store = if limits.bytes == DEFAULT_PHYSICAL_BYTES {
+            store
+        } else {
+            store.with_physical_bytes(limits.bytes)?
+        };
+        let store = match policy {
+            Some(policy) => store.with_capacity_policy(policy)?,
+            None => store,
+        };
         // The prepared-open guard has now been released. The backup may use
         // the same parent and must acquire its own initialization guard.
         let backup_path = crate::control_fs::absolute_path(backup_path)?;

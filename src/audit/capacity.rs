@@ -365,7 +365,7 @@ impl Cache {
     }
 }
 
-fn validate_sqlite_physical_bytes(physical_bytes: u64) -> anyhow::Result<()> {
+pub(super) fn validate_sqlite_physical_bytes(physical_bytes: u64) -> anyhow::Result<()> {
     anyhow::ensure!(
         (super::capacity_policy::DEFAULT_PHYSICAL_BYTES
             ..=super::capacity_policy::MAX_SQLITE_PHYSICAL_BYTES)

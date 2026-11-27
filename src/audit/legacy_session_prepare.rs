@@ -7,6 +7,8 @@ use crate::{
 };
 use uuid::Uuid;
 
+#[cfg(test)]
+pub(super) mod bootstrap;
 mod confirmation;
 pub(crate) use confirmation::LegacySessionLocalProof;
 pub(super) use confirmation::{
@@ -302,22 +304,27 @@ impl Store {
         Ok(stored)
     }
 
+    fn validate_legacy_target_provision(
+        &self,
+        operator: &PrincipalRefV1,
+        command: &ProvisionLegacySessionTargetV1,
+    ) -> anyhow::Result<()> {
+        command.validate()?;
+        require_offline_operator(operator)?;
+        anyhow::ensure!(
+            command.target.catalogue.tenant_id == self.tenant_id,
+            IdentityFailureV1::PermissionDenied
+        );
+        Ok(())
+    }
+
     /// Called by the offline filesystem-authorized target provisioning command.
     pub(crate) fn provision_legacy_session_target(
         &self,
         operator: PrincipalRefV1,
         command: ProvisionLegacySessionTargetV1,
     ) -> anyhow::Result<LegacyTargetReceipt> {
-        command.validate()?;
-        require_offline_operator(&operator)?;
-        let catalogue = &command.target.catalogue;
-        anyhow::ensure!(
-            catalogue.tenant_id == self.tenant_id,
-            IdentityFailureV1::PermissionDenied
-        );
-        let target_id = catalogue.launch_target_id;
-        let revision = catalogue.revision;
-        let id = target_event_id(target_id, revision);
+        self.validate_legacy_target_provision(&operator, &command)?;
         let mut db = self
             .db
             .lock()
@@ -328,6 +335,19 @@ impl Store {
             IdentityFailureV1::MigrationRequired
         );
         anyhow::ensure!(!tx.lease.active, IdentityFailureV1::PermissionDenied);
+        self.publish_legacy_session_target(tx, operator, command)
+    }
+
+    fn publish_legacy_session_target(
+        &self,
+        tx: CheckedTransaction<'_>,
+        operator: PrincipalRefV1,
+        command: ProvisionLegacySessionTargetV1,
+    ) -> anyhow::Result<LegacyTargetReceipt> {
+        let catalogue = &command.target.catalogue;
+        let target_id = catalogue.launch_target_id;
+        let revision = catalogue.revision;
+        let id = target_event_id(target_id, revision);
         let record = TargetRecord {
             version: 1,
             namespace: supervision::namespace(&tx)?,
