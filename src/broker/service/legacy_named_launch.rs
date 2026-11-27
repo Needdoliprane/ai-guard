@@ -192,7 +192,7 @@ impl Service {
             let cancel = job.cancel.clone();
             let control_material = Arc::clone(&self.material);
             let launch = material.clone();
-            let (archive, config) = self
+            let archive = self
                 .filesystem(move || {
                     require_generation(&cancel, generation)?;
                     control_material.revalidate()?;
