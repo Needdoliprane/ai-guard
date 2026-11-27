@@ -86,6 +86,16 @@ fn main() {
             }
         }
         "info" => {
+            if root.join("pause_info_for_create").is_file() {
+                fs::write(root.join("info_waiting_for_create"), "").unwrap();
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+                while !root.join("release_info_for_create").is_file() {
+                    if std::time::Instant::now() >= deadline {
+                        std::process::exit(125);
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+            }
             if case == "podman_authority" {
                 let rootless = !root.join("podman_rootful").exists();
                 println!(
@@ -141,6 +151,8 @@ fn main() {
                 .unwrap();
             fs::write(root.join("volume"), volume).unwrap();
             fs::write(root.join("name"), name).unwrap();
+            let interactive = args.iter().any(|arg| arg == "--interactive");
+            fs::write(root.join("interactive"), interactive.to_string()).unwrap();
             fs::write(root.join("state"), "created").unwrap();
             if case == "create_bad" {
                 println!("invalid reference!")
@@ -206,8 +218,9 @@ fn main() {
                 println!("{state_json}");
                 return;
             }
+            let interactive = fs::read_to_string(root.join("interactive")).unwrap();
             let mut json = format!(
-                r#"{{"Id":"{ID}","Name":"/{name}","Image":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","RestartCount":0,"State":{state_json},"HostConfig":{{"LogConfig":{{"Type":"none","Config":{{}}}},"NanoCpus":2000000000,"CpuQuota":0,"CpuPeriod":0,"Memory":1073741824,"PidsLimit":256,"ReadonlyRootfs":true,"Privileged":false,"AutoRemove":false,"Tmpfs":{{"/tmp":"rw,nosuid,nodev,noexec,size=256m,mode=1777","/home/agent":"rw,nosuid,nodev,size=64m,uid=1000,gid=1000,mode=700"}},"NetworkMode":"none","CapDrop":["ALL"],"SecurityOpt":["no-new-privileges"],"RestartPolicy":{{"Name":"no"}}}},"Config":{{"Tty":false,"OpenStdin":false,"StdinOnce":false,"Labels":{{"agentsandbox.session":"{session}","agentsandbox.operation":"{operation}","agentsandbox.purpose":"{purpose}"}},"User":"1000:1000","WorkingDir":"/workspace","Entrypoint":["/usr/bin/id"],"Cmd":[],"Env":["PRIVATE=not-a-public-observation"]}},"Mounts":[{{"Type":"volume","Name":"{volume}","Destination":"/workspace","RW":true}}]}}"#
+                r#"{{"Id":"{ID}","Name":"/{name}","Image":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","RestartCount":0,"State":{state_json},"HostConfig":{{"LogConfig":{{"Type":"none","Config":{{}}}},"NanoCpus":2000000000,"CpuQuota":0,"CpuPeriod":0,"Memory":1073741824,"PidsLimit":256,"ReadonlyRootfs":true,"Privileged":false,"AutoRemove":false,"Tmpfs":{{"/tmp":"rw,nosuid,nodev,noexec,size=256m,mode=1777","/home/agent":"rw,nosuid,nodev,size=64m,uid=1000,gid=1000,mode=700"}},"NetworkMode":"none","CapDrop":["ALL"],"SecurityOpt":["no-new-privileges"],"RestartPolicy":{{"Name":"no"}}}},"Config":{{"Tty":false,"OpenStdin":{interactive},"StdinOnce":{interactive},"Labels":{{"agentsandbox.session":"{session}","agentsandbox.operation":"{operation}","agentsandbox.purpose":"{purpose}"}},"User":"1000:1000","WorkingDir":"/workspace","Entrypoint":["/usr/bin/id"],"Cmd":[],"Env":["PRIVATE=not-a-public-observation"]}},"Mounts":[{{"Type":"volume","Name":"{volume}","Destination":"/workspace","RW":true}}]}}"#
             );
             if case == "bad_log_driver"
                 || case == "legacy_observe"

@@ -150,18 +150,32 @@ async fn import_creation_orders_native_mutations_with_stop() -> anyhow::Result<(
     let labels = [("agentsandbox.owner".into(), "expected".into())];
     let cancel = CancelGeneration::new();
     let rejected_generation = cancel.current();
+    fs::write(temporary.path().join("pause_info_for_create"), "")?;
+    let volume = {
+        let managed = managed.clone();
+        let cancel = cancel.clone();
+        let labels = labels.clone();
+        tokio::spawn(async move {
+            managed
+                .create_named_volume_for_generation(
+                    "aig-fixture-worker-work",
+                    &labels,
+                    &cancel,
+                    rejected_generation,
+                )
+                .await
+        })
+    };
+    tokio::time::timeout(Duration::from_secs(4), async {
+        while !temporary.path().join("info_waiting_for_create").is_file() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await?;
     cancel.invalidate();
-    assert!(
-        managed
-            .create_named_volume_for_generation(
-                "aig-fixture-worker-work",
-                &labels,
-                &cancel,
-                rejected_generation
-            )
-            .await
-            .is_err()
-    );
+    fs::write(temporary.path().join("release_info_for_create"), "")?;
+    assert!(volume.await?.is_err());
+    fs::remove_file(temporary.path().join("pause_info_for_create"))?;
     assert!(
         managed
             .create_owned_import_for_generation(&spec, &cancel, rejected_generation)
