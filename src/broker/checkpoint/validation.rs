@@ -12,7 +12,7 @@ fn normalized_request(request: &DecisionRequest, intent: &ExecutionIntentV1) -> 
     initial.approval_hash = None;
     ensure(equal(&initial, intent.request_data())?)
 }
-fn bound_receipt(
+pub(super) fn bound_receipt(
     value: &MutationReceiptV1,
     operation: &str,
     input: &str,
@@ -27,7 +27,7 @@ fn bound_receipt(
             && value.revision == revision,
     )
 }
-fn bound_worker(
+pub(super) fn bound_worker(
     worker: &WorkerV1,
     admission: &SupervisedAdmissionV1,
     namespace: Uuid,
@@ -371,14 +371,36 @@ fn admission_context(
             && launch.credential_names == binding.names(),
     )
 }
+
+fn require_admission_decision(
+    previous: &[SupervisionOperationV1],
+    request: &SupervisedAdmissionV1,
+) -> JournalResult<()> {
+    let mut found = false;
+    for operation in previous {
+        if let SupervisionOperationV1::Decision {
+            request: decision_request,
+            response: Some(answer),
+        } = operation
+            && equal(decision_request, &request.admission.decision_request)?
+            && equal(&answer.receipt, &request.admission.receipt)?
+            && answer.decision.outcome == Outcome::Allow
+        {
+            found = true;
+        }
+    }
+    ensure(found)
+}
+
 impl BrokerCheckpointV2 {
     pub(crate) fn validate_context(
         &self,
         intent: &ExecutionIntentV1,
-        namespace: Uuid,
+        scope: &JournalScopeV1,
         binding: &BindingManifestV1,
     ) -> JournalResult<()> {
         self.validate_shape()?;
+        let namespace = scope.control_namespace_uuid();
         ensure(self.supervision.control_namespace_uuid == namespace)?;
         let context = self.runner.broker_context();
         ensure(!context.legacy_pending && !context.legacy_import)?;
@@ -421,20 +443,7 @@ impl BrokerCheckpointV2 {
                     admission_context(request, intent, binding)?;
                     ensure(equal(&request.admission.decision_request, context.request)?)?;
                     requested = Some(request);
-                    let mut decision_found = false;
-                    for operation in previous {
-                        if let SupervisionOperationV1::Decision {
-                            request: decision_request,
-                            response: Some(answer),
-                        } = operation
-                            && equal(decision_request, &request.admission.decision_request)?
-                            && equal(&answer.receipt, &request.admission.receipt)?
-                            && answer.decision.outcome == Outcome::Allow
-                        {
-                            decision_found = true;
-                        }
-                    }
-                    ensure(decision_found)?;
+                    require_admission_decision(previous, request)?;
                     if let Some(response) = response {
                         ensure(
                             response.accepted == response.refusal.is_none()
@@ -760,6 +769,27 @@ impl BrokerCheckpointV2 {
                     worker.revision,
                 )))?;
             }
+        }
+        if let Some(named) = self.supervision.legacy_named_admission() {
+            let request = &named.request().admission;
+            ensure(
+                named.plan().broker_profile_id == scope.profile_id()
+                    && equal(&request.admission.decision_request, context.request)?
+                    && context.owned.is_none(),
+            )?;
+            admission_context(request, intent, binding)?;
+            require_admission_decision(&self.supervision.operations, request)?;
+            if let Some(saved) = context.admission {
+                ensure(equal(saved, &request.admission)?)?;
+            }
+            if let Some(worker) = context.worker {
+                let admitted = named
+                    .admission_result()
+                    .and_then(|result| result.worker.as_ref())
+                    .ok_or(JournalError::Conflict)?;
+                ensure(equal(worker, admitted)?)?;
+            }
+            return Ok(());
         }
         if let Some(saved) = context.admission {
             let admission = requested.ok_or(JournalError::Conflict)?;

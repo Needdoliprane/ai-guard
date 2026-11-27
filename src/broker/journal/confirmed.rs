@@ -253,7 +253,7 @@ pub(super) fn context_checkpoint_with_launch(
         None => {}
     }
     if let Some(value) = checkpoint.supervised() {
-        value.validate_context(intent, scope.0.control_namespace_uuid, binding)?;
+        value.validate_context(intent, scope, binding)?;
     }
     if let Some(value) = checkpoint.lifecycle() {
         value.validate_context(

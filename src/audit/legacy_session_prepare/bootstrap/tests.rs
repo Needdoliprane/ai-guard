@@ -1029,6 +1029,241 @@ async fn legacy_named_admission_route_replays_the_committed_receipt_after_reopen
 }
 
 #[test]
+fn legacy_named_checkpoint_retains_the_exact_store_admission_after_reopen() {
+    use crate::{
+        broker::{
+            checkpoint::{
+                BrokerCheckpointV2, DecisionAnswerV1, LegacyNamedAdmissionCheckpointV1,
+                SupervisionCheckpointV1, SupervisionOperationV1,
+            },
+            intent::ExecutionIntentV1,
+            journal::{
+                BindingInputs, ControlSecrets, FsExclusions, Journal, JournalError,
+                JournalLimitsV1, JournalScopeV1, ReserveResult,
+            },
+        },
+        control_fs::Directory,
+        runner::CheckpointPayloadV1,
+    };
+
+    let f = Fixture::new();
+    let (store, _) = f.provision(f.create().unwrap()).unwrap();
+    let (mut request, _) = f.confirmed_request(&store);
+    let Some(AuthenticatedWorkload::Broker(broker)) =
+        store.authenticate_workload_token(BROKER_TOKEN).unwrap()
+    else {
+        panic!("fixture broker identity");
+    };
+    let plan = store
+        .legacy_confirmed_plan(&broker, request.binding_ref)
+        .unwrap();
+    let namespace = Uuid::parse_str(&plan.control_namespace_uuid).unwrap();
+    let root = f._directory.path().canonicalize().unwrap();
+    let launch = &request.admission.admission.launch;
+    let gateway = "http://127.0.0.1:8787";
+    let options = serde_json::from_value(json!({
+        "project": root,
+        "config_dir": root,
+        "gateway": gateway,
+        "runtime": "docker",
+        "image": launch.image_ref,
+        "profile": launch.profile,
+        "network": "none",
+        "allow_rootful_runtime": false,
+        "timeout": launch.timeout_seconds,
+        "provider": launch.provider,
+        "capture_output": false,
+        "argv": launch.command.argv
+    }))
+    .unwrap();
+    let decision_request = request.admission.admission.decision_request.clone();
+    let intent = ExecutionIntentV1::from_projection(
+        1,
+        plan.operation_id,
+        plan.session_id,
+        options,
+        decision_request.clone(),
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+    request.admission.intent_hash = intent.intent_hash().unwrap();
+    let scope = JournalScopeV1::new(
+        Uuid::new_v4(),
+        TENANT,
+        gateway,
+        namespace,
+        &plan.broker_profile_id,
+    )
+    .unwrap();
+    let journal_root = Directory::open_existing(&root).unwrap();
+    let open = || {
+        Journal::open(
+            &journal_root,
+            scope.clone(),
+            &FsExclusions::new(),
+            JournalLimitsV1::default(),
+            ControlSecrets::new(vec![]).unwrap(),
+        )
+        .unwrap()
+    };
+    let journal = open();
+    let operation = intent.operation_id();
+    let ReserveResult::New(ticket) = journal
+        .reserve(operation, br#"{"fixture":"named-admission"}"#)
+        .unwrap()
+    else {
+        panic!("the fixture requires a fresh job");
+    };
+    let runner = CheckpointPayloadV1::initial(&intent).unwrap();
+    let accepted = journal
+        .accept(ticket, &intent, BindingInputs::None, &runner)
+        .unwrap();
+    let decision_checkpoint = |response| {
+        SupervisionCheckpointV1::new(
+            namespace,
+            vec![],
+            vec![SupervisionOperationV1::Decision {
+                request: decision_request.clone(),
+                response,
+            }],
+        )
+        .unwrap()
+    };
+    let ordinary = BrokerCheckpointV2::new(runner.clone(), decision_checkpoint(None)).unwrap();
+    let ordinary_bytes = ordinary.canonical_bytes().unwrap();
+    assert!(!String::from_utf8_lossy(&ordinary_bytes).contains("legacy_named_admission"));
+    assert_eq!(
+        BrokerCheckpointV2::from_bytes(&ordinary_bytes)
+            .unwrap()
+            .canonical_bytes()
+            .unwrap(),
+        ordinary_bytes
+    );
+    journal
+        .advance_supervised(operation, accepted.head().clone(), &ordinary)
+        .unwrap();
+    let decision = policy::evaluate(&Policy::default(), &decision_request);
+    let answer = DecisionAnswerV1::new(
+        decision.clone(),
+        request.admission.admission.receipt.clone(),
+    )
+    .unwrap();
+    let decided =
+        BrokerCheckpointV2::new(runner.clone(), decision_checkpoint(Some(answer.clone()))).unwrap();
+    journal
+        .advance_supervised(
+            operation,
+            journal.load(operation).unwrap().unwrap().head().clone(),
+            &decided,
+        )
+        .unwrap();
+    let checkpoint = |named| {
+        BrokerCheckpointV2::new(
+            runner.clone(),
+            decision_checkpoint(Some(answer.clone()))
+                .with_legacy_named_admission(named)
+                .unwrap(),
+        )
+        .unwrap()
+    };
+    let pending = LegacyNamedAdmissionCheckpointV1::new(plan.clone(), request.clone()).unwrap();
+    let current = || journal.load(operation).unwrap().unwrap().head().clone();
+    let manual = SupervisionCheckpointV1::new(
+        namespace,
+        vec![],
+        vec![SupervisionOperationV1::Admission {
+            request: request.admission.clone(),
+            response: None,
+        }],
+    )
+    .unwrap();
+    assert!(manual.with_legacy_named_admission(pending.clone()).is_err());
+
+    let mut other_profile = plan.clone();
+    other_profile.broker_profile_id = "another-profile".into();
+    let mut other_request = request.clone();
+    other_request.broker_profile_id = other_profile.broker_profile_id.clone();
+    let wrong_scope = LegacyNamedAdmissionCheckpointV1::new(other_profile, other_request).unwrap();
+    assert!(matches!(
+        journal.advance_supervised(operation, current(), &checkpoint(wrong_scope)),
+        Err(JournalError::Conflict)
+    ));
+    journal
+        .advance_supervised(operation, current(), &checkpoint(pending.clone()))
+        .unwrap();
+    let receipt = store
+        .admit_legacy_named(
+            &broker,
+            &request,
+            &Policy::default(),
+            decision,
+            Value::Null,
+            &QuotaPolicyV1::default(),
+        )
+        .unwrap();
+    let mut other_receipt = receipt.admission.clone();
+    other_receipt.receipt.operation_id = Uuid::new_v4().to_string();
+    assert!(
+        pending
+            .clone()
+            .acknowledge(
+                other_receipt,
+                receipt.grant.clone(),
+                receipt.audit_seq,
+                receipt.audit_hash.clone()
+            )
+            .is_err()
+    );
+    let response = pending
+        .acknowledge(
+            receipt.admission,
+            receipt.grant,
+            receipt.audit_seq,
+            receipt.audit_hash,
+        )
+        .unwrap();
+    let acknowledged = checkpoint(response.clone());
+    assert!(matches!(
+        acknowledged.validate_transition(Some(&decided)),
+        Err(JournalError::Conflict)
+    ));
+    journal
+        .advance_supervised(operation, current(), &acknowledged)
+        .unwrap();
+    assert!(matches!(
+        journal.advance_supervised(operation, current(), &decided),
+        Err(JournalError::Conflict)
+    ));
+    let retained_receipt = response.admission_result().unwrap().receipt.clone();
+    drop(journal);
+    let reopened = open().load(operation).unwrap().unwrap();
+    let retained = reopened.broker_checkpoint_v2().unwrap();
+    assert_eq!(
+        retained.canonical_bytes().unwrap(),
+        acknowledged.canonical_bytes().unwrap()
+    );
+    let checkpoint = retained.supervision().legacy_named_admission().unwrap();
+    assert_eq!(checkpoint.plan(), &plan);
+    assert_eq!(
+        checkpoint.admission_result().unwrap().receipt,
+        retained_receipt
+    );
+    assert_eq!(
+        checkpoint
+            .admission_result()
+            .unwrap()
+            .worker
+            .as_ref()
+            .unwrap()
+            .launch
+            .session_id,
+        intent.session().to_string()
+    );
+}
+
+#[test]
 fn legacy_named_admission_retains_policy_and_quota_refusals_without_a_grant() {
     for refusal in [AdmissionRefusalV1::Policy, AdmissionRefusalV1::Quota] {
         let f = Fixture::new();

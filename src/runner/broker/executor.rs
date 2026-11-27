@@ -143,6 +143,12 @@ struct Draft {
 impl Draft {
     fn from_job(job: &AcceptedJobV1) -> Result<Self> {
         let supervision = job.broker_checkpoint_v2().map(|cp| cp.supervision());
+        ensure!(
+            supervision
+                .and_then(|checkpoint| checkpoint.legacy_named_admission())
+                .is_none(),
+            "named admission requires the authenticated named execution transport"
+        );
         let context = job.checkpoint().broker_context();
         Ok(Self {
             run: BrokerRunState::from_job(job)?,

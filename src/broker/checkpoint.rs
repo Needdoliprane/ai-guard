@@ -1,7 +1,7 @@
 //! Private checkpoint facts. Deserialization never grants execution authority.
 use super::{
     intent::ExecutionIntentV1,
-    journal::{BindingManifestV1, JournalError, JournalResult, canonical},
+    journal::{BindingManifestV1, JournalError, JournalResult, JournalScopeV1, canonical},
 };
 use crate::{
     control::*,
@@ -12,9 +12,12 @@ use crate::{
 use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 use std::{collections::HashSet, fmt};
 use uuid::Uuid;
+mod legacy_named;
 mod validation;
+pub(crate) use legacy_named::LegacyNamedAdmissionCheckpointV1;
 
 const MAX_BYTES: usize = 32 * 1024 * 1024;
+const MAX_OPERATION_BYTES: usize = 512 * 1024;
 fn ensure(valid: bool) -> JournalResult<()> {
     if valid {
         Ok(())
@@ -72,6 +75,8 @@ pub struct SupervisionCheckpointV1 {
     control_namespace_uuid: Uuid,
     helpers: Vec<HelperPreparationV1>,
     operations: Vec<SupervisionOperationV1>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    legacy_named_admission: Option<Box<LegacyNamedAdmissionCheckpointV1>>,
 }
 #[derive(Clone, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -156,7 +161,13 @@ strict_record!(BrokerCheckpointV2 {
     runner: CheckpointPayloadV1,
     supervision: SupervisionCheckpointV1
 });
-strict_record!(SupervisionCheckpointV1 { version: u32, control_namespace_uuid: Uuid, helpers: Vec<HelperPreparationV1>, operations: Vec<SupervisionOperationV1> });
+strict_record!(SupervisionCheckpointV1 {
+    version: u32,
+    control_namespace_uuid: Uuid,
+    helpers: Vec<HelperPreparationV1>,
+    operations: Vec<SupervisionOperationV1>,
+    legacy_named_admission: Option<Box<LegacyNamedAdmissionCheckpointV1>>
+});
 strict_record!(HelperPreparationV1 { policy: HelperExecutionPolicyV1, permission: HelperPermissionV1, owned: Option<OwnedContainerSnapshot> });
 strict_record!(DecisionAnswerV1 {
     decision: Decision,
@@ -235,6 +246,11 @@ impl BrokerCheckpointV2 {
     }
     pub(crate) fn validate_transition(&self, previous: Option<&Self>) -> JournalResult<()> {
         self.validate_shape()?;
+        let old_named = previous.and_then(|old| old.supervision.legacy_named_admission());
+        match self.supervision.legacy_named_admission() {
+            Some(named) => named.validate_transition(old_named)?,
+            None => ensure(old_named.is_none())?,
+        }
         let (old_helpers, old_operations) = if let Some(old) = previous {
             ensure(
                 self.supervision.control_namespace_uuid == old.supervision.control_namespace_uuid,
@@ -294,6 +310,7 @@ impl SupervisionCheckpointV1 {
             control_namespace_uuid,
             helpers,
             operations,
+            legacy_named_admission: None,
         };
         value.validate_shape()?;
         Ok(value)
@@ -307,11 +324,39 @@ impl SupervisionCheckpointV1 {
     pub fn operations(&self) -> &[SupervisionOperationV1] {
         &self.operations
     }
+    pub(crate) fn legacy_named_admission(&self) -> Option<&LegacyNamedAdmissionCheckpointV1> {
+        self.legacy_named_admission.as_deref()
+    }
+    #[allow(
+        dead_code,
+        reason = "the private named transport will publish this checkpoint"
+    )]
+    pub(crate) fn with_legacy_named_admission(
+        mut self,
+        admission: LegacyNamedAdmissionCheckpointV1,
+    ) -> JournalResult<Self> {
+        if let Some(old) = self.legacy_named_admission() {
+            admission.validate_transition(Some(old))?;
+        }
+        self.legacy_named_admission = Some(Box::new(admission));
+        self.validate_shape()?;
+        Ok(self)
+    }
     fn validate_shape(&self) -> JournalResult<()> {
         if self.version != 1 {
             return Err(JournalError::UnsupportedVersion);
         }
         ensure(!self.control_namespace_uuid.is_nil())?;
+        if let Some(named) = self.legacy_named_admission() {
+            named.validate_shape(self.control_namespace_uuid)?;
+            ensure(
+                self.helpers.is_empty()
+                    && self
+                        .operations
+                        .iter()
+                        .all(|op| matches!(op, SupervisionOperationV1::Decision { .. })),
+            )?;
+        }
         if self.helpers.len() > 32
             || self.operations.len() > 128
             || self
@@ -428,7 +473,7 @@ impl HelperPreparationV1 {
                     .validate_identity_allocation(&owned.observation),
             )?;
         }
-        ensure(canonical(self)?.len() <= 512 * 1024)
+        ensure(canonical(self)?.len() <= MAX_OPERATION_BYTES)
     }
 }
 impl DecisionAnswerV1 {
