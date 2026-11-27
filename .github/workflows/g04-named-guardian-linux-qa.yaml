@@ -13,8 +13,8 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
-      SOURCE_SHA: 2a4f6b53880d63ab919eaf1a10bed7ca8d1bba87
-      SOURCE_TREE: 87f12cfcc2f938035e5f8d40178d385c565f9ed8
+      SOURCE_SHA: dce1273f225bf720cadbda70d8eb2f350a8ace1b
+      SOURCE_TREE: 3c9ffe5eb1f2852cd5c3b1a69e6fead38db6252d
       CARGO_BUILD_JOBS: '1'
       CARGO_INCREMENTAL: '0'
       CARGO_PROFILE_DEV_DEBUG: '0'
@@ -27,7 +27,7 @@ jobs:
           ref: ${{ env.SOURCE_SHA }}
           persist-credentials: false
 
-      - name: Build one library harness and verify three exact G04 tests
+      - name: Build one library harness and verify exact G04 selectors
         shell: bash
         run: |
           set -euo pipefail
@@ -36,6 +36,7 @@ jobs:
             broker::enforcer::server::prospective::tests::named_guardian_custody_survives_authenticated_reconnect
             broker::enforcer::client::legacy::reservation_motif_tests::named_reservation_wire_does_not_decode_as_a_historical_reservation
             broker::enforcer::client::legacy::named_reservation_retains_stale_ack_without_issuing_stop
+            broker::enforcer::client::legacy::named_exchange_never_enters_the_historical_bind
           )
 
           report_not_run() {
@@ -144,7 +145,11 @@ jobs:
           check_selector() {
             local selector=$1
             local log="$scratch/test.log"
-            if ! "$libtest" --exact "$selector" --test-threads=1 --color never >"$log" 2>&1; then
+            if ! "$libtest" --list --exact "$selector" --color never >"$log" 2>&1; then
+              printf 'FAIL'
+            elif ! grep -Fqx "$selector: test" "$log"; then
+              printf 'NO_TEST'
+            elif ! "$libtest" --exact "$selector" --test-threads=1 --color never >"$log" 2>&1; then
               printf 'FAIL'
             elif grep -Fqx 'running 0 tests' "$log"; then
               printf 'NO_TEST'
@@ -164,6 +169,8 @@ jobs:
             if [[ "$status" != PASS ]]; then
               failed=1
               grep -E '^(Error: (Conflict|Corrupt|Interrupted|InvalidInput|UnsafeFilesystem|UnsupportedVersion|Capacity|Io))$' "$scratch/test.log" || true
+              grep -Fx -e 'Error: reservation did not reach the capabilities barrier' \
+                -e 'Error: reservation did not reach the native ACK barrier' "$scratch/test.log" || true
               grep -Eo 'panicked at src/[A-Za-z0-9_./-]+[.]rs:[0-9]+:[0-9]+' "$scratch/test.log" || true
             fi
           done
