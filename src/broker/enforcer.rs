@@ -39,6 +39,7 @@ use std::{
 };
 use uuid::Uuid;
 
+pub(in crate::broker) use client::LegacyNamedImportPrepared;
 #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 pub(crate) use client::released_connect_fixture;
 pub use client::{EnforcedSlot, EnforcerClient};

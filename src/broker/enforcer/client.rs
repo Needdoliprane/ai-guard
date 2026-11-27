@@ -40,6 +40,7 @@ const MAX_LEGACY_RETAINED_STOPS: usize = 16_384;
 
 #[path = "client_legacy.rs"]
 mod legacy;
+pub(in crate::broker) use legacy::LegacyNamedImportPrepared;
 use legacy::LegacyTransport;
 pub(crate) use legacy::{
     LegacyNamedProspectiveBind, LegacyNamedProspectiveBindAck, LegacyNamedProspectiveFailure,
