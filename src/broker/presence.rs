@@ -3,9 +3,12 @@
 use crate::{
     broker::{enforcer::CancelGeneration, writer::WriterClient},
     broker_registry::{BrokerAuthorityV1, BrokerRuntimeKindV1},
-    control::session_control::{
-        LegacyConfirmedLaunchSpecV1, LegacyConfirmedPlanV1, LegacyNamedInitialDecisionV1,
-        LegacyNamedSupervisedAdmissionV1,
+    control::{
+        MutationResultV1,
+        session_control::{
+            LegacyConfirmedLaunchSpecV1, LegacyConfirmedPlanV1, LegacyNamedInitialDecisionV1,
+            LegacyNamedSupervisedAdmissionV1,
+        },
     },
     control_fs::{Directory, PrivateFile},
     redaction::Redactor,
@@ -402,6 +405,19 @@ impl PreparedPresence {
     ) -> Result<Option<LegacyNamedAdmissionOutcome>> {
         self.revalidate()?;
         legacy_named_admission::reconcile(self, writer, operation).await
+    }
+    /// Reconcile a reservation already frozen by a confirmed broker STOP.
+    #[allow(
+        dead_code,
+        reason = "the named broker STOP caller is a separate G04 integration"
+    )]
+    pub(crate) async fn cancel_legacy_named_reservation(
+        &self,
+        writer: &WriterClient,
+        operation: Uuid,
+    ) -> Result<MutationResultV1> {
+        self.revalidate()?;
+        legacy_named_admission::cancel_reserved(self, writer, operation).await
     }
     fn screen_material(&self) -> Result<()> {
         let source = serde_json::from_slice::<Value>(self.files[0].bytes())

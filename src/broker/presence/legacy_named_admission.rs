@@ -2,11 +2,12 @@
 //! This client has no Runner surface and never starts a runtime.
 use super::*;
 use crate::{
+    audit::legacy_session_prepare::LegacyNamedCancelReservationV1,
     broker::{
         journal::{JournalError, JournalScopeV1, canonical},
         presence::http::{Client, Limits},
     },
-    control::{AdmissionRefusalV1, RuntimeKindV1, session_control::*},
+    control::{AdmissionRefusalV1, RuntimeKindV1, WorkerStateV1, WorkerV1, session_control::*},
 };
 use reqwest::{Method, StatusCode};
 
@@ -255,6 +256,83 @@ pub(super) async fn reconcile(
             .map_err(|_| PresenceError::AdmissionOutcomeUnknown)?;
     }
     Ok(outcome)
+}
+
+pub(super) async fn cancel_reserved(
+    presence: &PreparedPresence,
+    writer: &WriterClient,
+    operation: Uuid,
+) -> Result<MutationResultV1> {
+    validate_writer_scope(presence, writer.scope())?;
+    let (request, reserved) = writer
+        .retained_legacy_named_cancellation(operation)
+        .await
+        .map_err(|_| PresenceError::AdmissionOutcomeUnknown)?;
+    let payload = serde_json::to_value(&request).map_err(|_| PresenceError::Protocol)?;
+    presence.screen(&payload)?;
+    let body = serde_json::to_vec(&request).map_err(|_| PresenceError::Protocol)?;
+    let client = Client::new(presence)?;
+    checked_identity(&client, presence).await?;
+    presence.revalidate()?;
+    let (status, bytes) = client
+        .send_session_bounded(
+            Method::POST,
+            &format!(
+                "/api/v1/control/session-confirmations/{}/admission/cancel-reserved",
+                request.binding_ref
+            ),
+            Some(body),
+            Limits {
+                request: LEGACY_NAMED_ADMISSION_REQUEST_BYTES as u64,
+                success: RESPONSE_BYTES,
+                error: RESPONSE_BYTES,
+            },
+        )
+        .await
+        .map_err(|_| PresenceError::AdmissionOutcomeUnknown)?;
+    if status != StatusCode::OK {
+        return Err(PresenceError::AdmissionOutcomeUnknown);
+    }
+    let value = crate::json::decode_unique(&bytes, 64)
+        .map_err(|_| PresenceError::AdmissionOutcomeUnknown)?;
+    presence
+        .screen(&value)
+        .map_err(|_| PresenceError::AdmissionOutcomeUnknown)?;
+    let result =
+        serde_json::from_value(value).map_err(|_| PresenceError::AdmissionOutcomeUnknown)?;
+    validate_cancel_receipt(&request, reserved, &result)?;
+    presence
+        .revalidate()
+        .map_err(|_| PresenceError::AdmissionOutcomeUnknown)?;
+    Ok(result)
+}
+
+fn validate_cancel_receipt(
+    request: &LegacyNamedCancelReservationV1,
+    mut reserved: WorkerV1,
+    result: &MutationResultV1,
+) -> Result<()> {
+    reserved.state = WorkerStateV1::Cancelled;
+    reserved.quota_held = false;
+    reserved.revision = reserved
+        .revision
+        .checked_add(1)
+        .ok_or(PresenceError::Protocol)?;
+    let receipt = &result.receipt;
+    let input_hash = request.input_hash().map_err(|_| PresenceError::Protocol)?;
+    if result.disposition.is_some()
+        || receipt.operation_id != request.mutation.operation_id
+        || receipt.worker_id.as_deref() != Some(reserved.worker_id.as_str())
+        || receipt.revision != Some(reserved.revision)
+        || receipt.input_hash != input_hash
+        || receipt.audit_seq <= request.admission.audit_seq
+        || crate::control::hash(&receipt.audit_hash).is_err()
+        || canonical(&reserved).map_err(named_write_error)?
+            != canonical(&result.worker).map_err(named_write_error)?
+    {
+        return Err(PresenceError::AdmissionOutcomeUnknown);
+    }
+    Ok(())
 }
 
 fn validate_writer_scope(presence: &PreparedPresence, scope: &JournalScopeV1) -> Result<()> {
