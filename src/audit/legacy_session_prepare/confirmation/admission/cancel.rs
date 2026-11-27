@@ -60,7 +60,6 @@ fn cancellation_admission(
         fact.version == 1
             && fact.binding_ref == binding_ref
             && fact.admission.audit_seq < stored.seq
-            && fact.grant.is_some()
             && stored.seq < before_seq,
     )?;
     Ok(fact)
@@ -74,7 +73,8 @@ fn require_cancel_predecessor(
 ) -> anyhow::Result<()> {
     let mutation = &request.mutation;
     conflict(
-        request.namespace == supervision::namespace(db)?
+        fact.grant.is_some()
+            && request.namespace == supervision::namespace(db)?
             && request.admission == fact.admission
             && mutation.worker_id == parent.worker_id
             && mutation.attempt_id == parent.attempt.attempt_id
@@ -162,7 +162,10 @@ impl Store {
             .checked_add(1)
             .context("audit sequence exhausted")?;
         let fact = cancellation_admission(&tx, request.binding_ref, before_seq)?;
-        anyhow::ensure!(fact.actor.matches_binding(broker), ControlFailure::NotFound);
+        anyhow::ensure!(
+            fact.actor.matches_binding(broker) && fact.grant.is_some(),
+            ControlFailure::NotFound
+        );
 
         let result = if let Some((stored, record)) =
             supervision::load_record(&tx, &request.mutation.operation_id)?
@@ -171,7 +174,10 @@ impl Store {
                 return Err(ControlFailure::Conflict.into());
             };
             let fact = cancellation_admission(&tx, cancel.request.binding_ref, stored.seq)?;
-            anyhow::ensure!(fact.actor.matches_binding(broker), ControlFailure::NotFound);
+            anyhow::ensure!(
+                fact.actor.matches_binding(broker) && fact.grant.is_some(),
+                ControlFailure::NotFound
+            );
             conflict(cancel.request.input_hash()? == input_hash)?;
             cancellation_result(&stored, &record)?
         } else {
