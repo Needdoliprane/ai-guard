@@ -1,0 +1,125 @@
+name: G09 ownership commit diagnostic Linux QA
+
+on:
+  push:
+    branches: [codex/g09-ownership-commit-diagnostic-linux-qa-20261127]
+    paths: [.github/workflows/g09-ownership-commit-diagnostic-linux-qa.yaml]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: g09-ownership-commit-diagnostic-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  diagnostic:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      SOURCE_SHA: 5c9aaf65273393c974e50e8505e9d29b0479876f
+      SOURCE_TREE: 540d3060a3092815b662ea2ad4123bc14494d705
+      CARGO_BUILD_JOBS: '1'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      CARGO_TERM_COLOR: never
+      RUST_MIN_STACK: '8388608'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          persist-credentials: false
+
+      - name: Build and run the two ownership commit diagnostics
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          selectors=(
+            runner::broker::executor::diagnostics::tests::ownership_commit_preserves_v1_and_reports_only_closed_details
+            runner::broker::executor::journal::tests::ownership_commit_reports_writer_reload_and_advance_without_http
+          )
+          report_not_run() {
+            local selector
+            for selector in "${selectors[@]}"; do
+              printf 'test=%s status=NOT_RUN\n' "$selector"
+            done
+          }
+
+          if [[ "$(git rev-parse HEAD 2>/dev/null)" != "$SOURCE_SHA" ||
+                "$(git rev-parse 'HEAD^{tree}' 2>/dev/null)" != "$SOURCE_TREE" ]]; then
+            printf 'source=FAIL\n'
+            report_not_run
+            exit 1
+          fi
+          printf 'source=PASS\nsource_sha=%s\nsource_tree=%s\n' "$SOURCE_SHA" "$SOURCE_TREE"
+          export AI_GUARD_BUILD_REVISION="$SOURCE_SHA"
+
+          scratch=$(mktemp -d /tmp/aig-g09-own.XXXXXX)
+          chmod 700 "$scratch"
+          trap 'rm -rf -- "$scratch"' EXIT
+          export TMPDIR="$scratch"
+          export CARGO_TARGET_DIR="$scratch/target"
+          build_json="$scratch/build.jsonl"
+
+          if ! cargo fetch --locked >"$scratch/fetch.log" 2>&1; then
+            printf 'fetch=FAIL\nbuild=NOT_RUN\n'
+            report_not_run
+            exit 1
+          fi
+          printf 'fetch=PASS\n'
+
+          if cargo test --locked --offline --lib --features mysql-storage --no-run \
+              --message-format=json >"$build_json" 2>"$scratch/build.stderr"; then
+            printf 'build=PASS\n'
+          else
+            build_rc=$?
+            printf 'build=FAIL\nbuild_exit=%s\n' "$build_rc"
+            jq -Rr 'fromjson? | objects
+              | select(.reason == "compiler-message" and .message.level == "error")
+              | .message.code.code // empty | select(test("^E[0-9]{4}$"))' \
+              "$build_json" 2>/dev/null | sort -u | awk 'NR <= 12 {print "compiler_error=" $0}' || true
+            report_not_run
+            exit 1
+          fi
+
+          if ! libtest=$(jq -ers '[.[] | select(.reason == "compiler-artifact"
+              and .target.name == "agentsandbox" and .target.kind == ["lib"]
+              and .profile.test == true and (.executable | type) == "string") | .executable]
+              | unique | select(length == 1) | .[0]' "$build_json" 2>/dev/null) ||
+              [[ "$libtest" != "$CARGO_TARGET_DIR"/debug/deps/agentsandbox-* ||
+                 ! -f "$libtest" || ! -x "$libtest" || -L "$libtest" ]]; then
+            printf 'libtest=FAIL\n'
+            report_not_run
+            exit 1
+          fi
+          if ! checksum=$(sha256sum -- "$libtest" 2>/dev/null) ||
+              [[ ! ${checksum%% *} =~ ^[0-9a-f]{64}$ ]]; then
+            printf 'libtest=FAIL\n'
+            report_not_run
+            exit 1
+          fi
+          printf 'libtest=PASS\nlibtest_sha256=%s\n' "${checksum%% *}"
+
+          failures=0
+          for selector in "${selectors[@]}"; do
+            log="$scratch/test.log"
+            test_exit=0
+            "$libtest" --exact "$selector" --test-threads=1 --color never >"$log" 2>&1 || test_exit=$?
+            if [[ "$test_exit" == 0 &&
+                  "$(grep -Fxc 'running 1 test' "$log" || true)" == 1 &&
+                  "$(grep -Fxc "test $selector ... ok" "$log" || true)" == 1 &&
+                  "$(grep -Ec '^test result: ok\. 1 passed; 0 failed; 0 ignored;' "$log" || true)" == 1 ]]; then
+              printf 'test=%s status=PASS\ntest_exit=0\n' "$selector"
+            else
+              printf 'test=%s status=FAIL\ntest_exit=%s\n' "$selector" "$test_exit"
+              grep -E '^(Error: (Conflict|Corrupt|Interrupted|InvalidInput|UnsafeFilesystem|UnsupportedVersion|Capacity|Io))$' "$log" |
+                sort -u | awk 'NR <= 8' || true
+              grep -Eo 'panicked at src/runner/broker/executor/[A-Za-z0-9_./-]{1,120}[.]rs:[0-9]{1,7}:[0-9]{1,5}' "$log" |
+                sort -u | awk 'NR <= 8' || true
+              failures=$((failures + 1))
+            fi
+          done
+          printf 'oracle_count=%s\noracle_failures=%s\n' "${#selectors[@]}" "$failures"
+          [[ "$failures" == 0 ]]
