@@ -1560,7 +1560,7 @@ mod tests {
             let pending_arm = writer.load(operation).await?.unwrap();
             assert_eq!(recorded.birth(), pending_arm.head());
             let submitted = recorded.request().clone();
-            let stop_ipc = if record_claim {
+            let mut stop_ipc = if record_claim {
                 None
             } else {
                 let fixture = LegacyIpcFixture::start(1, 0).await;
