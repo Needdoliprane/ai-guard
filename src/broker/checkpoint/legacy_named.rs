@@ -253,7 +253,7 @@ impl LegacyNamedAdmissionCheckpoint {
             ensure(equal(previous, &repeated)?)?;
             return Ok(self);
         }
-        ensure(self.import_arm.is_none())?;
+        ensure(self.import_arm.is_none() && owned.observation.process.finished_at.is_none())?;
         creation.preparation = HelperPreparationV1::new(
             preparation.policy().clone(),
             preparation.permission().clone(),
@@ -1464,6 +1464,15 @@ mod tests {
         assert!(matches!(
             writer
                 .acknowledge_legacy_named_import_creation(&plan, &digest, &authority, running)
+                .await,
+            Err(JournalError::Conflict)
+        ));
+        let mut finished = owned.clone();
+        finished.observation.process.finished_at =
+            Some(finished.observation.observed_at.fixed_offset());
+        assert!(matches!(
+            writer
+                .acknowledge_legacy_named_import_creation(&plan, &digest, &authority, finished)
                 .await,
             Err(JournalError::Conflict)
         ));
