@@ -173,6 +173,10 @@ fn registry(
     }
     private_file(&config.join("runner.token"), RUNNER.as_bytes())?;
     let options = intent.initial_options().run_options();
+    let runtime_program = options
+        .runtime_program
+        .as_ref()
+        .context("preclaim fixture requires the retained runtime program")?;
     let path = config.join("registry.json");
     private_file(
         &path,
@@ -180,9 +184,9 @@ fn registry(
             "version":1,"installation_id":scope.installation_id(),"root":root,"max_enforcer_slots":8,
             "profiles":[{"id":scope.profile_id(),"gateway":scope.gateway_origin(),"tenant_id":scope.tenant_id(),
                 "control_namespace_uuid":scope.control_namespace_uuid(),"config_dir":config,
-                "runner_token_file":config.join("runner.token"),"runtime":"docker","runtime_program":INVOCATION_DATA_PROGRAM,
+                "runner_token_file":config.join("runner.token"),"runtime":"docker","runtime_program":runtime_program,
                 "runtime_endpoint":options.runtime_endpoint,"image":options.image,"policy_profile":options.profile,
-                "network":options.network,"allow_rootful_runtime":false,"max_timeout_seconds":600,
+                "network":options.network,"allow_rootful_runtime":false,"max_timeout_seconds":options.timeout,
                 "allow_capture_output":false,"managed_clients":false,"manual_credential_file":options.secret_env_file,
                 "source_roots":[filesystem_roots.join("sources")],"export_roots":[filesystem_roots.join("exports")]}]
         }))?,
