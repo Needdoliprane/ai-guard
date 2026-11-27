@@ -40,8 +40,8 @@ const MAX_LEGACY_RETAINED_STOPS: usize = 16_384;
 
 #[path = "client_legacy.rs"]
 mod legacy;
-pub(crate) use legacy::LegacyNamedProspectiveFailure;
 use legacy::LegacyTransport;
+pub(crate) use legacy::{LegacyNamedProspectiveBind, LegacyNamedProspectiveFailure};
 
 #[derive(Clone)]
 pub struct EnforcerClient(Arc<Client>);
@@ -110,6 +110,7 @@ pub(crate) struct ProspectiveArmExchange {
     prospective_hash: String,
     generation: u64,
     original_exchange_nonce: Option<Uuid>,
+    legacy_named_reservation: Option<legacy::LegacyNamedProspectiveReservation>,
 }
 impl ProspectiveArmExchange {
     pub(crate) fn permits_original(&self) -> bool {
@@ -701,6 +702,7 @@ impl EnforcerFullClientV3 {
             prospective_hash: retained.digest.clone(),
             generation: expected,
             original_exchange_nonce,
+            legacy_named_reservation: None,
         })
     }
     pub(crate) async fn bind_prospective(
@@ -709,6 +711,9 @@ impl EnforcerFullClientV3 {
         generation: CancelGeneration,
         exchange: ProspectiveArmExchange,
     ) -> EnforcerResult<EnforcedSlot> {
+        if exchange.legacy_named_reservation.is_some() {
+            return Err(EnforcerError::Unauthorized);
+        }
         let observe_only = !exchange.permits_original();
         {
             let values = self

@@ -1,5 +1,12 @@
 //! Legacy prospective process custody. No Full3 ledger or retirement authority.
 use super::*;
+use crate::{
+    broker::{
+        journal::{AcceptedJobV1, canonical},
+        lifecycle::LocalCommandRequestV1,
+    },
+    control::{ArmResultV1, session_control::LegacyNamedImportArmRequestV1},
+};
 
 /// Result of one exact native attempt. A native refusal can report a site
 /// after installation. Only BeforeSend proves the business frame was not sent.
@@ -34,9 +41,48 @@ pub(crate) struct LegacyNamedProspectiveReservation {
     expected: u64,
 }
 
+#[allow(
+    dead_code,
+    reason = "the named Legacy service caller is composed separately"
+)]
+pub(crate) enum LegacyNamedProspectiveBind {
+    Bound(Box<LegacyNamedProspectiveBindAck>),
+    Replayed,
+}
+
+/// Exact native ACK data. This never provides a LocalSlot or a claim right.
+#[allow(
+    dead_code,
+    reason = "the named Legacy service caller is composed separately"
+)]
+pub(crate) struct LegacyNamedProspectiveBindAck {
+    registration: RegistrationV1,
+    status: EnforcerSlotStatusV1,
+    generation: CancelGeneration,
+}
+
+#[allow(
+    dead_code,
+    reason = "the named Legacy service caller is composed separately"
+)]
+impl LegacyNamedProspectiveBindAck {
+    pub(crate) fn registration(&self) -> &RegistrationV1 {
+        &self.registration
+    }
+
+    pub(crate) fn status(&self) -> &EnforcerSlotStatusV1 {
+        &self.status
+    }
+
+    pub(crate) fn generation(&self) -> (&CancelGeneration, u64) {
+        (&self.generation, self.status.generation)
+    }
+}
+
 struct LegacyProspectiveEntry {
     retained: Arc<LocalProspective>,
     can_remove_before_send: bool,
+    named_bind_ack: Option<EnforcerSlotStatusV1>,
 }
 
 impl LegacyProspectiveEntry {
@@ -296,6 +342,7 @@ impl EnforcerClient {
                     LegacyProspectiveEntry {
                         retained: Arc::clone(&retained),
                         can_remove_before_send: named_expected.is_some(),
+                        named_bind_ack: None,
                     },
                 );
                 retained
@@ -498,6 +545,13 @@ impl EnforcerClient {
             prospective_hash: retained.digest.clone(),
             generation: expected,
             original_exchange_nonce,
+            legacy_named_reservation: named_expected.map(|expected| {
+                LegacyNamedProspectiveReservation {
+                    client: self.clone(),
+                    retained: Arc::clone(&retained),
+                    expected,
+                }
+            }),
         };
         if named_expected.is_some() {
             return generation
@@ -512,12 +566,144 @@ impl EnforcerClient {
         }
         Ok(exchange())
     }
+
+    /// Bind one original named exchange to the exact Writer-acknowledged
+    /// Arm. The native ACK remains data for the separate durable STOP path.
+    #[allow(
+        dead_code,
+        reason = "the named Legacy service caller is composed separately"
+    )]
+    pub(crate) async fn legacy_bind_named_prospective(
+        &self,
+        job: &AcceptedJobV1,
+        arm_ack: &ArmResultV1,
+        exchange: ProspectiveArmExchange,
+    ) -> Result<LegacyNamedProspectiveBind, LegacyNamedProspectiveFailure> {
+        use LegacyNamedProspectiveFailure::{BeforeSend, OutcomeUnknown, StaleAcknowledged};
+
+        let owner = exchange
+            .legacy_named_reservation
+            .as_ref()
+            .ok_or(BeforeSend(EnforcerError::Unauthorized))?;
+        let original_nonce = exchange
+            .original_exchange_nonce
+            .ok_or(BeforeSend(EnforcerError::NotReady))?;
+        let expected = owner.expected;
+        if !Arc::ptr_eq(&self.0, &owner.client.0)
+            || exchange.epoch != self.0.endpoint.epoch()
+            || exchange.arm_id != owner.retained.target.arm_id()
+            || exchange.prospective_hash != owner.retained.digest
+            || exchange.generation != expected
+        {
+            return Err(BeforeSend(EnforcerError::Conflict));
+        }
+        if arm_ack.replayed {
+            return Err(BeforeSend(EnforcerError::NotReady));
+        }
+        if self.0.failed.load(Ordering::SeqCst) {
+            return Err(BeforeSend(EnforcerError::Unhealthy));
+        }
+        let generation = &owner.retained.generation;
+        generation
+            .with_current_generation(expected, || ())
+            .map_err(BeforeSend)?;
+        let retained = self
+            .retained_prospective(&owner.retained.target, generation)
+            .map_err(BeforeSend)?;
+        if !Arc::ptr_eq(&retained, &owner.retained) || retained.bound.load(Ordering::SeqCst) {
+            return Err(BeforeSend(EnforcerError::Conflict));
+        }
+        let registration =
+            registration_for_named_bind(job, arm_ack, &retained.target).map_err(BeforeSend)?;
+        let digest = registration.digest().map_err(BeforeSend)?;
+        let reservation = retained
+            .reservation
+            .lock()
+            .map_err(|_| BeforeSend(EnforcerError::Unhealthy))?
+            .clone()
+            .ok_or(BeforeSend(EnforcerError::NotReady))?;
+        reservation
+            .validate_for(&retained.target, exchange.epoch, expected)
+            .map_err(BeforeSend)?;
+
+        let reply = self
+            .0
+            .request_in_generation(
+                Request::BindProspective {
+                    reservation,
+                    registration: Box::new(registration.clone()),
+                    generation: expected,
+                    observe_only: false,
+                    original_exchange_nonce: Some(original_nonce),
+                },
+                REGISTER_TIMEOUT,
+                Some((generation, expected)),
+            )
+            .await?;
+        let (status, replayed) = match reply {
+            Response::Registered { value, replayed } => (*value, replayed),
+            // The native bind can install its actor before reporting a
+            // readiness error. Only the correlated Registered ACK settles it.
+            reply => return Err(OutcomeUnknown(response_error(reply))),
+        };
+        if status.arm_id != registration.arm_id()
+            || status.registration_hash != digest
+            || status.generation < expected
+        {
+            return Err(OutcomeUnknown(EnforcerError::Conflict));
+        }
+        // Preserve the correlated ACK even if invalidation or replay prevents
+        // a handoff. This map has no generic LocalSlot or recovery task.
+        {
+            let mut entries = self
+                .legacy_transport()
+                .map_err(OutcomeUnknown)?
+                .prospective
+                .lock()
+                .map_err(|_| OutcomeUnknown(EnforcerError::Unhealthy))?;
+            let entry = entries
+                .get_mut(registration.arm_id())
+                .ok_or(OutcomeUnknown(EnforcerError::Conflict))?;
+            if !Arc::ptr_eq(&entry.retained, &retained) || entry.named_bind_ack.is_some() {
+                return Err(OutcomeUnknown(EnforcerError::Conflict));
+            }
+            entry.named_bind_ack = Some(status.clone());
+            entry.retained.bound.store(true, Ordering::SeqCst);
+        }
+        generation
+            .with_current_generation(expected, || {
+                if status.generation != expected {
+                    return Err(StaleAcknowledged(EnforcerError::NotReady));
+                }
+                if self.0.failed.load(Ordering::SeqCst) {
+                    return Err(StaleAcknowledged(EnforcerError::Unhealthy));
+                }
+                if replayed {
+                    return Ok(LegacyNamedProspectiveBind::Replayed);
+                }
+                if status.phase != SlotPhaseV1::Ready || status.prepared_once {
+                    return Err(StaleAcknowledged(EnforcerError::NotReady));
+                }
+                Ok(LegacyNamedProspectiveBind::Bound(Box::new(
+                    LegacyNamedProspectiveBindAck {
+                        registration,
+                        status,
+                        generation: generation.clone(),
+                    },
+                )))
+            })
+            .map_err(StaleAcknowledged)?
+    }
+
     pub(crate) async fn legacy_bind_prospective(
         &self,
         registration: RegistrationV1,
         generation: CancelGeneration,
         exchange: ProspectiveArmExchange,
     ) -> EnforcerResult<EnforcedSlot> {
+        if exchange.legacy_named_reservation.is_some() {
+            return Err(EnforcerError::Unauthorized);
+        }
         let observe_only = !exchange.permits_original();
         let retained = self.retained_prospective(&registration.prospective()?, &generation)?;
         if !observe_only && self.0.failed.load(Ordering::SeqCst) {
@@ -606,6 +792,78 @@ impl EnforcerClient {
         }
     }
 }
+
+fn registration_for_named_bind(
+    job: &AcceptedJobV1,
+    arm_ack: &ArmResultV1,
+    target: &ProspectiveRegistrationV1,
+) -> EnforcerResult<RegistrationV1> {
+    let checkpoint = job.broker_checkpoint_v3().ok_or(EnforcerError::Conflict)?;
+    if checkpoint
+        .commands()
+        .iter()
+        .any(|command| matches!(command.request(), LocalCommandRequestV1::CancelRequested))
+    {
+        return Err(EnforcerError::NotReady);
+    }
+    let named = checkpoint
+        .broker()
+        .supervision()
+        .legacy_named_admission()
+        .ok_or(EnforcerError::Conflict)?;
+    let plan = named.plan();
+    let request = named.import_arm_request().ok_or(EnforcerError::Conflict)?;
+    let receipt = named
+        .import_arm()
+        .and_then(|arm| arm.receipt())
+        .ok_or(EnforcerError::Conflict)?;
+    let owned = named
+        .import_creation()
+        .and_then(|creation| creation.owned())
+        .ok_or(EnforcerError::Conflict)?;
+    let worker = named
+        .admission_result()
+        .and_then(|result| result.worker.as_ref())
+        .ok_or(EnforcerError::Conflict)?;
+    let scope = job.scope();
+    let namespace = scope.control_namespace_uuid().to_string();
+    let attempt =
+        Uuid::parse_str(&worker.attempt.attempt_id).map_err(|_| EnforcerError::InvalidInput)?;
+    let exact_id = LegacyNamedImportArmRequestV1::operation_id(plan.binding_ref, attempt);
+    let invalid = |_| EnforcerError::InvalidInput;
+    let arm = canonical(&request.arm).map_err(invalid)?;
+    if job.operation_id() != plan.operation_id
+        || job.intent().legacy_named_plan() != Some(plan)
+        || plan.broker_profile_id != scope.profile_id()
+        || request.binding_ref != plan.binding_ref
+        || request.namespace != namespace
+        || receipt.control_namespace_uuid != namespace
+        || request.arm.operation_id != exact_id
+        || request.arm.worker_id != worker.worker_id
+        || request.arm.attempt_id != worker.attempt.attempt_id
+        || target.tenant_id() != scope.tenant_id()
+        || target.control_origin_hash()
+            != hex::encode(Sha256::digest(scope.gateway_origin().as_bytes()))
+        || arm != canonical(target.arm()).map_err(invalid)?
+        || arm != canonical(&arm_ack.arm).map_err(invalid)?
+        || canonical(receipt).map_err(invalid)? != canonical(&arm_ack.receipt).map_err(invalid)?
+        || canonical(owned).map_err(invalid)? != canonical(target.owned()).map_err(invalid)?
+    {
+        return Err(EnforcerError::Conflict);
+    }
+    named
+        .require_import_creation_binding(target.authority())
+        .map_err(|_| EnforcerError::Conflict)?;
+    RegistrationV1::new(
+        target.control_origin_hash().into(),
+        target.tenant_id().into(),
+        request.arm,
+        receipt.clone(),
+        target.authority().clone(),
+        target.owned().clone(),
+    )
+}
+
 impl Client {
     pub(super) fn legacy_observe_only(
         &self,
@@ -741,15 +999,13 @@ mod tests;
 mod reservation_motif_tests;
 
 #[cfg(test)]
-#[tokio::test]
-async fn named_reservation_retains_stale_ack_without_issuing_stop() -> anyhow::Result<()> {
-    use super::super::server::test_support::{LegacyIpcFixture, registration};
-
-    let fixture = LegacyIpcFixture::start(1, 0).await;
+async fn connect_named_legacy_fixture(
+    fixture: &super::super::server::test_support::LegacyIpcFixture,
+) -> EnforcerResult<EnforcerClient> {
     let root = fixture.root();
-    let client = EnforcerClient::connect(
+    EnforcerClient::connect(
         root,
-        &std::env::current_exe()?,
+        &std::env::current_exe().map_err(|_| EnforcerError::Unavailable)?,
         load_endpoint(root)?.ok_or(EnforcerError::NotReady)?,
         capability(root, false)?,
         1,
@@ -760,7 +1016,17 @@ async fn named_reservation_retains_stale_ack_without_issuing_stop() -> anyhow::R
     .map_err(|failure| match failure {
         ConnectFailure::Absent => EnforcerError::Unavailable,
         ConnectFailure::Other(error) => error,
-    })?;
+    })
+}
+
+#[cfg(test)]
+#[tokio::test]
+async fn named_reservation_retains_stale_ack_without_issuing_stop() -> anyhow::Result<()> {
+    use super::super::server::test_support::{LegacyIpcFixture, registration};
+
+    let fixture = LegacyIpcFixture::start(1, 0).await;
+    let root = fixture.root();
+    let client = connect_named_legacy_fixture(&fixture).await?;
     let target = registration(root.path()).prospective()?;
     let generation = CancelGeneration::new();
     let expected = generation.current();
@@ -848,5 +1114,50 @@ async fn named_reservation_retains_stale_ack_without_issuing_stop() -> anyhow::R
         ))
     );
     assert!(original_native_exchange);
+    Ok(())
+}
+
+#[cfg(test)]
+#[tokio::test]
+async fn named_exchange_never_enters_the_historical_bind() -> anyhow::Result<()> {
+    use super::super::server::test_support::{LegacyIpcFixture, registration};
+
+    let fixture = LegacyIpcFixture::start(1, 0).await;
+    let client = connect_named_legacy_fixture(&fixture).await?;
+    let observation = async {
+        let registration = registration(fixture.root().path());
+        let generation = CancelGeneration::new();
+        let reserved = client
+            .legacy_reserve_named_prospective(
+                registration.prospective()?,
+                &generation,
+                generation.current(),
+            )
+            .await
+            .map_err(LegacyNamedProspectiveFailure::code)?;
+        let exchange = client
+            .legacy_begin_named_prospective_arm_exchange(reserved)
+            .await
+            .map_err(LegacyNamedProspectiveFailure::code)?;
+        anyhow::ensure!(
+            exchange.permits_original(),
+            "the test requires an original exchange"
+        );
+        let refusal = client
+            .legacy_bind_prospective(registration, generation, exchange)
+            .await
+            .err();
+        let slots = client
+            .0
+            .slots
+            .lock()
+            .map_err(|_| EnforcerError::Unhealthy)?
+            .len();
+        Ok::<_, anyhow::Error>((refusal, slots))
+    }
+    .await;
+    drop(client);
+    fixture.finish().await;
+    assert_eq!(observation?, (Some(EnforcerError::Unauthorized), 0));
     Ok(())
 }

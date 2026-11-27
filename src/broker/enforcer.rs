@@ -31,15 +31,15 @@ use std::{
 };
 use uuid::Uuid;
 
-#[allow(
-    unused_imports,
-    reason = "the named Legacy service caller is composed separately"
-)]
-pub(crate) use client::LegacyNamedProspectiveFailure;
 #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 pub(crate) use client::released_connect_fixture;
 pub use client::{EnforcedSlot, EnforcerClient};
 pub(crate) use client::{EnforcerFullClientV3, FreshEnforcerOwner, ProspectiveArmExchange};
+#[allow(
+    unused_imports,
+    reason = "the named Legacy service caller is composed separately"
+)]
+pub(crate) use client::{LegacyNamedProspectiveBind, LegacyNamedProspectiveFailure};
 pub(crate) use diagnostics::EnforcerStageFailure;
 pub(crate) use execution::ExecutionEnforcerV1;
 pub use recovery::{
