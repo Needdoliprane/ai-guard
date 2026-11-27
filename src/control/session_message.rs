@@ -359,7 +359,7 @@ impl StdioConversation {
     /// Read the next non-empty line within the deadline. Harness noise lines
     /// that are not JSON objects are skipped by the caller, not here.
     pub fn read_line(&mut self, deadline: std::time::Duration) -> std::io::Result<String> {
-        use std::sync::mpsc::RecvTimeoutError;
+        use std::{io, sync::mpsc::RecvTimeoutError};
 
         self.lines
             .recv_timeout(deadline)
