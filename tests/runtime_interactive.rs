@@ -82,7 +82,7 @@ use std::{
     process::{Command, ExitStatus, Stdio},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         mpsc,
     },
     thread,
@@ -361,7 +361,7 @@ struct FloodWriter {
     running: Arc<AtomicBool>,
     join: Option<thread::JoinHandle<Result<()>>>,
     saturated: mpsc::Receiver<Result<()>>,
-    progress: mpsc::Receiver<()>,
+    written: Arc<AtomicUsize>,
 }
 
 impl FloodWriter {
@@ -385,8 +385,9 @@ impl FloodWriter {
         let thread_stop = stop.clone();
         let running = Arc::new(AtomicBool::new(true));
         let thread_running = running.clone();
+        let written = Arc::new(AtomicUsize::new(0));
+        let thread_written = written.clone();
         let (ready_tx, saturated) = mpsc::sync_channel(1);
-        let (progress_tx, progress) = mpsc::sync_channel(1);
         let join = thread::spawn(move || -> Result<()> {
             let chunk = [b'F'; 4096];
             let mut total = 0;
@@ -395,7 +396,7 @@ impl FloodWriter {
                     Ok(0) => thread::yield_now(),
                     Ok(count) => {
                         total += count;
-                        let _ = progress_tx.try_send(());
+                        thread_written.store(total, Ordering::Release);
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                         let _ = ready_tx.try_send(Ok(()));
@@ -418,7 +419,7 @@ impl FloodWriter {
             running,
             join: Some(join),
             saturated,
-            progress,
+            written,
         })
     }
 
@@ -437,20 +438,8 @@ impl FloodWriter {
         self.running.load(Ordering::Acquire)
     }
 
-    fn clear_progress(&self) {
-        while self.progress.try_recv().is_ok() {}
-    }
-
-    fn wait_for_progress_until(&self, deadline: Instant) -> Result<()> {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        ensure!(
-            !remaining.is_zero(),
-            "PTY flood progress exceeded its overall deadline"
-        );
-        self.progress
-            .recv_timeout(remaining)
-            .context("flood producer did not resume after PTY output was read")?;
-        Ok(())
+    fn written_bytes(&self) -> usize {
+        self.written.load(Ordering::Acquire)
     }
 
     fn stop_and_join(&mut self) -> Result<()> {
@@ -1055,7 +1044,6 @@ fn pty_pump_services_control_during_flood_and_caps_capture() -> Result<()> {
         PTY_FLOOD_TEST_READ_BUDGET,
         PTY_FLOOD_TEST_CAPTURE_LIMIT,
     )?;
-    flood.clear_progress();
     let progress_deadline = Instant::now() + Duration::from_secs(10);
     let (pump_tx, pump_rx) = mpsc::sync_channel(1);
     let pump_thread = thread::spawn(move || {
@@ -1082,7 +1070,6 @@ fn pty_pump_services_control_during_flood_and_caps_capture() -> Result<()> {
             first_result?,
             "PTY flood was not consumed by the initial pump"
         );
-        flood.wait_for_progress_until(progress_deadline)?;
         ensure!(
             flood.is_running(),
             "producer stopped before pump processed the control notification"
@@ -1097,20 +1084,25 @@ fn pty_pump_services_control_during_flood_and_caps_capture() -> Result<()> {
             session.captured.len() <= PTY_FLOOD_TEST_READ_BUDGET,
             "one pump call exceeded its fixed PTY read budget"
         );
-        for _ in 0..16_384 {
-            if session.overflow {
+        let written_before_drain = flood.written_bytes();
+        // A PTY can need several budgeted reads before the writer has space again.
+        while !session.overflow || flood.written_bytes() == written_before_drain {
+            let remaining = progress_deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
                 break;
             }
-            flood.clear_progress();
             let before = session.captured.len();
-            session.pump(Duration::ZERO)?;
-            flood.wait_for_progress_until(progress_deadline)?;
+            session.pump(remaining.min(Duration::from_millis(10)))?;
             ensure!(
                 session.captured.len().saturating_sub(before) <= PTY_FLOOD_TEST_READ_BUDGET,
                 "a pump call exceeded its fixed PTY read budget"
             );
             thread::yield_now();
         }
+        ensure!(
+            flood.written_bytes() > written_before_drain,
+            "flood producer did not resume after PTY output was read"
+        );
         ensure!(
             session.overflow,
             "sustained PTY output did not exercise the capture cap (captured_bytes={}, producer_running={})",
@@ -1130,7 +1122,7 @@ fn pty_pump_services_control_during_flood_and_caps_capture() -> Result<()> {
     flood.stop_and_join()?;
     verification?;
     eprintln!(
-        "PASS PTY flood regression: pump returned and parsed control status under active flood; read budget and capture cap held"
+        "PASS PTY flood regression: pump parsed control during active output; writer resumed and both read and capture limits held"
     );
     Ok(())
 }
