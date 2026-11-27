@@ -1341,8 +1341,11 @@ impl Client {
             Request::ProspectiveCapabilities {}
             | Request::NegotiateReservationMotif {}
             | Request::ReserveProspective { .. }
+            | Request::ReserveNamedProspective { .. }
             | Request::BeginProspectiveArmExchange { .. }
+            | Request::BeginNamedProspectiveArmExchange { .. }
             | Request::BindProspective { .. }
+            | Request::BindNamedProspective { .. }
             | Request::CancelProspective { .. }
             | Request::BeginRecovery {} => return Err(EnforcerError::Unauthorized),
             Request::Status {} => FullCommand::Status {},
@@ -2311,9 +2314,16 @@ impl Client {
         }
         let request = self.adapt_legacy_request(request).map_err(BeforeSend)?;
         #[cfg(test)]
-        let is_bind = matches!(&request, Request::BindProspective { .. });
+        let is_bind = matches!(
+            &request,
+            Request::BindProspective { .. } | Request::BindNamedProspective { .. }
+        );
         #[cfg(test)]
-        let is_begin = matches!(&request, Request::BeginProspectiveArmExchange { .. });
+        let is_begin = matches!(
+            &request,
+            Request::BeginProspectiveArmExchange { .. }
+                | Request::BeginNamedProspectiveArmExchange { .. }
+        );
         #[cfg(test)]
         if is_bind
             && self.legacy.as_ref().is_some_and(|legacy| {
