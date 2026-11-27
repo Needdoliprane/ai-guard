@@ -325,10 +325,13 @@ fn assert_installs_once_and_admits(format: u32) {
     let after = maintenance_source_state(&adopted.base);
     assert_eq!(after.format, i64::from(format));
     assert_eq!(after.head, (receipts[1].seq, receipts[1].hash.clone()));
-    // The only schema additions are the preparation tables and their primary
-    // key autoindexes; the format, anchor and every prior object stay.
+    // SessionPrepareV1 installs the preparation and conversation tables and
+    // their primary key autoindexes. Preserve the format and prior objects.
     let mut expected_schema = before.schema.clone();
-    for (_, name, sql) in crate::audit::session_prepare::SCHEMA {
+    for (_, name, sql) in crate::audit::session_prepare::SCHEMA
+        .into_iter()
+        .chain(crate::audit::session_message::SCHEMA)
+    {
         expected_schema.push(("table".into(), name.into(), name.into(), Some(sql.into())));
         expected_schema.push((
             "index".into(),
