@@ -1105,7 +1105,7 @@ mod tests;
 mod reservation_motif_tests;
 
 #[cfg(test)]
-async fn connect_named_legacy_fixture(
+pub(super) async fn connect_named_legacy_fixture(
     fixture: &super::super::server::test_support::LegacyIpcFixture,
 ) -> EnforcerResult<EnforcerClient> {
     let root = fixture.root();

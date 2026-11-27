@@ -86,7 +86,7 @@ pub(super) fn observe_state(state: &Arc<State>) {
         Arc::downgrade(state),
     );
 }
-pub(in crate::broker::enforcer) struct LegacyIpcFixture {
+pub(crate) struct LegacyIpcFixture {
     files: Option<tempfile::TempDir>,
     root: Directory,
     native: Option<Arc<State>>,
@@ -94,7 +94,7 @@ pub(in crate::broker::enforcer) struct LegacyIpcFixture {
     launch_nonce: Uuid,
 }
 impl LegacyIpcFixture {
-    pub(in crate::broker::enforcer) async fn start(s: u32, w: u32) -> Self {
+    pub(crate) async fn start(s: u32, w: u32) -> Self {
         let tmp = if cfg!(target_os = "macos") {
             "/private/tmp"
         } else {
@@ -243,7 +243,7 @@ impl LegacyIpcFixture {
         let _key = actor.fixture_exit_key();
     }
 
-    pub(in crate::broker::enforcer) async fn finish(mut self) {
+    pub(crate) async fn finish(mut self) {
         let native = self.native.as_ref().unwrap();
         {
             let _admission = native.admission.lock().unwrap();

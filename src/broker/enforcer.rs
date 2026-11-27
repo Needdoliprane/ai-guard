@@ -39,6 +39,10 @@ use std::{
 };
 use uuid::Uuid;
 
+#[cfg(test)]
+pub(crate) use client::CancelGeneration;
+#[cfg(test)]
+pub(crate) use client::connect_named_legacy_fixture;
 #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 pub(crate) use client::released_connect_fixture;
 pub use client::{EnforcedSlot, EnforcerClient};
@@ -61,6 +65,8 @@ pub use retirement::{
     run_internal_full3_existing, run_internal_full3_existing_with_budget, run_internal_full3_fresh,
     run_internal_full3_fresh_with_budget,
 };
+#[cfg(test)]
+pub(crate) use server::test_support::LegacyIpcFixture;
 pub use server::{
     run_internal_enforcer, run_internal_enforcer_with_budget, run_internal_legacy_fresh,
 };

@@ -753,6 +753,10 @@ pub(crate) fn validate_legacy_named_admission_receipt(
 mod tests {
     use super::*;
     use crate::{
+        broker::enforcer::{
+            CancelGeneration, LegacyIpcFixture, NamedImportArmBirthV1, ProspectiveRegistrationV1,
+            connect_named_legacy_fixture,
+        },
         broker::{
             journal::{ControlSecrets, FsExclusions, Journal, JournalLimitsV1, ReserveResult},
             lifecycle::BrokerCheckpointV3,
@@ -764,6 +768,7 @@ mod tests {
         runner::{RunOptions, broker::PreparedSubmission},
     };
     use serde_json::json;
+    use sha2::{Digest, Sha256};
     use std::{os::unix::fs::PermissionsExt, time::Duration};
 
     #[tokio::test]
@@ -1554,6 +1559,29 @@ mod tests {
             let pending_arm = writer.load(operation).await?.unwrap();
             assert_eq!(recorded.birth(), pending_arm.head());
             let submitted = recorded.request().clone();
+            let stop_ipc = if record_claim {
+                None
+            } else {
+                let fixture = LegacyIpcFixture::start(1, 0).await;
+                let client = connect_named_legacy_fixture(&fixture).await?;
+                let target = ProspectiveRegistrationV1::new(
+                    hex::encode(Sha256::digest(scope.gateway_origin().as_bytes())),
+                    scope.tenant_id().to_owned(),
+                    submitted.arm.clone(),
+                    authority.clone(),
+                    owned.clone(),
+                )?;
+                let birth = NamedImportArmBirthV1::from_plan(&scope, &plan, recorded.birth())?;
+                let generation = CancelGeneration::new();
+                let expected = generation.current();
+                let reserved = client
+                    .legacy_reserve_named_prospective(target, &birth, &generation, expected)
+                    .await
+                    .map_err(|failure| {
+                        anyhow::anyhow!("named IPC reservation failed: {failure:?}")
+                    })?;
+                Some((fixture, client, Some(reserved)))
+            };
             if record_claim {
                 assert!(matches!(
                     writer
@@ -1668,6 +1696,9 @@ mod tests {
             assert!(pause.is_paused());
             drop(pause);
             let stop = cancellation.await.map_err(|failure| failure.error())?;
+            if let Some((_, client, _)) = &stop_ipc {
+                client.deliver_named_import_stop(&stop).await?;
+            }
             assert!(stop.incomplete());
             assert!(stop.named_reservation().is_none());
             let named_import = stop.named_import().expect("pending Arm predates STOP");
@@ -1705,6 +1736,19 @@ mod tests {
                 .unwrap();
             assert!(equal(&retained, &submitted)?);
             assert!(receipt.is_none());
+            if let Some((_, client, reserved)) = stop_ipc.as_mut() {
+                let reserved = reserved.take().expect("one exact named reservation");
+                let failure = match client
+                    .legacy_begin_named_prospective_arm_exchange(reserved)
+                    .await
+                {
+                    Err(failure) => failure,
+                    Ok(_) => panic!("STOP latches the exact pending actor before Arm ACK"),
+                };
+                assert!(
+                    matches!(failure, crate::broker::enforcer::LegacyNamedProspectiveFailure::Refused(refusal) if refusal.code() == crate::broker::enforcer::EnforcerError::NotReady)
+                );
+            }
             let stopped = writer.load(operation).await?.unwrap();
             assert_eq!(stopped.head().revision(), pending_arm.head().revision() + 1);
             acknowledgement.await?;
@@ -1714,6 +1758,9 @@ mod tests {
                 .cancel_stop_projection(operation, stop_id)
                 .await?
                 .unwrap();
+            if let Some((_, client, _)) = &stop_ipc {
+                client.deliver_named_import_stop(&replayed_stop).await?;
+            }
             assert!(replayed_stop.incomplete());
             assert!(replayed_stop.named_reservation().is_none());
             let replayed_import = replayed_stop
@@ -1782,6 +1829,9 @@ mod tests {
                     .await,
                 Err(JournalError::Conflict)
             ));
+            if let Some((fixture, _, _)) = stop_ipc {
+                fixture.finish().await;
+            }
         }
 
         let writer = start_admitted_writer("import-creation").await?;
