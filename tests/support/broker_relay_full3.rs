@@ -1362,7 +1362,7 @@ impl Fixture {
         self.fresh_start_attempted |= fresh;
         self.legacy_start_attempted |= first_legacy;
         self.selection = role;
-        let mut last_list = ("not_attempted", None);
+        let mut last_preflight = ("not_attempted", None);
         let started = timeout(Duration::from_secs(60), async {
             loop {
                 ensure!(
@@ -1388,35 +1388,53 @@ impl Fixture {
                     sleep(Duration::from_millis(20)).await;
                     continue;
                 }
-                last_list = match service::request(
-                    &self.broker_root,
-                    "a",
-                    A_RUNNER,
+                let full3_existing = !fresh && role != Role::Legacy;
+                // Existing Full3 deliberately exposes recovery metadata only.
+                // This proves IPC and retained journal availability, not job
+                // status, assignment restoration, or runtime permission.
+                let command = if full3_existing {
+                    BrokerCommandV1::RecoveryInventory {
+                        after: None,
+                        limit: 1,
+                    }
+                } else {
                     BrokerCommandV1::List {
                         after: None,
                         limit: 1,
-                    },
-                )
-                .await
-                {
-                    Ok(BrokerReplyV1::Page { .. }) => {
-                        if self.legacy_start_attempted {
-                            let guardian = self
-                                .legacy_guardian
-                                .as_ref()
-                                .context("original fixture Legacy guardian custody unavailable")?;
-                            if first_legacy {
-                                guardian.require_fresh().await?;
-                            } else {
-                                guardian.require_live().await?;
-                            }
-                        }
-                        return Ok::<_, anyhow::Error>(());
                     }
-                    Ok(BrokerReplyV1::Error { code }) => ("broker_refusal", Some(code)),
-                    Ok(_) => ("unexpected_reply", None),
-                    Err(_) => ("request_error", None),
                 };
+                last_preflight =
+                    match service::request(&self.broker_root, "a", A_RUNNER, command).await {
+                        Ok(BrokerReplyV1::RecoveryInventory { inventory }) if full3_existing => {
+                            if inventory.version == 1
+                                && inventory.tenant_id == "tenant-a"
+                                && inventory.profile_id == "a"
+                                && inventory.journal_mode == JournalModeV1::StopOnly
+                                && inventory.source == RecoveryDataSourceV1::ConfirmedJournal
+                                && inventory.runtime_evidence
+                                    == RecoveryRuntimeEvidenceV1::NotQueried
+                            {
+                                return Ok::<_, anyhow::Error>(());
+                            }
+                            ("invalid_recovery_inventory", None)
+                        }
+                        Ok(BrokerReplyV1::Page { .. }) if !full3_existing => {
+                            if self.legacy_start_attempted {
+                                let guardian = self.legacy_guardian.as_ref().context(
+                                    "original fixture Legacy guardian custody unavailable",
+                                )?;
+                                if first_legacy {
+                                    guardian.require_fresh().await?;
+                                } else {
+                                    guardian.require_live().await?;
+                                }
+                            }
+                            return Ok::<_, anyhow::Error>(());
+                        }
+                        Ok(BrokerReplyV1::Error { code }) => ("broker_refusal", Some(code)),
+                        Ok(_) => ("unexpected_reply", None),
+                        Err(_) => ("request_error", None),
+                    };
                 sleep(Duration::from_millis(20)).await;
             }
         })
@@ -1438,8 +1456,8 @@ impl Fixture {
                 .join("announcements/e-0001.json")
                 .is_file();
             println!(
-                "phase=fixture_broker_ipc_preflight category=timeout last_list={} refusal={:?} broker_announcement={broker_announcement} guardian_announcement={guardian_announcement} child_state={child_state}",
-                last_list.0, last_list.1
+                "phase=fixture_broker_ipc_preflight category=timeout last_preflight={} refusal={:?} broker_announcement={broker_announcement} guardian_announcement={guardian_announcement} child_state={child_state}",
+                last_preflight.0, last_preflight.1
             );
         }
         started?
