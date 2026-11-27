@@ -516,7 +516,8 @@ impl<'a> SessionConversationComposerV1<'a> {
                     )?;
                     Ok((epoch, expires_at))
                 },
-                |(_, expires_at)| {
+                |(epoch, expires_at)| {
+                    epoch.check()?;
                     anyhow::ensure!(
                         chrono::Utc::now() < *expires_at,
                         SessionMessageFailureV1::BindingExpired

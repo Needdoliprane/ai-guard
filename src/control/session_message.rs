@@ -35,6 +35,8 @@ const MAX_WRITE_CHUNK_BYTES: usize = 4 * 1024;
 const JSON_FRAME_END: &[u8; 2] = b"}\n";
 const FRAME_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 const WRITE_RETRY_INTERVAL: Duration = Duration::from_millis(5);
+const CHILD_REAP_TIMEOUT: Duration = Duration::from_secs(2);
+const CHILD_REAP_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 /// The exact `turn/start` request the control writes for one instruction. The
 /// control correlates it locally by `rpc_id`; the operation identity and the
@@ -408,12 +410,21 @@ impl StdioConversation {
         if self.child.try_wait()?.is_some() {
             return Ok(());
         }
-        if let Err(error) = self.child.kill()
-            && self.child.try_wait()?.is_none()
-        {
-            return Err(error);
+        if let Err(error) = self.child.kill() {
+            return self.child.try_wait()?.map(|_| ()).ok_or(error);
         }
-        self.child.wait().map(|_| ())
+        let deadline = Instant::now() + CHILD_REAP_TIMEOUT;
+        while self.child.try_wait()?.is_none() {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "conversation child exit was not observed",
+                ));
+            }
+            std::thread::sleep(remaining.min(CHILD_REAP_POLL_INTERVAL));
+        }
+        Ok(())
     }
 }
 
