@@ -13,8 +13,8 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
-      SOURCE_SHA: 6333ce65597c1320bdab50a9af8437862080970d
-      SOURCE_TREE: a1cf99e96ca491f78aa1e07a12d282521ecf5935
+      SOURCE_SHA: b8a215feaa5ceb6bf6e561da7d451ddd564a00c1
+      SOURCE_TREE: c0e44501ffab0487385fc00305142893c39edd06
       CARGO_BUILD_JOBS: '1'
       CARGO_INCREMENTAL: '0'
       CARGO_PROFILE_DEV_DEBUG: '0'
@@ -24,7 +24,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: 6333ce65597c1320bdab50a9af8437862080970d
+          ref: b8a215feaa5ceb6bf6e561da7d451ddd564a00c1
           persist-credentials: false
 
       - name: Build one library harness and verify six exact tests
