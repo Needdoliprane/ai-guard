@@ -20,6 +20,10 @@ pub(super) fn fixture_registration(root: &std::path::Path) -> RegistrationV1 {
     tests::registration(root)
 }
 #[cfg(test)]
+pub(super) fn fixture_named_import_registration(root: &std::path::Path) -> RegistrationV1 {
+    tests::named_import_registration(root)
+}
+#[cfg(test)]
 pub(super) fn record_runtime_rejection() {
     tests::record_runtime_rejection();
 }

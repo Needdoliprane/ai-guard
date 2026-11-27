@@ -1,6 +1,7 @@
 //! Software-only native regressions. Each parent owns one libtest child and
-//! private filesystem namespace; the runtime executable does not exist, so no
-//! engine/provider command is invoked. Native threads/contexts and IPC are real.
+//! private filesystem namespace. The unavailable-runtime cases have no
+//! executable; the named reconnect case uses the existing Rust runtime fixture.
+//! Native threads/contexts and IPC are real.
 use super::*;
 use crate::broker::{clock::checked_deadline, discovery::load_endpoint};
 use crate::control::{
@@ -145,6 +146,10 @@ pub(super) fn registration(root: &Path) -> RegistrationV1 {
         "invocation":{"policy_version":2,"kind":"docker","approved_entry":missing,"canonical_program":missing,
         "file_identity":{"device":1,"inode":2,"owner":0,"group":0,"mode":493,"length":1,"sha256":"b".repeat(64)},"environment":{},"cwd":root}
     })).unwrap();
+    registration_with_authority(authority)
+}
+
+fn registration_with_authority(authority: crate::runtime::RuntimeAuthority) -> RegistrationV1 {
     let inspection = RuntimeInspectionV1 {
         authority_id: authority.authority_id.to_string(),
         runtime_kind: RuntimeKindV1::Docker,
@@ -205,8 +210,11 @@ pub(super) fn registration(root: &Path) -> RegistrationV1 {
     .unwrap()
 }
 
-fn named_import_registration(root: &Path) -> RegistrationV1 {
-    let base = registration(root);
+pub(super) fn named_import_registration(root: &Path) -> RegistrationV1 {
+    named_import_from(registration(root))
+}
+
+fn named_import_from(base: RegistrationV1) -> RegistrationV1 {
     let helper_id = base.owned.handle.operation_id().to_string();
     let mut arm = base.arm.clone();
     let admission_receipt = crate::control::MutationReceiptV1 {
@@ -550,7 +558,19 @@ async fn exercise(mode: &str, parent: &Directory) {
         // Every rpc() opens a fresh authenticated IPC connection. A owns the
         // reservation custody; B represents a reconnect with a different
         // custody nonce while the same guardian and native owner remain live.
-        let first = named_import_registration(root.path());
+        let runtime = crate::runtime::Runtime::with_program(
+            crate::runtime::RuntimeKind::Docker,
+            &parent.path().join("engine"),
+        )
+        .unwrap();
+        let managed = ManagedRuntime::connect_docker_with_runtime(
+            Uuid::new_v4(),
+            "unix:///fixture/docker.sock",
+            runtime,
+        )
+        .await
+        .unwrap();
+        let first = named_import_from(registration_with_authority(managed.binding().clone()));
         let custody_a = Uuid::new_v4();
         let custody_b = Uuid::new_v4();
         let reserved = match rpc(
@@ -570,6 +590,8 @@ async fn exercise(mode: &str, parent: &Directory) {
             .pending(&reserved, LegacyProspectiveRailV1::Named(custody_a))
             .unwrap();
         assert!(pending.runtime_installed.load(Ordering::SeqCst));
+        let original_identity = pending.native_identity.lock().unwrap().prospective;
+        assert!(original_identity.is_some());
 
         // Reconnected B cannot claim the same target through either the
         // named protocol with a different custody nonce or any legacy port.
@@ -728,8 +750,13 @@ async fn exercise(mode: &str, parent: &Directory) {
                 },
             )
             .await,
-            Response::Registered { .. }
+            Response::Registered { value, replayed: false }
+                if value.phase == SlotPhaseV1::Ready
         ));
+        assert_eq!(
+            pending.native_identity.lock().unwrap().bound,
+            original_identity
+        );
 
         // The global historical recovery fence closes admission but must not
         // commandeer a named prospect or its bound slot. Its native deadline
@@ -748,6 +775,13 @@ async fn exercise(mode: &str, parent: &Directory) {
                 .as_ref()
                 .is_some_and(|actor| !actor.stop.load(Ordering::SeqCst))
         );
+        let calls = fs::read_to_string(parent.path().join("log")).unwrap();
+        assert_eq!(calls.lines().count(), 2);
+        assert!(calls.lines().all(|line| line.starts_with("info ")));
+        let key = pending.fixture_exit_key();
+        wait_for(|| native.owners.keyed_finished(key)).await;
+        server.abort();
+        return;
     }
     if mode == "deadline" {
         let mut expiring = first;
@@ -1157,6 +1191,35 @@ fn run_child(mode: &str) {
         .permissions(fs::Permissions::from_mode(0o700))
         .tempdir_in(private_tmp)
         .unwrap();
+    if mode == "named_reconnect" {
+        let source = temp.path().join("engine.rs");
+        let program = temp.path().join("engine");
+        fs::write(
+            &source,
+            include_str!("../../../tests/runtime_fixtures/managed.rs"),
+        )
+        .unwrap();
+        let compiler = std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
+        let compiled = Command::new(compiler)
+            .args(["--edition=2024", "--crate-name", "named_reconnect_fixture"])
+            .arg(source)
+            .arg("-o")
+            .arg(&program)
+            .output()
+            .unwrap();
+        assert!(
+            compiled.status.success(),
+            "the Rust runtime fixture must compile"
+        );
+        let config = program.with_extension("fixture");
+        fs::create_dir(&config).unwrap();
+        fs::write(
+            config.join("AI_GUARD_MANAGED_ROOT"),
+            temp.path().as_os_str().as_encoded_bytes(),
+        )
+        .unwrap();
+        fs::write(config.join("AI_GUARD_MANAGED_CHILD"), "success").unwrap();
+    }
     let child = Command::new(std::env::current_exe().unwrap())
         .args(["--exact", CHILD, "--ignored", "--nocapture"])
         .env_clear()

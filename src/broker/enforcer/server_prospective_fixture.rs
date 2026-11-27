@@ -15,6 +15,12 @@ pub(in crate::broker::enforcer) fn registration(root: &std::path::Path) -> Regis
     prospective::fixture_registration(root)
 }
 
+pub(in crate::broker::enforcer) fn named_import_registration(
+    root: &std::path::Path,
+) -> RegistrationV1 {
+    prospective::fixture_named_import_registration(root)
+}
+
 struct HeldReply {
     reached: oneshot::Sender<()>,
     release: oneshot::Receiver<()>,
