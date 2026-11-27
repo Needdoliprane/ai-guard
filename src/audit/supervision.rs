@@ -379,7 +379,8 @@ pub(super) struct Replay {
     armed_workers: BTreeSet<String>,
     claims: BTreeMap<String, HelperStartClaimV1>,
     observations: BTreeMap<String, HelperObservationV1>,
-    terminals: BTreeMap<String, HelperObservationV1>,
+    generic_terminals: BTreeMap<String, HelperObservationV1>,
+    named_import_terminals: BTreeMap<String, HelperObservationV1>,
     cleanups: BTreeMap<String, HelperCleanupV1>,
     exports: BTreeMap<String, ExportRequestV1>,
     expected: BTreeMap<&'static str, TableRows>,
@@ -406,14 +407,18 @@ impl Replay {
             let claim: HelperStartClaimV1 = serde_json::from_str(&row?)?;
             state.claims.insert(claim.helper_id.clone(), claim);
         }
-        let mut stmt =
-            db.prepare("SELECT payload_json FROM helper_observations ORDER BY event_seq")?;
-        for row in stmt.query_map([], |r| r.get::<_, String>(0))? {
-            let observation: HelperObservationV1 = serde_json::from_str(&row?)?;
+        let mut stmt = db.prepare(
+            "SELECT o.payload_json,e.kind FROM helper_observations o
+             JOIN events e ON e.seq=o.event_seq ORDER BY o.event_seq",
+        )?;
+        for row in stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })? {
+            let (payload, kind) = row?;
+            let observation: HelperObservationV1 = serde_json::from_str(&payload)?;
+            let terminals = state.observation_terminals(&kind)?;
             if terminal_helper(&observation.observation) {
-                state
-                    .terminals
-                    .insert(observation.helper_id.clone(), observation.clone());
+                terminals.insert(observation.helper_id.clone(), observation.clone());
             }
             state
                 .observations
@@ -459,7 +464,8 @@ impl Replay {
             armed_workers: BTreeSet::new(),
             claims: BTreeMap::new(),
             observations: BTreeMap::new(),
-            terminals: BTreeMap::new(),
+            generic_terminals: BTreeMap::new(),
+            named_import_terminals: BTreeMap::new(),
             cleanups: BTreeMap::new(),
             exports: BTreeMap::new(),
             expected: QUERIES.iter().map(|(t, _)| (*t, BTreeMap::new())).collect(),
@@ -552,6 +558,23 @@ impl Replay {
                 .is_some_and(|b| b.intent_hash == intent),
         )
     }
+    fn observation_terminals(
+        &mut self,
+        event_kind: &str,
+    ) -> anyhow::Result<&mut BTreeMap<String, HelperObservationV1>> {
+        match event_kind {
+            admission_codec::KIND => Ok(&mut self.generic_terminals),
+            LEGACY_NAMED_IMPORT_OBSERVATION_KIND => Ok(&mut self.named_import_terminals),
+            _ => Err(ControlFailure::InvalidRequest.into()),
+        }
+    }
+    fn terminal_for_arm(&self, entry: &ArmEntry, helper_id: &str) -> Option<&HelperObservationV1> {
+        if entry.legacy_named {
+            self.named_import_terminals.get(helper_id)
+        } else {
+            self.generic_terminals.get(helper_id)
+        }
+    }
     fn import_verified(&self, parent: &WorkerV1) -> bool {
         let mut found = false;
         for entry in self.arms.values() {
@@ -569,7 +592,7 @@ impl Replay {
                 continue;
             };
             found = true;
-            let Some(observation) = self.terminals.get(helper_id) else {
+            let Some(observation) = self.terminal_for_arm(entry, helper_id) else {
                 return false;
             };
             if !terminal_helper(&observation.observation)
@@ -636,8 +659,7 @@ impl Replay {
                         && manifest_digest == &parent.launch.workspace_manifest_digest,
                 )?;
                 let observation = self
-                    .terminals
-                    .get(import_helper_id)
+                    .terminal_for_arm(entry, import_helper_id)
                     .ok_or(ControlFailure::Conflict)?;
                 invalid(
                     observation.operation_id == import_terminal.operation_id
@@ -767,16 +789,6 @@ impl Replay {
         )?;
         let entry = self.checked_arm(&request.arm_receipt)?;
         invalid(request.observation.inspection == entry.request.inspection)?;
-        if let Some(previous) = self.terminals.get(&request.helper_id) {
-            let mut expected = previous.observation.clone();
-            expected.observed_at = request.observation.observed_at.clone();
-            conflict(
-                expected == request.observation
-                    && (previous.verification.is_none()
-                        || serde_json::to_value(&previous.verification)?
-                            == serde_json::to_value(&request.verification)?),
-            )?;
-        }
         if let Some(report) = &request.verification {
             let ArmSubjectV1::Helper {
                 purpose: HelperPurposeV1::ImportVerification,
@@ -800,9 +812,19 @@ impl Replay {
                     && terminal_helper(&request.observation),
             )?;
         }
+        let terminals = self.observation_terminals(&stored.event.kind)?;
+        if let Some(previous) = terminals.get(&request.helper_id) {
+            let mut expected = previous.observation.clone();
+            expected.observed_at = request.observation.observed_at.clone();
+            conflict(
+                expected == request.observation
+                    && (previous.verification.is_none()
+                        || serde_json::to_value(&previous.verification)?
+                            == serde_json::to_value(&request.verification)?),
+            )?;
+        }
         if terminal_helper(&request.observation) {
-            self.terminals
-                .insert(request.helper_id.clone(), request.clone());
+            terminals.insert(request.helper_id.clone(), request.clone());
         }
         self.expected
             .get_mut("helper_observations")
@@ -945,6 +967,7 @@ impl Replay {
             }
             Input::HelperObservation(request) => {
                 invalid(record.worker_record.is_none())?;
+                // Historical observations retain their generic provenance.
                 self.record_helper_observation(stored, request)?;
             }
             Input::LegacyNamedImportObservation(named) => {
@@ -963,7 +986,7 @@ impl Replay {
                     serde_json::to_value(&claim.arm_receipt)?
                         == serde_json::to_value(&request.arm_receipt)?,
                 )?;
-                conflict(self.terminals.contains_key(&request.helper_id))?;
+                conflict(self.generic_terminals.contains_key(&request.helper_id))?;
                 if let Some(old) = self.cleanups.get(&request.helper_id) {
                     conflict(!old.removed)?;
                 }
@@ -1244,6 +1267,7 @@ impl Store {
             Input::WorkerClaim(request) => Some(&request.arm_receipt.arm_id),
             Input::HelperClaim(request) => Some(&request.arm_receipt.arm_id),
             Input::HelperObservation(request) => Some(&request.arm_receipt.arm_id),
+            Input::HelperCleanup(request) => Some(&request.arm_receipt.arm_id),
             _ => None,
         };
         if let Some(id) = manual_arm {

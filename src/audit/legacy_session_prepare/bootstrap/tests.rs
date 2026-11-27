@@ -1161,9 +1161,10 @@ async fn legacy_named_cancel_releases_an_unarmed_reservation_after_revocation() 
 async fn legacy_named_import_arm_preserves_its_prefix_and_closes_manual_claims() {
     use crate::{
         api::{GatewayState, TenantGateway, gateway_router},
+        audit::supervision_admission as admission_codec,
         control::{
-            ArmResultV1, ClaimDispositionV1, HelperClaimResultV1, HelperObservationV1,
-            MutationReceiptV1, RuntimeObservationV1, RuntimeStatusV1,
+            ArmResultV1, ClaimDispositionV1, HelperClaimResultV1, HelperCleanupV1,
+            HelperObservationV1, MutationReceiptV1, RuntimeObservationV1, RuntimeStatusV1,
             session_control::{
                 LEGACY_NAMED_IMPORT_ARM_RECEIPT_NOT_FOUND,
                 LEGACY_NAMED_IMPORT_OBSERVATION_RECEIPT_NOT_FOUND, LegacyNamedImportArmRequestV1,
@@ -1656,7 +1657,7 @@ async fn legacy_named_import_arm_preserves_its_prefix_and_closes_manual_claims()
             arm_receipt: armed.receipt.clone(),
             observation: RuntimeObservationV1 {
                 inspection: arm.inspection.clone(),
-                observed_at: "2026-11-27T12:00:01Z".into(),
+                observed_at: "2026-11-27T12:00:03Z".into(),
                 status: RuntimeStatusV1::Running,
                 running: Some(true),
                 started_at: Some("2026-11-27T12:00:00Z".into()),
@@ -1742,6 +1743,41 @@ async fn legacy_named_import_arm_preserves_its_prefix_and_closes_manual_claims()
         .unwrap();
     assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
     assert_eq!(store.head().unwrap(), committed_claim.receipt.audit_seq);
+
+    // Persist the same generic records the previous Store accepted.
+    let append_historical = |input| {
+        let mut db = store.db.lock().unwrap();
+        let tx = store.begin_checked(&mut db).unwrap();
+        let record = admission_codec::Record::new(input, None);
+        let stored = store.persist_supervision_record(&tx, &record).unwrap();
+        store.validate_supervision_write(&tx).unwrap();
+        let receipt = admission_codec::receipt_for(&stored, &record).unwrap();
+        store.commit_checked(tx).unwrap();
+        receipt
+    };
+    let mut historical = started.observation.clone();
+    historical.operation_id = Uuid::new_v4().to_string();
+    let snapshot = &mut historical.observation;
+    snapshot.status = RuntimeStatusV1::Exited;
+    snapshot.running = Some(false);
+    snapshot.started_at = Some("2026-11-27T11:59:58Z".into());
+    snapshot.finished_at = Some("2026-11-27T11:59:59Z".into());
+    snapshot.exit_code = Some(1);
+    let historical_receipt = append_historical(admission_codec::Input::HelperObservation(
+        Box::new(historical.clone()),
+    ));
+    let historical_cleanup = HelperCleanupV1 {
+        version: 1,
+        operation_id: Uuid::new_v4().to_string(),
+        helper_id: historical.helper_id.clone(),
+        arm_receipt: historical.arm_receipt.clone(),
+        removed: false,
+        error: Some("synthetic historical cleanup unconfirmed".into()),
+    };
+    let historical_cleanup_receipt = append_historical(admission_codec::Input::HelperCleanup(
+        Box::new(historical_cleanup.clone()),
+    ));
+
     let response = app
         .oneshot(post(&observation_path, BROKER_TOKEN, &started))
         .await
@@ -1750,7 +1786,7 @@ async fn legacy_named_import_arm_preserves_its_prefix_and_closes_manual_claims()
     let observed: MutationReceiptV1 =
         serde_json::from_slice(&to_bytes(response.into_body(), 4096).await.unwrap()).unwrap();
     started.validate_receipt(&observed).unwrap();
-    assert_eq!(observed.audit_seq, committed_claim.receipt.audit_seq + 1);
+    assert_eq!(observed.audit_seq, historical_cleanup_receipt.audit_seq + 1);
 
     credential.active = false;
     credential.revision += 1;
@@ -1769,6 +1805,14 @@ async fn legacy_named_import_arm_preserves_its_prefix_and_closes_manual_claims()
 
     let reopened = Arc::new(f.reopen());
     let app = router(Arc::clone(&reopened));
+    assert_eq!(
+        reopened.observe_helper(&historical).unwrap(),
+        historical_receipt
+    );
+    assert_eq!(
+        reopened.record_helper_cleanup(&historical_cleanup).unwrap(),
+        historical_cleanup_receipt
+    );
     for path in [&observation_path, &observation_reconcile] {
         let response = app
             .clone()
@@ -1781,7 +1825,7 @@ async fn legacy_named_import_arm_preserves_its_prefix_and_closes_manual_claims()
         assert_eq!(receipt, observed);
     }
     let mut divergent_observation = started.clone();
-    divergent_observation.observation.observation.observed_at = "2026-11-27T12:00:02Z".into();
+    divergent_observation.observation.observation.observed_at = "2026-11-27T12:00:04Z".into();
     let refused = app
         .clone()
         .oneshot(post(
@@ -1893,8 +1937,9 @@ async fn legacy_named_import_arm_preserves_its_prefix_and_closes_manual_claims()
     let snapshot = &mut terminal.observation.observation;
     snapshot.status = RuntimeStatusV1::Exited;
     snapshot.running = Some(false);
-    snapshot.finished_at = Some("2026-11-27T12:00:02Z".into());
-    snapshot.observed_at = "2026-11-27T12:00:03Z".into();
+    snapshot.started_at = Some("2026-11-27T13:00:00+01:00".into());
+    snapshot.finished_at = Some("2026-11-27T12:00:03.250Z".into());
+    snapshot.observed_at = "2026-11-27T12:00:04Z".into();
     snapshot.exit_code = Some(0);
     let mut contradictory_terminal = terminal.clone();
     contradictory_terminal.observation.observation.started_at = Some("2026-11-27T12:00:01Z".into());
@@ -1908,6 +1953,15 @@ async fn legacy_named_import_arm_preserves_its_prefix_and_closes_manual_claims()
         .await
         .unwrap();
     assert_eq!(refused.status(), StatusCode::CONFLICT);
+    let mut earlier_sample = terminal.clone();
+    earlier_sample.observation.observation.finished_at = Some("2026-11-27T12:00:01Z".into());
+    earlier_sample.observation.observation.observed_at = "2026-11-27T12:00:02Z".into();
+    let refused = app
+        .clone()
+        .oneshot(post(&observation_path, BROKER_TOKEN, &earlier_sample))
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), StatusCode::CONFLICT);
     let response = app
         .oneshot(post(&observation_path, BROKER_TOKEN, &terminal))
         .await
@@ -1917,6 +1971,17 @@ async fn legacy_named_import_arm_preserves_its_prefix_and_closes_manual_claims()
         serde_json::from_slice(&to_bytes(response.into_body(), 4096).await.unwrap()).unwrap();
     terminal.validate_receipt(&ended).unwrap();
     assert_eq!(ended.audit_seq, revoked.audit_seq + 1);
+    let fresh_cleanup = HelperCleanupV1 {
+        operation_id: Uuid::new_v4().to_string(),
+        ..historical_cleanup
+    };
+    assert_eq!(
+        reopened
+            .record_helper_cleanup(&fresh_cleanup)
+            .unwrap_err()
+            .downcast_ref::<ControlFailure>(),
+        Some(&ControlFailure::Conflict)
+    );
     assert!(reopened.integrity().unwrap().valid);
     assert_eq!(
         serde_json::to_value(reopened.worker(&prepared.worker_id).unwrap().unwrap()).unwrap(),

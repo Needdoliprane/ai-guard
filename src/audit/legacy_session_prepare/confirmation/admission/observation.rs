@@ -57,11 +57,21 @@ fn require_preceding_started(
     let admission_codec::Input::LegacyNamedImportObservation(previous) = record.input else {
         return Err(ControlFailure::Conflict.into());
     };
+    let previous_runtime = &previous.request.observation.observation;
+    let runtime = &request.observation.observation;
+    let started_at = |runtime: &crate::control::RuntimeObservationV1| {
+        runtime
+            .started_at
+            .as_deref()
+            .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+            .ok_or(ControlFailure::Conflict)
+    };
     conflict(
         previous.request.phase == LegacyNamedImportObservationPhaseV1::Started
             && previous.request.claim_receipt == request.claim_receipt
-            && previous.request.observation.observation.started_at
-                == request.observation.observation.started_at,
+            && started_at(previous_runtime)? == started_at(runtime)?
+            && DateTime::parse_from_rfc3339(&previous_runtime.observed_at)?
+                <= DateTime::parse_from_rfc3339(&runtime.observed_at)?,
     )
 }
 
