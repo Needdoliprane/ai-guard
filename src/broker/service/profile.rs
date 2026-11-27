@@ -340,6 +340,9 @@ pub(crate) fn with_legacy_target_source<T>(
         .revalidate()
         .and_then(|()| registry.source_directory.revalidate())
         .map_err(|_| anyhow!("private broker registry changed before target publication"))?;
+    source
+        .revalidate()
+        .map_err(|_| anyhow!("named broker source changed before target publication"))?;
     publish(input)
 }
 
