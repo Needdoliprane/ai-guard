@@ -1126,6 +1126,7 @@ async fn legacy_named_admission_route_replays_the_committed_receipt_after_reopen
         request.binding_ref
     );
     let private = format!("/control{path}");
+    let reconciliation = format!("{private}/reconcile");
     let mismatched = format!(
         "/control/api/v1/control/session-confirmations/{}/admission",
         Uuid::new_v4()
@@ -1145,6 +1146,23 @@ async fn legacy_named_admission_route_replays_the_committed_receipt_after_reopen
         assert_eq!(response.status(), expected);
     }
     assert_eq!(store.head().unwrap(), before);
+    let response = app
+        .clone()
+        .oneshot(post(&reconciliation, BROKER_TOKEN, body.clone()))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let error: Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), 65_536).await.unwrap()).unwrap();
+    assert_eq!(error["error"]["code"], "named_admission_receipt_not_found");
+    assert_eq!(store.head().unwrap(), before);
+    assert_eq!(
+        store
+            .worker_quota(&QuotaPolicyV1::default())
+            .unwrap()
+            .held_workers,
+        0
+    );
 
     let response = app
         .oneshot(post(&private, BROKER_TOKEN, body.clone()))
@@ -1165,22 +1183,26 @@ async fn legacy_named_admission_route_replays_the_committed_receipt_after_reopen
 
     let reopened = Arc::new(f.reopen());
     assert!(!reopened.supervision_state().unwrap().active);
-    let response = make_router(Arc::clone(&reopened))
-        .oneshot(post(&private, BROKER_TOKEN, body))
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    let replay: LegacyNamedAdmissionReceiptV1 =
-        serde_json::from_slice(&to_bytes(response.into_body(), 65_536).await.unwrap()).unwrap();
-    assert!(replay.admission.replayed);
-    assert_eq!(replay.admission.receipt, receipt.admission.receipt);
-    assert_eq!(replay.grant, receipt.grant);
-    assert_eq!(
-        replay.admission.worker.as_ref().unwrap().worker_id,
-        worker.worker_id
-    );
-    assert_eq!(replay.audit_seq, receipt.audit_seq);
-    assert_eq!(replay.audit_hash, receipt.audit_hash);
+    let app = make_router(Arc::clone(&reopened));
+    for uri in [&private, &reconciliation] {
+        let response = app
+            .clone()
+            .oneshot(post(uri, BROKER_TOKEN, body.clone()))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let replay: LegacyNamedAdmissionReceiptV1 =
+            serde_json::from_slice(&to_bytes(response.into_body(), 65_536).await.unwrap()).unwrap();
+        assert!(replay.admission.replayed);
+        assert_eq!(replay.admission.receipt, receipt.admission.receipt);
+        assert_eq!(replay.grant, receipt.grant);
+        assert_eq!(
+            replay.admission.worker.as_ref().unwrap().worker_id,
+            worker.worker_id
+        );
+        assert_eq!(replay.audit_seq, receipt.audit_seq);
+        assert_eq!(replay.audit_hash, receipt.audit_hash);
+    }
     assert_eq!(reopened.head().unwrap(), receipt.audit_seq);
 }
 

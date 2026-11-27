@@ -366,15 +366,15 @@ impl Store {
         Ok(resolved)
     }
 
-    /// Resolve a replay or prove a currently eligible request before policy evaluation.
-    pub(crate) fn preflight_legacy_named_admission(
+    /// Resolve a retained receipt. With a quota policy, also check eligibility
+    /// for a fresh request before policy evaluation.
+    pub(crate) fn read_legacy_named_admission(
         &self,
         broker: &BrokerIdentityV1,
         request: &LegacyNamedSupervisedAdmissionV1,
-        quota: &QuotaPolicyV1,
+        fresh_quota: Option<&QuotaPolicyV1>,
     ) -> anyhow::Result<Option<LegacyNamedAdmissionReceiptV1>> {
         let input_hash = self.verify_legacy_named_admission_input(request)?;
-        admission_codec::admission_input(&request.admission, quota)?;
         let mut db = self
             .db
             .lock()
@@ -393,6 +393,11 @@ impl Store {
             );
             return Ok(Some(receipt));
         }
+        let Some(quota) = fresh_quota else {
+            self.commit_authorized(tx, &clock)?;
+            return Ok(None);
+        };
+        quota.validate()?;
         let resolved = self.resolve_fresh_legacy_named_admission(&tx, broker, request, &clock)?;
         let admission = &request.admission.admission;
         let stored = Self::lookup_decision(

@@ -25,6 +25,10 @@ pub(super) fn routes() -> Router<GatewayState> {
             "/control/session-confirmations/{binding_ref}/admission",
             post(reserve_named),
         )
+        .route(
+            "/control/session-confirmations/{binding_ref}/admission/reconcile",
+            post(reconcile_named_admission),
+        )
         .route("/workers/supervised-reservations", post(reserve))
         .route("/workers/{id}/arms", post(arm))
         .route("/workers/{id}/arms/{arm_id}", get(read_arm))
@@ -175,11 +179,7 @@ async fn reserve_named(
     Path(binding_ref): Path<String>,
     body: Result<Json<LegacyNamedSupervisedAdmissionV1>, JsonRejection>,
 ) -> ApiResult<(StatusCode, Json<LegacyNamedAdmissionReceiptV1>)> {
-    let binding_ref = canonical_uuid(&binding_ref).map_err(control_error)?;
-    let request = Arc::new(parse_json(body)?);
-    if request.binding_ref != binding_ref {
-        return Err(control_error(ControlFailure::InvalidRequest.into()));
-    }
+    let request = Arc::new(named_admission_request(&binding_ref, body)?);
     let preflight = Arc::clone(&request);
     let replay = broker
         .clone()
@@ -188,7 +188,7 @@ async fn reserve_named(
             move |tenant, identity, redactor| {
                 let store = named_admission_store(&tenant, &redactor)?;
                 if let Some(receipt) = store
-                    .preflight_legacy_named_admission(&identity, &preflight, &tenant.worker_quota)
+                    .read_legacy_named_admission(&identity, &preflight, Some(&tenant.worker_quota))
                     .map_err(|error| named_admission_error(&tenant.store, error))?
                 {
                     return Ok(Some(named_admission_response(receipt, &redactor)?));
@@ -217,6 +217,48 @@ async fn reserve_named(
                         &tenant.worker_quota,
                     )
                     .map_err(|error| named_admission_error(&tenant.store, error))?;
+                named_admission_response(receipt, &redactor)
+            },
+        )
+        .await
+}
+
+fn named_admission_request(
+    binding_ref: &str,
+    body: Result<Json<LegacyNamedSupervisedAdmissionV1>, JsonRejection>,
+) -> ApiResult<LegacyNamedSupervisedAdmissionV1> {
+    let binding_ref = canonical_uuid(binding_ref).map_err(control_error)?;
+    let request = parse_json(body)?;
+    if request.binding_ref != binding_ref {
+        return Err(control_error(ControlFailure::InvalidRequest.into()));
+    }
+    Ok(request)
+}
+
+async fn reconcile_named_admission(
+    _private: PrivateControlTransport,
+    broker: workload::VerifiedBroker,
+    Path(binding_ref): Path<String>,
+    body: Result<Json<LegacyNamedSupervisedAdmissionV1>, JsonRejection>,
+) -> ApiResult<(StatusCode, Json<LegacyNamedAdmissionReceiptV1>)> {
+    let request = named_admission_request(&binding_ref, body)?;
+    broker
+        .blocking_on(
+            store_io::Lane::Control,
+            move |tenant, identity, redactor| {
+                let store = named_admission_store(&tenant, &redactor)?;
+                // A pending result may be absent even when a concurrent
+                // submission will commit. This path cannot create it.
+                let receipt = store
+                    .read_legacy_named_admission(&identity, &request, None)
+                    .map_err(|error| named_admission_error(&tenant.store, error))?
+                    .ok_or_else(|| {
+                        workload::response(
+                            StatusCode::NOT_FOUND,
+                            "named_admission_receipt_not_found",
+                            "Reçu d'admission introuvable.",
+                        )
+                    })?;
                 named_admission_response(receipt, &redactor)
             },
         )
