@@ -15,7 +15,6 @@ use crate::{
     activity_channel::wire::{ClientV1, HelperFrameV1, StatusV1},
     control_fs::Directory,
     redaction::Redactor,
-    runner::AuditClient,
     runtime::{ActivityExecTransport, ContainerSpec, ManagedRuntime, OwnedContainerSnapshot},
 };
 use anyhow::Result;
@@ -100,6 +99,7 @@ type HookSlot = Arc<Mutex<HookTask>>;
 
 pub(crate) struct LiveSession {
     collector: ActivityCollector,
+    reopened_spool: bool,
     tap: Option<StdoutTap>,
     pump: Option<SessionTask<PumpOutcome>>,
     forwarder: Option<SessionTask<ForwardOutcome>>,
@@ -135,12 +135,12 @@ impl LiveSession {
         root: &Directory,
         context: ActivityContext,
         redactor: Redactor,
-        client: AuditClient,
+        client: impl ActivitySink + 'static,
         limits: ActivityLimits,
         live_stdout: bool,
     ) -> Result<Self> {
         let live_stdout = live_stdout && !context.interactive;
-        let (spool, _recovery) = ActivitySpool::open_or_create(root, context.session)?;
+        let (spool, recovery) = ActivitySpool::open_or_create(root, context.session)?;
         let collector = ActivityCollector::new(spool, context, redactor, limits)?;
         let (stop, stopped) = watch::channel(false);
         let forwarder = {
@@ -160,6 +160,7 @@ impl LiveSession {
         let (hook_stop, _) = watch::channel(false);
         Ok(Self {
             collector,
+            reopened_spool: recovery.is_some(),
             tap,
             pump,
             forwarder: Some(forwarder),
@@ -259,6 +260,11 @@ impl LiveSession {
                 // The same session may still need a fresh activity producer
                 // on recovery. Leave its verified prefix open until terminal.
                 return Ok(());
+            }
+            if self.reopened_spool {
+                // Producer counters cover only this run. The retained prefix
+                // needs its original summary or an explicit coverage gap.
+                return self.collector.ensure_replay_coverage();
             }
             if unattached {
                 let _ = self.collector.channel_state(

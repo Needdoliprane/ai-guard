@@ -1,7 +1,11 @@
 use super::*;
 use crate::{
+    activity_channel::wire::EventV1,
     model::Event,
-    provider_activity::spool::{event_id, spool_name},
+    provider_activity::{
+        Admission,
+        spool::{event_id, spool_name},
+    },
 };
 use std::os::unix::fs::PermissionsExt;
 use tokio::sync::oneshot;
@@ -103,8 +107,8 @@ async fn an_unjoined_task_leaves_closure_unconfirmed() {
     assert_eq!(result, Err(DrainError::Unconfirmed));
 }
 
-#[derive(Default)]
-struct RecordedActivity(Mutex<Vec<Event>>);
+#[derive(Clone, Default)]
+struct RecordedActivity(Arc<Mutex<Vec<Event>>>);
 
 impl ActivitySink for RecordedActivity {
     async fn deliver(&self, events: &[Event]) -> Result<()> {
@@ -155,6 +159,7 @@ async fn an_interrupted_session_leaves_coverage_open_for_terminal_replay() {
     let (hook_stop, _) = watch::channel(false);
     let session = LiveSession {
         collector,
+        reopened_spool: false,
         tap: None,
         pump: None,
         forwarder: None,
@@ -190,6 +195,144 @@ async fn an_interrupted_session_leaves_coverage_open_for_terminal_replay() {
     for field in ["stdout", "hook", "spooled_events", "delivered_events"] {
         assert!(event.data.get(field).is_none(), "{field} is unknown");
     }
+}
+
+struct OneClaudeHook(Option<HookFrame>);
+
+impl HookTransport for OneClaudeHook {
+    async fn next(&mut self) -> Result<Option<HookFrame>> {
+        Ok(self.0.take())
+    }
+
+    async fn ack(&mut self, seq: u64, ack: HookAck) -> Result<()> {
+        anyhow::ensure!(
+            seq == 1 && ack == HookAck::Recorded,
+            "expected one clean hook"
+        );
+        Ok(())
+    }
+}
+
+async fn collect_and_finish_clean_claude_hook(
+    root: &Directory,
+    context: ActivityContext,
+    sink: &RecordedActivity,
+) -> Result<()> {
+    let session_id = context.session;
+    let session = LiveSession::open(
+        root,
+        context,
+        Redactor::new(Vec::new()),
+        sink.clone(),
+        ActivityLimits::default(),
+        false,
+    )?;
+    let transport = OneClaudeHook(Some(HookFrame::Hook {
+        seq: 1,
+        event: EventV1::SessionStart,
+        payload: serde_json::json!({
+            "hook_event_name": "SessionStart",
+            "session_id": session_id,
+            "source": "startup",
+        })
+        .to_string(),
+        truncated: false,
+    }));
+    let outcome = pump_hooks(session.collector.clone(), transport).await;
+    assert_eq!(
+        outcome,
+        HookPumpOutcome {
+            hooks: 1,
+            recorded: 1,
+            ..Default::default()
+        }
+    );
+    *session.hook_task.lock().unwrap() =
+        HookTask::Active(SessionTask::new(tokio::spawn(async move { outcome })));
+    timeout_at(Instant::now() + Duration::from_secs(3), async {
+        loop {
+            let summary = session.collector.summary()?;
+            if summary.spooled_events == summary.delivered_events {
+                return Ok::<_, anyhow::Error>(());
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await??;
+    session.finish(true).await
+}
+
+#[tokio::test]
+async fn a_reopened_claude_spool_keeps_coverage_partial_after_a_clean_live_drain() -> Result<()> {
+    let (_fresh, fresh_root, fresh_context) = retained_fixture();
+    let clean = RecordedActivity::default();
+    collect_and_finish_clean_claude_hook(&fresh_root, fresh_context, &clean).await?;
+    {
+        let events = clean.0.lock().unwrap();
+        let coverage = events.last().unwrap();
+        assert_eq!(coverage.kind, "activity.coverage");
+        assert_eq!(coverage.data["complete"], true);
+    }
+
+    let (temporary, root, context) = retained_fixture();
+    let session = context.session;
+    let path = temporary.path().join(spool_name(session));
+    let previous = ActivityCollector::new(
+        ActivitySpool::create(&root, session)?,
+        context.clone(),
+        Redactor::new(Vec::new()),
+        ActivityLimits::default(),
+    )?;
+    assert_eq!(
+        previous.declared_hook_loss(1, "fixture_loss"),
+        Admission::Recorded
+    );
+    drop(previous);
+    let prefix = std::fs::read(&path)?;
+
+    let resumed = RecordedActivity::default();
+    collect_and_finish_clean_claude_hook(&root, context.clone(), &resumed).await?;
+    let sealed = std::fs::read(&path)?;
+    assert!(sealed.starts_with(&prefix));
+    {
+        let events = resumed.0.lock().unwrap();
+        assert_eq!(events[0].kind, "activity.loss");
+        assert_eq!(events[0].id, event_id(session, 1));
+        assert_eq!(events[0].provenance, "declared");
+        assert_eq!(events[0].data["count"], 1);
+        assert!(events.iter().any(|event| event.kind == "session.declared"));
+        let coverage = events.last().unwrap();
+        assert_eq!(coverage.kind, "activity.coverage");
+        assert_eq!(coverage.coverage, "partial");
+        assert_eq!(coverage.data["complete"], false);
+        assert_eq!(coverage.data["reason"], "activity_finalization_unconfirmed");
+        for field in ["stdout", "hook", "spooled_events", "delivered_events"] {
+            assert!(coverage.data.get(field).is_none(), "{field} is unknown");
+        }
+    }
+
+    let replay = RecordedActivity::default();
+    LiveSession::open(
+        &root,
+        context.clone(),
+        Redactor::new(Vec::new()),
+        replay.clone(),
+        ActivityLimits::default(),
+        false,
+    )?
+    .finish(true)
+    .await?;
+    LiveSession::replay_retained(
+        &root,
+        context,
+        Redactor::new(Vec::new()),
+        &replay,
+        ActivityLimits::default(),
+    )
+    .await?;
+    assert!(replay.0.lock().unwrap().is_empty());
+    assert_eq!(std::fs::read(path)?, sealed);
+    Ok(())
 }
 
 #[tokio::test]
