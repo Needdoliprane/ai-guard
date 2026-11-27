@@ -40,9 +40,7 @@ use std::{
 use uuid::Uuid;
 
 #[cfg(test)]
-pub(crate) use client::CancelGeneration;
-#[cfg(test)]
-pub(crate) use client::connect_named_legacy_fixture;
+pub(in crate::broker) use client::connect_named_legacy_fixture;
 #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 pub(crate) use client::released_connect_fixture;
 pub use client::{EnforcedSlot, EnforcerClient};
