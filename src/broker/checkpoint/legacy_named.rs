@@ -1155,6 +1155,48 @@ mod tests {
         }
     }
 
+    async fn seed_named_import_writer_through_claim(
+        writer: &WriterClient,
+        plan: &LegacyConfirmedPlanV1,
+        archive_digest: &str,
+        helper_id: Uuid,
+        authority: &RuntimeAuthority,
+        owned: &OwnedContainerSnapshot,
+        arm: &ArmV1,
+        arm_result: &ArmResultV1,
+        claim: &LegacyNamedImportClaimRequestV1,
+        claim_receipt: &MutationReceiptV1,
+    ) -> anyhow::Result<()> {
+        writer
+            .record_legacy_named_import_creation(plan, archive_digest, helper_id, authority)
+            .await?;
+        writer
+            .acknowledge_legacy_named_import_creation(
+                plan,
+                archive_digest,
+                authority,
+                owned.clone(),
+            )
+            .await?;
+        let recorded_arm = writer
+            .record_legacy_named_import_arm(plan, archive_digest, arm.clone())
+            .await?;
+        writer
+            .acknowledge_legacy_named_import_arm(
+                plan.operation_id,
+                recorded_arm.request(),
+                arm_result.clone(),
+            )
+            .await?;
+        writer
+            .record_legacy_named_import_claim(plan, claim.clone())
+            .await?;
+        writer
+            .acknowledge_legacy_named_import_claim(plan.operation_id, claim, claim_receipt.clone())
+            .await?;
+        Ok(())
+    }
+
     /// Reopen an existing named Writer journal and retry the exact retained
     /// observation. This is a cold Writer fixture only, not a Service or
     /// runtime reconciliation test.
@@ -2316,28 +2358,23 @@ mod tests {
         // guardian. Exercise write-before-send, Started -> Terminal, exact
         // replay, divergence refusal, and ACK CAS after a concurrent STOP.
         let observation_writer = start_admitted_writer("import-observation-race").await?;
+        seed_named_import_writer_through_claim(
+            &observation_writer,
+            &plan,
+            &digest,
+            helper_id,
+            &authority,
+            &owned,
+            &arm,
+            &arm_result,
+            &claim,
+            &claim_receipt,
+        )
+        .await?;
         let creation = observation_writer
-            .record_legacy_named_import_creation(&plan, &digest, helper_id, &authority)
-            .await?;
-        observation_writer
-            .acknowledge_legacy_named_import_creation(&plan, &digest, &authority, owned.clone())
-            .await?;
-        let recorded_arm = observation_writer
-            .record_legacy_named_import_arm(&plan, &digest, arm.clone())
-            .await?;
-        observation_writer
-            .acknowledge_legacy_named_import_arm(
-                operation,
-                recorded_arm.request(),
-                arm_result.clone(),
-            )
-            .await?;
-        observation_writer
-            .record_legacy_named_import_claim(&plan, claim.clone())
-            .await?;
-        observation_writer
-            .acknowledge_legacy_named_import_claim(operation, &claim, claim_receipt.clone())
-            .await?;
+            .load(operation)
+            .await?
+            .ok_or(JournalError::Conflict)?;
         assert!(
             observation_writer
                 .load(operation)
@@ -2633,6 +2670,12 @@ mod tests {
             .unwrap();
         assert!(equal(retained.request(), &terminal_request)?);
         assert_eq!(retained.receipt(), Some(&terminal_receipt));
+        assert!(matches!(
+            observation_writer
+                .record_legacy_named_import_verification_plan(&plan, Uuid::new_v4())
+                .await,
+            Err(JournalError::Interrupted)
+        ));
         let terminal_ack_head = observation_writer
             .load(operation)
             .await?
@@ -2654,6 +2697,127 @@ mod tests {
         )
         .await?;
         assert_eq!(cold_head, terminal_ack_head);
+
+        // A second real Writer gives the verification intent a clean
+        // post-Terminal, pre-STOP insertion point. The exact plan remains
+        // replayable after STOP and cold reopen, while a new helper id cannot
+        // replace it.
+        let verification_writer = start_admitted_writer("import-verification-plan").await?;
+        seed_named_import_writer_through_claim(
+            &verification_writer,
+            &plan,
+            &digest,
+            helper_id,
+            &authority,
+            &owned,
+            &arm,
+            &arm_result,
+            &claim,
+            &claim_receipt,
+        )
+        .await?;
+        let terminal_pending = verification_writer
+            .record_legacy_named_import_observation(&plan, terminal_request.clone())
+            .await?;
+        assert!(terminal_pending.receipt().is_none());
+        verification_writer
+            .acknowledge_legacy_named_import_observation(
+                operation,
+                &terminal_request,
+                terminal_receipt.clone(),
+            )
+            .await?;
+        let inserted = verification_writer
+            .record_legacy_named_import_verification_plan(&plan, verification_helper_id)
+            .await?;
+        assert!(inserted.inserted());
+        assert!(equal(
+            inserted.preparation().permission(),
+            &verified_prefix.import_verification_permission()?
+        )?);
+        assert_eq!(inserted.parent_revision(), arm.expected_revision);
+        let planned_head = verification_writer
+            .load(operation)
+            .await?
+            .unwrap()
+            .head()
+            .clone();
+        let replay = verification_writer
+            .record_legacy_named_import_verification_plan(&plan, verification_helper_id)
+            .await?;
+        assert!(!replay.inserted());
+        assert!(equal(replay.preparation(), inserted.preparation())?);
+        assert_eq!(
+            verification_writer.load(operation).await?.unwrap().head(),
+            &planned_head
+        );
+        let verification_stops = verification_writer.stops();
+        verification_stops
+            .append_cancel(CancelInputV1::new(operation, Uuid::new_v4())?)
+            .await
+            .map_err(|failure| failure.error())?;
+        assert!(matches!(
+            verification_writer
+                .record_legacy_named_import_verification_plan(&plan, Uuid::new_v4())
+                .await,
+            Err(JournalError::Conflict)
+        ));
+        let stopped_plan = verification_writer
+            .load_legacy_named_import_verification_plan(operation)
+            .await?
+            .ok_or(JournalError::Conflict)?;
+        assert!(equal(
+            &stopped_plan,
+            verification_plan.import_verification_plan().unwrap()
+        )?);
+        let stopped_head = verification_writer
+            .load(operation)
+            .await?
+            .unwrap()
+            .head()
+            .clone();
+        drop(verification_stops);
+        drop(verification_writer);
+        let journal_dir = Directory::open_existing(&root.join("import-verification-plan"))?;
+        let journal = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match Journal::open(
+                    &journal_dir,
+                    scope.clone(),
+                    &FsExclusions::new(),
+                    JournalLimitsV1::default(),
+                    ControlSecrets::new(vec![])?,
+                ) {
+                    Ok(journal) => break Ok(journal),
+                    Err(JournalError::Busy) => tokio::task::yield_now().await,
+                    Err(error) => break Err(error),
+                }
+            }
+        })
+        .await??;
+        let cold_verification_writer = WriterClient::start(journal, 8, Duration::from_secs(5))?;
+        let cold_plan = cold_verification_writer
+            .load_legacy_named_import_verification_plan(operation)
+            .await?
+            .ok_or(JournalError::Conflict)?;
+        assert!(equal(
+            &cold_plan,
+            verification_plan.import_verification_plan().unwrap()
+        )?);
+        let cold_replay = cold_verification_writer
+            .record_legacy_named_import_verification_plan(&plan, verification_helper_id)
+            .await?;
+        assert!(!cold_replay.inserted());
+        assert_eq!(
+            cold_verification_writer
+                .load(operation)
+                .await?
+                .unwrap()
+                .head(),
+            &stopped_head
+        );
+        drop(cold_verification_writer);
+
         let writer = start_admitted_writer("import-creation").await?;
         let before_creation = writer.load(operation).await?.unwrap();
         assert!(matches!(

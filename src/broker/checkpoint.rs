@@ -21,6 +21,7 @@ pub(crate) use legacy_named::LegacyNamedAdmissionCheckpoint as LegacyNamedAdmiss
     reason = "named orchestration consumes the pending view"
 )]
 pub(crate) use legacy_named::LegacyNamedAdmissionPendingV2;
+pub(crate) use legacy_named::LegacyNamedImportVerificationPlanV1;
 pub(crate) use legacy_named::{
     LegacyNamedAdmissionCheckpoint, LegacyNamedCreatedImportEvidenceV1,
     validate_legacy_named_admission_receipt,

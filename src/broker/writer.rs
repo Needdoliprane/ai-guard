@@ -50,6 +50,7 @@ mod legacy_named_admission;
 )]
 pub(in crate::broker) use legacy_named_admission::{
     NamedImportArmWriteFailure, RecordedLegacyNamedImportArm,
+    RecordedLegacyNamedImportVerificationPlan,
 };
 mod queue;
 mod retirement_owners;

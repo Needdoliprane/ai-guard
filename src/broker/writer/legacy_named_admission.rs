@@ -8,8 +8,8 @@ use super::{
 use crate::{
     broker::{
         checkpoint::{
-            DecisionAnswerV1, LegacyNamedAdmissionCheckpoint, SupervisionCheckpointV1,
-            SupervisionOperationV1,
+            DecisionAnswerV1, HelperPreparationV1, LegacyNamedAdmissionCheckpoint,
+            LegacyNamedImportVerificationPlanV1, SupervisionCheckpointV1, SupervisionOperationV1,
         },
         journal::{AcceptedJobV1, RevisionRefV1, canonical},
         lifecycle::LocalCommandRequestV1,
@@ -79,6 +79,28 @@ impl RecordedLegacyNamedImportArm {
 pub(in crate::broker) struct RecordedLegacyNamedImportObservation {
     request: LegacyNamedImportObservationRequestV1,
     receipt: Option<MutationReceiptV1>,
+}
+
+/// Immutable named ImportVerification intent returned by the Writer. The
+/// insertion bit distinguishes a fresh persisted plan from an exact replay;
+/// neither outcome grants a runtime or native capability.
+pub(in crate::broker) struct RecordedLegacyNamedImportVerificationPlan {
+    plan: LegacyNamedImportVerificationPlanV1,
+    inserted: bool,
+}
+
+impl RecordedLegacyNamedImportVerificationPlan {
+    pub(in crate::broker) fn preparation(&self) -> &HelperPreparationV1 {
+        self.plan.preparation()
+    }
+
+    pub(in crate::broker) fn parent_revision(&self) -> u64 {
+        self.plan.parent_revision()
+    }
+
+    pub(in crate::broker) fn inserted(&self) -> bool {
+        self.inserted
+    }
 }
 
 impl RecordedLegacyNamedImportObservation {
@@ -521,6 +543,81 @@ impl WriterClient {
             }
         }
         Err(JournalError::Conflict)
+    }
+
+    /// Persist the one named ImportVerification intent before any helper
+    /// creation or Arm. A first insert is refused after STOP; an exact replay
+    /// only returns the retained plan and never reconstructs a capability.
+    pub(in crate::broker) async fn record_legacy_named_import_verification_plan(
+        &self,
+        plan: &LegacyConfirmedPlanV1,
+        helper_id: Uuid,
+    ) -> JournalResult<RecordedLegacyNamedImportVerificationPlan> {
+        for _ in 0..ACK_CAS_ATTEMPTS {
+            let job = self.load_named_job(plan).await?;
+            let current = super::lifecycle(&job)?;
+            let retained = retained_admission(&job)?;
+            if retained.import_verification_plan().is_some() {
+                let replayed = retained.clone().with_import_verification_plan(helper_id)?;
+                let plan = replayed
+                    .import_verification_plan()
+                    .ok_or(JournalError::Corrupt)?
+                    .clone();
+                return Ok(RecordedLegacyNamedImportVerificationPlan {
+                    plan,
+                    inserted: false,
+                });
+            }
+
+            require_open(&current)?;
+            let pending = retained.clone().with_import_verification_plan(helper_id)?;
+            let expected = pending
+                .import_verification_plan()
+                .ok_or(JournalError::Corrupt)?
+                .clone();
+            let next = with_admission(&current, pending)?;
+            match self
+                .advance_lifecycle_with_publication(plan.operation_id, job.head().clone(), next)
+                .await
+            {
+                Ok(receipt) => {
+                    let saved_job = self
+                        .load(plan.operation_id)
+                        .await?
+                        .ok_or(JournalError::Corrupt)?;
+                    let saved = retained_admission(&saved_job)?
+                        .import_verification_plan()
+                        .ok_or(JournalError::Conflict)?;
+                    if saved_job.head() != receipt.head()
+                        || canonical(saved)? != canonical(&expected)?
+                    {
+                        return Err(JournalError::Conflict);
+                    }
+                    return Ok(RecordedLegacyNamedImportVerificationPlan {
+                        plan: saved.clone(),
+                        inserted: true,
+                    });
+                }
+                Err(LifecycleWriteFailure::BeforePublication(JournalError::Conflict)) => continue,
+                Err(failure) => return Err(failure.journal_error()),
+            }
+        }
+        Err(JournalError::Conflict)
+    }
+
+    /// Load only the retained intent. This data proves what was planned, not
+    /// whether a helper was created, armed, or permitted to start.
+    pub(in crate::broker) async fn load_legacy_named_import_verification_plan(
+        &self,
+        operation: Uuid,
+    ) -> JournalResult<Option<LegacyNamedImportVerificationPlanV1>> {
+        let job = self
+            .load(operation)
+            .await?
+            .ok_or(JournalError::InvalidInput)?;
+        Ok(retained_admission(&job)?
+            .import_verification_plan()
+            .cloned())
     }
 
     /// Journal one exact Started or Terminal observation before the caller
