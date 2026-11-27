@@ -147,6 +147,7 @@ async fn import_creation_orders_native_mutations_with_stop() -> anyhow::Result<(
         Uuid::new_v4(),
     )?
     .with_managed_names("aig-fixture-import", "aig-fixture-worker-work")?;
+    assert!(managed.lookup_never_started_import(&spec).await?.is_none());
     let labels = [("agentsandbox.owner".into(), "expected".into())];
     let cancel = CancelGeneration::new();
     let rejected_generation = cancel.current();
@@ -204,6 +205,18 @@ async fn import_creation_orders_native_mutations_with_stop() -> anyhow::Result<(
     assert_eq!(created.observation.process.running, Some(false));
     assert!(created.observation.process.started_at.is_none());
     assert_eq!(created.observation.id.as_deref(), Some(created.handle.id()));
+    let recovered = managed
+        .lookup_never_started_import(&spec)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("exact Created import was not recovered"))?;
+    assert_eq!(recovered.handle.id(), created.handle.id());
+    assert_eq!(
+        recovered.observation.configuration_fingerprint,
+        created.observation.configuration_fingerprint
+    );
+    fs::write(temporary.path().join("state"), "exited")?;
+    assert!(managed.lookup_created(&spec).await?.is_some());
+    assert!(managed.lookup_never_started_import(&spec).await.is_err());
     let calls = fs::read_to_string(log)?;
     assert_eq!(
         calls

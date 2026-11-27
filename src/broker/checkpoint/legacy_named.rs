@@ -200,6 +200,19 @@ impl LegacyNamedAdmissionCheckpoint {
             .map(|saved| &saved.preparation)
     }
 
+    pub(crate) fn require_import_creation_binding(
+        &self,
+        binding: &RuntimeAuthority,
+    ) -> JournalResult<()> {
+        let creation = self
+            .import_creation
+            .as_deref()
+            .ok_or(JournalError::Conflict)?;
+        let expected =
+            LegacyNamedImportAuthorityV1::for_policy(creation.preparation.policy(), binding)?;
+        ensure(creation.authority.as_ref() == Some(&expected))
+    }
+
     #[allow(dead_code, reason = "the named create caller is composed separately")]
     pub(crate) fn with_import_creation(
         mut self,
@@ -226,13 +239,12 @@ impl LegacyNamedAdmissionCheckpoint {
         binding: &RuntimeAuthority,
         owned: OwnedContainerSnapshot,
     ) -> JournalResult<Self> {
+        self.require_import_creation_binding(binding)?;
         let creation = self
             .import_creation
             .as_mut()
             .ok_or(JournalError::Conflict)?;
         let preparation = &creation.preparation;
-        let expected = LegacyNamedImportAuthorityV1::for_policy(preparation.policy(), binding)?;
-        ensure(creation.authority.as_ref() == Some(&expected))?;
         if let Some(previous) = preparation.owned() {
             ensure(equal(previous, &owned)?)?;
             return Ok(self);

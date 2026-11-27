@@ -1314,6 +1314,24 @@ impl ManagedRuntime {
         self.lookup_created_with_binding(spec, None).await
     }
 
+    /// Recover only a helper proved to be Created and never started.
+    #[cfg(unix)]
+    #[allow(dead_code, reason = "the private named recovery caller is separate")]
+    pub(crate) async fn lookup_never_started_import(
+        &self,
+        spec: &ContainerSpec,
+    ) -> Result<Option<OwnedContainerSnapshot>> {
+        ensure!(
+            matches!(spec.purpose, ContainerPurpose::Import),
+            "named import recovery requires an import helper"
+        );
+        let found = self.lookup_created(spec).await?;
+        if let Some(snapshot) = &found {
+            validate_created(spec, &snapshot.observation)?;
+        }
+        Ok(found)
+    }
+
     /// Read-only recovery lookup for the exact held worker. A returned
     /// snapshot is Created evidence and carries no permission to start.
     #[cfg(unix)]

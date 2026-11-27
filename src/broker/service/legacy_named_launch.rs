@@ -495,6 +495,84 @@ impl Service {
         result
     }
 
+    /// Settle a lost creation result from the original Writer intent. The
+    /// inspection can retain evidence even after STOP and grants no handoff.
+    #[allow(
+        dead_code,
+        reason = "the named import recovery caller is composed separately"
+    )]
+    pub(super) async fn reconcile_legacy_named_import_creation(
+        &self,
+        request: &AuthorizedRequest,
+        operation: Uuid,
+    ) -> Result<(), BrokerErrorCodeV1> {
+        self.validate_control().await?;
+        let retained = request
+            .writer
+            .load(operation)
+            .await
+            .map_err(jobs::journal_error)?
+            .ok_or(BrokerErrorCodeV1::NeedsReconciliation)?;
+        let material = retained
+            .intent()
+            .legacy_named_launch()
+            .ok_or(BrokerErrorCodeV1::Conflict)?;
+        let named = retained
+            .broker_checkpoint_v2()
+            .and_then(|checkpoint| checkpoint.supervision().legacy_named_admission())
+            .filter(|named| named.plan() == &material.plan)
+            .ok_or(BrokerErrorCodeV1::NeedsReconciliation)?;
+        let digest = named
+            .archive_digest()
+            .ok_or(BrokerErrorCodeV1::NeedsReconciliation)?;
+        let preparation = named
+            .import_creation()
+            .ok_or(BrokerErrorCodeV1::NeedsReconciliation)?;
+        if preparation.owned().is_some() {
+            return Ok(());
+        }
+
+        let profile = &request.profile;
+        let options = retained.intent().initial_options().run_options();
+        if options.runtime_endpoint.as_deref() != Some(profile.runtime_endpoint.as_str()) {
+            return Err(BrokerErrorCodeV1::Conflict);
+        }
+        let config_path = profile.config_dir.clone();
+        let kind = profile.runtime;
+        let program = profile.runtime_program.clone();
+        let (config, approved) = self
+            .filesystem(move || {
+                Ok((
+                    Directory::open_existing(&config_path)?,
+                    Runtime::with_program(kind, &program)?,
+                ))
+            })
+            .await?;
+        let runtime = reopen_legacy_named_runtime(material, &options, &config, &approved)
+            .await
+            .map_err(|_| BrokerErrorCodeV1::NeedsReconciliation)?;
+        named
+            .require_import_creation_binding(runtime.binding())
+            .map_err(jobs::journal_error)?;
+        let spec = broker_helper_spec(preparation.policy())
+            .map_err(|_| BrokerErrorCodeV1::NeedsReconciliation)?;
+        let owned = runtime
+            .lookup_never_started_import(&spec)
+            .await
+            .map_err(|_| BrokerErrorCodeV1::NeedsReconciliation)?
+            .ok_or(BrokerErrorCodeV1::NeedsReconciliation)?;
+        request
+            .writer
+            .acknowledge_legacy_named_import_creation(
+                &material.plan,
+                digest,
+                runtime.binding(),
+                owned,
+            )
+            .await
+            .map_err(jobs::journal_error)
+    }
+
     async fn named_preflight(
         &self,
         scope: &JournalScopeV1,
