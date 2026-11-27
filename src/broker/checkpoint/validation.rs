@@ -787,6 +787,10 @@ impl BrokerCheckpointV2 {
             let request = &named.request().admission;
             ensure(
                 named.archive_digest().is_some() == named_intent.is_some()
+                    && (named.archive_digest().is_none()
+                        || intent
+                            .legacy_named_launch()
+                            .is_some_and(|material| material.source_identity_hash.is_some()))
                     && named.plan().broker_profile_id == scope.profile_id()
                     && equal(&request.admission.decision_request, context.request)?
                     && context.owned.is_none(),

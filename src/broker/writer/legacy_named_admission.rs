@@ -13,7 +13,8 @@ use crate::{
         lifecycle::LocalCommandRequestV1,
     },
     control::{
-        WorkerMutationV1, WorkerStateV1, WorkerTransitionV1, WorkerV1,
+        AdmissionV1, SupervisedAdmissionV1, SupervisionProtocolV1, WorkerMutationV1, WorkerStateV1,
+        WorkerTransitionV1, WorkerV1,
         session_control::{
             LegacyConfirmedPlanV1, LegacyNamedAdmissionReceiptV1, LegacyNamedInitialDecisionV1,
             LegacyNamedSupervisedAdmissionV1,
@@ -90,7 +91,6 @@ impl WriterClient {
     pub(in crate::broker) async fn record_legacy_named_admission(
         &self,
         plan: &LegacyConfirmedPlanV1,
-        request: LegacyNamedSupervisedAdmissionV1,
         archive_digest: String,
     ) -> JournalResult<RecordedLegacyNamedAdmission> {
         let job = self.load_named_job(plan).await?;
@@ -104,6 +104,7 @@ impl WriterClient {
         {
             return Err(JournalError::Conflict);
         }
+        let request = request_from_initial_decision(&job, &current)?;
         let pending = LegacyNamedAdmissionCheckpoint::pending_with_archive(
             plan.clone(),
             request,
@@ -247,6 +248,45 @@ fn retained_admission(job: &AcceptedJobV1) -> JournalResult<&LegacyNamedAdmissio
         return Err(JournalError::Conflict);
     }
     Ok(retained)
+}
+
+fn request_from_initial_decision(
+    job: &AcceptedJobV1,
+    current: &BrokerCheckpointV3,
+) -> JournalResult<LegacyNamedSupervisedAdmissionV1> {
+    let material = job
+        .intent()
+        .legacy_named_launch()
+        .ok_or(JournalError::Conflict)?;
+    let [
+        SupervisionOperationV1::Decision {
+            request,
+            response: Some(answer),
+        },
+    ] = current.broker().supervision().operations()
+    else {
+        return Err(JournalError::Conflict);
+    };
+    if answer.decision().outcome != crate::model::Outcome::Allow {
+        return Err(JournalError::Conflict);
+    }
+    Ok(LegacyNamedSupervisedAdmissionV1 {
+        version: 1,
+        binding_ref: material.plan.binding_ref,
+        broker_profile_id: job.scope().profile_id().to_owned(),
+        admission: SupervisedAdmissionV1 {
+            version: 1,
+            protocol: SupervisionProtocolV1::BrokerSupervisionV1,
+            intent_hash: job.intent_hash().to_owned(),
+            admission: AdmissionV1 {
+                version: 1,
+                operation_id: job.operation_id().to_string(),
+                decision_request: request.clone(),
+                receipt: answer.receipt().clone(),
+                launch: material.launch.clone(),
+            },
+        },
+    })
 }
 
 fn with_admission(

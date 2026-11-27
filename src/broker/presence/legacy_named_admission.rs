@@ -164,14 +164,12 @@ pub(super) async fn admit(
     presence: &PreparedPresence,
     writer: &WriterClient,
     material: &LegacyConfirmedLaunchSpecV1,
-    request: LegacyNamedSupervisedAdmissionV1,
     (archive, config): (LegacyNamedWorkspaceArchiveV1, Directory),
     (cancel, expected_generation): (&CancelGeneration, u64),
 ) -> Result<Outcome> {
     validate_writer_scope(presence, writer.scope())?;
     let plan = &material.plan;
-    require_launch_scope(presence, request.binding_ref, material)?;
-    validate_plan(presence, writer.scope().profile_id(), &request, plan)?;
+    require_launch_scope(presence, plan.binding_ref, material)?;
     let client = Arc::new(Client::new(presence)?);
     checked_identity(&client, presence).await?;
     let job = writer
@@ -208,10 +206,11 @@ pub(super) async fn admit(
         .with_current_generation(expected_generation, || ())
         .map_err(|_| PresenceError::Stopped)?;
     let pending = writer
-        .record_legacy_named_admission(plan, request, archive_digest)
+        .record_legacy_named_admission(plan, archive_digest)
         .await
         .map_err(named_write_error)?;
     let request = pending.into_request();
+    validate_plan(presence, writer.scope().profile_id(), &request, plan)?;
     let outcome = send_request(
         &client,
         presence,

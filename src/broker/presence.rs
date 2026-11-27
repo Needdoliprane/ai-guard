@@ -7,7 +7,6 @@ use crate::{
         MutationResultV1,
         session_control::{
             LegacyConfirmedLaunchSpecV1, LegacyConfirmedPlanV1, LegacyNamedInitialDecisionV1,
-            LegacyNamedSupervisedAdmissionV1,
         },
     },
     control_fs::{Directory, PrivateFile},
@@ -386,12 +385,11 @@ impl PreparedPresence {
         &self,
         writer: &WriterClient,
         material: &LegacyConfirmedLaunchSpecV1,
-        request: LegacyNamedSupervisedAdmissionV1,
         archive: (LegacyNamedWorkspaceArchiveV1, Directory),
         generation: (&CancelGeneration, u64),
     ) -> Result<LegacyNamedAdmissionOutcome> {
         self.revalidate()?;
-        legacy_named_admission::admit(self, writer, material, request, archive, generation).await
+        legacy_named_admission::admit(self, writer, material, archive, generation).await
     }
     /// Read a receipt for the exact retained request after a missed reply.
     #[allow(
