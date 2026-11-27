@@ -15,11 +15,12 @@ use crate::{
         lifecycle::LocalCommandRequestV1,
     },
     control::{
-        AdmissionV1, ArmReceiptV1, ArmResultV1, ArmV1, SupervisedAdmissionV1,
+        AdmissionV1, ArmReceiptV1, ArmResultV1, ArmV1, MutationReceiptV1, SupervisedAdmissionV1,
         SupervisionProtocolV1,
         session_control::{
             LegacyConfirmedPlanV1, LegacyNamedAdmissionReceiptV1, LegacyNamedImportArmRequestV1,
-            LegacyNamedInitialDecisionV1, LegacyNamedSupervisedAdmissionV1,
+            LegacyNamedImportClaimRequestV1, LegacyNamedInitialDecisionV1,
+            LegacyNamedSupervisedAdmissionV1,
         },
     },
     runtime::{OwnedContainerSnapshot, RuntimeAuthority},
@@ -423,6 +424,65 @@ impl WriterClient {
             let next = with_admission(&current, acknowledged)?;
             // A concurrent STOP advances the prefix. Keep the received Arm
             // and rebuild the acknowledgement against the new head.
+            match self
+                .advance_lifecycle_with_publication(operation, job.head().clone(), next)
+                .await
+            {
+                Ok(_) => return Ok(()),
+                Err(LifecycleWriteFailure::BeforePublication(JournalError::Conflict)) => continue,
+                Err(failure) => return Err(failure.journal_error()),
+            }
+        }
+        Err(JournalError::Conflict)
+    }
+
+    /// Persist claim data against the acknowledged Arm. The live native
+    /// binding and permission to dispatch belong to a separate boundary.
+    #[allow(
+        dead_code,
+        reason = "named claim transport and native binding are composed separately"
+    )]
+    pub(in crate::broker) async fn record_legacy_named_import_claim(
+        &self,
+        plan: &LegacyConfirmedPlanV1,
+        request: LegacyNamedImportClaimRequestV1,
+    ) -> JournalResult<()> {
+        let job = self.load_named_job(plan).await?;
+        let current = super::lifecycle(&job)?;
+        require_open(&current)?;
+        let pending = retained_admission(&job)?
+            .clone()
+            .with_import_claim(request)?;
+        let next = with_admission(&current, pending)?;
+        self.advance_lifecycle(job.operation_id(), job.head().clone(), next)
+            .await?;
+        Ok(())
+    }
+
+    /// Preserve the exact receipt of a retained request, including after STOP.
+    #[allow(dead_code, reason = "named claim transport is composed separately")]
+    pub(in crate::broker) async fn acknowledge_legacy_named_import_claim(
+        &self,
+        operation: Uuid,
+        request: &LegacyNamedImportClaimRequestV1,
+        receipt: MutationReceiptV1,
+    ) -> JournalResult<()> {
+        for _ in 0..ACK_CAS_ATTEMPTS {
+            let job = self
+                .load(operation)
+                .await?
+                .ok_or(JournalError::InvalidInput)?;
+            let retained = retained_admission(&job)?;
+            let saved = retained.import_claim().ok_or(JournalError::Conflict)?;
+            if canonical(saved.request())? != canonical(request)? {
+                return Err(JournalError::Conflict);
+            }
+            let acknowledged = retained.clone().acknowledge_import_claim(receipt.clone())?;
+            if saved.receipt().is_some() {
+                return Ok(());
+            }
+            let current = super::lifecycle(&job)?;
+            let next = with_admission(&current, acknowledged)?;
             match self
                 .advance_lifecycle_with_publication(operation, job.head().clone(), next)
                 .await
