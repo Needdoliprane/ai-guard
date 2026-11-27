@@ -11,7 +11,7 @@ permissions:
   contents: read
 
 env:
-  HANDOFF_SOURCE_SHA: d501b9de0d66575e5ca7615547c60b25dc12e433
+  HANDOFF_SOURCE_SHA: b056d68a95b376b272cfdb49e6337e9cbcbee133
   HANDOFF_ORACLE: software_broker_missing_receipt_expires_under_original_arm_without_exec
 
 jobs:
@@ -89,6 +89,11 @@ jobs:
           relay_error='(Unavailable|InvalidMaterial|Scope|Expired|Clock|Cancelled|Capacity|Unknown)'
           relay_view="configured=${flag} freshness=(RetainedAtLastObservation|NotObserved) attachment_phase=(None|Some\(${relay_phase}\)) endpoint_present=${flag} core_state=(None|Some\(${core_state}\)) last_error=(None|Some\(${relay_error}\)) reconciliation_required=${flag}"
           job_view="state=${job_state} head_revision=(None|Some\(${number}\)) pending_rpcs=(None|Some\(${number}\)) failure_count=${number} worker_state=(None|Some\(${worker_state}\)) quota_held=(None|Some\(${flag}\)) executor_running=${flag} executor_error=(None|Some\(${code}\))"
+          witness_value='(true|false|Unknown)'
+          failure_phase='(Decision|WorkspacePreparation|Admission|Import|ImportVerification|Worker|FinalScan|Export|Cleanup)'
+          broker_step='(Unknown|terminal_observation_ack|result_audit|cleanup_confirmation|cleanup_ack|failure_observed)'
+          runtime_stage='(Unknown|observe_only|authority_before_spawn|invocation_before_spawn|stop_before_spawn|guard_before_spawn|spawn|started_observation)'
+          enforcer_stage='(Unknown|register|before_claim|prepare|before_spawn)'
           grep -Ex \
             -e "$progress_pattern" \
             -e "$outcome_pattern" \
@@ -97,6 +102,8 @@ jobs:
             -e "${phase} view=relay_status category=observed ${relay_view}" \
             -e "${phase} view=job_status category=observed ${job_view}" \
             -e "${phase} view=worker category=(endpoint_unavailable|identity_unconfirmed|absent|read_error|observed state=${worker_state} quota_held=${flag})" \
+            -e "phase=handoff_worker_terminal view=runtime_witness stop_received=${witness_value} terminal=${witness_value}" \
+            -e "phase=handoff_worker_terminal view=batch_failure category=(not_observed|Unknown|observed failure_phase=${failure_phase} broker_step=${broker_step} runtime_stage=${runtime_stage} enforcer_stage=${enforcer_stage})" \
             -e 'phase=fixture_legacy_guardian_close category=(original_exit_observed|idle_acknowledged_exit|exact_fixture_signal_exit|exact_fixture_signal_exit_idle_unconfirmed)' \
             "$handoff_log" | sed -n '1,20p' || true
 
