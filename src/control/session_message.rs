@@ -29,6 +29,18 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CodexJsonRpcFrameV1 {
+    jsonrpc: String,
+    #[serde(default)]
+    id: Option<u64>,
+    method: Option<String>,
+    params: Option<Value>,
+    result: Option<Value>,
+    error: Option<Value>,
+}
+
 pub mod claude;
 
 /// Upper bound of one framed conversation line (request or response). A frame
@@ -40,6 +52,8 @@ const FRAME_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 const WRITE_RETRY_INTERVAL: Duration = Duration::from_millis(5);
 const CHILD_REAP_TIMEOUT: Duration = Duration::from_secs(2);
 const CHILD_REAP_POLL_INTERVAL: Duration = Duration::from_millis(10);
+const CODEX_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+const CODEX_HANDSHAKE_MAX_NOTIFICATIONS: usize = 32;
 
 /// The exact `turn/start` request the control writes for one instruction. The
 /// control correlates it locally by `rpc_id`; the operation identity and the
@@ -274,6 +288,19 @@ impl ConversationAdapterV1 {
     }
 }
 
+/// Process-local proof that one exact owned stdio child answered Codex's
+/// `thread/start` request. This type is deliberately private and has no wire
+/// or persistence representation: HTTP metadata cannot mint it.
+pub(crate) struct CodexThreadProofV1 {
+    thread_id: String,
+}
+
+impl CodexThreadProofV1 {
+    pub(crate) fn thread_id(&self) -> &str {
+        &self.thread_id
+    }
+}
+
 /// A complete framed write to the exact owned stdio channel, or a read of one
 /// bounded response line with a deadline. The transport never interprets the
 /// instruction as a shell command and never opens a network socket: it is a
@@ -283,6 +310,7 @@ pub struct StdioConversation {
     retire: std::sync::mpsc::Sender<std::process::Child>,
     stdin: Option<std::process::ChildStdin>,
     lines: std::sync::mpsc::Receiver<std::io::Result<String>>,
+    codex_thread_proof: Option<CodexThreadProofV1>,
 }
 
 /// A borrowed, currently usable nonblocking FIFO writer. Preparation does
@@ -335,6 +363,7 @@ impl StdioConversation {
             retire,
             stdin,
             lines,
+            codex_thread_proof: None,
         };
         let stdout = stdout.ok_or_else(|| io::Error::other("conversation stdout unavailable"))?;
         let reader = std::thread::Builder::new().spawn(move || {
@@ -426,6 +455,126 @@ impl StdioConversation {
                     io::Error::new(io::ErrorKind::UnexpectedEof, "conversation channel closed")
                 }
             })?
+    }
+
+    /// Initialize Codex app-server and obtain a native thread identity from
+    /// this exact child before its channel can be durably admitted.
+    pub(crate) fn codex_thread_proof(&mut self) -> io::Result<&CodexThreadProofV1> {
+        if self.codex_thread_proof.is_none() {
+            self.codex_thread_proof = Some(self.start_codex_thread()?);
+        }
+        Ok(self
+            .codex_thread_proof
+            .as_ref()
+            .expect("Codex proof installed"))
+    }
+
+    fn start_codex_thread(&mut self) -> io::Result<CodexThreadProofV1> {
+        let response_deadline = Instant::now() + CODEX_HANDSHAKE_TIMEOUT;
+        let initialize = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {"clientInfo": {"name": "ai-guard", "version": env!("CARGO_PKG_VERSION")}},
+        });
+        self.write_frame(&initialize.to_string())?;
+        let initialized = self.read_codex_response(1, response_deadline)?;
+        if !initialized.is_object() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid Codex initialize response",
+            ));
+        }
+        self.write_frame(r#"{"jsonrpc":"2.0","method":"initialized"}"#)?;
+
+        let start = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "thread/start",
+            "params": {},
+        });
+        self.write_frame(&start.to_string())?;
+        let started = self.read_codex_response(2, response_deadline)?;
+        let thread_id = started
+            .pointer("/thread/id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty() && id.len() <= 128 && !id.chars().any(char::is_control))
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "Codex thread/start omitted a valid thread id",
+                )
+            })?;
+        Ok(CodexThreadProofV1 {
+            thread_id: thread_id.to_owned(),
+        })
+    }
+
+    fn read_codex_response(&mut self, expected_id: u64, deadline: Instant) -> io::Result<Value> {
+        for _ in 0..=CODEX_HANDSHAKE_MAX_NOTIFICATIONS {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "Codex handshake timed out",
+                ));
+            }
+            let line = self.read_line(remaining)?;
+            // The re-executed libtest fixture can emit bounded harness text on
+            // stdout before its first frame. Such text is never accepted as
+            // identity evidence; only a correlated JSON-RPC response is.
+            // Ignore only non-JSON harness chatter. Once a line is JSON,
+            // enforce the closed top-level envelope (including duplicate
+            // known fields) instead of treating schema errors as noise.
+            if serde_json::from_str::<Value>(&line).is_err() {
+                continue;
+            }
+            let frame = serde_json::from_str::<CodexJsonRpcFrameV1>(&line).map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "invalid Codex JSON-RPC envelope",
+                )
+            })?;
+            if frame.jsonrpc != "2.0" {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "invalid Codex JSON-RPC version",
+                ));
+            }
+            let Some(id) = frame.id else {
+                // Bounded provider notifications may precede the response.
+                if frame.method.is_none() || frame.result.is_some() || frame.error.is_some() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "invalid Codex JSON-RPC notification",
+                    ));
+                }
+                let _ = frame.params;
+                continue;
+            };
+            if id != expected_id || frame.method.is_some() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "discordant Codex RPC response id",
+                ));
+            }
+            if frame.error.is_some() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "Codex RPC request refused",
+                ));
+            }
+            return frame.result.ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "Codex RPC response omitted result",
+                )
+            });
+        }
+        Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "too many Codex handshake notifications",
+        ))
     }
 
     /// Close the write side and reap the child. Used by STOP and by teardown.

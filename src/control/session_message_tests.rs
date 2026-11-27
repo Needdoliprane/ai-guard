@@ -148,26 +148,74 @@ fn frame_is_bounded_and_carries_the_exact_text() {
 
 // --- stdio fixture child ---
 
-/// The controlled JSON-RPC peer. Re-executed by the tests below via the test
-/// binary; it reads `turn/start` requests on stdin and answers on stdout
-/// according to `AI_GUARD_CONV_FIXTURE_MODE`. It is a fixture, not a provider.
+/// The controlled JSON-RPC peer. Re-executed by tests via the test binary; it
+/// supports the Codex initialize/thread handshake and synthetic turns. It is
+/// a fixture, not a provider.
 #[test]
 #[ignore = "stdio fixture child, re-executed by the conversation tests"]
 fn conversation_fixture_child() {
     use std::io::BufRead;
     let mode = std::env::var("AI_GUARD_CONV_FIXTURE_MODE").unwrap_or_else(|_| "normal".into());
+    let native_thread_id = format!("fixture-thread-{}", std::process::id());
     let stdin = std::io::stdin();
     for line in stdin.lock().lines() {
         let Ok(line) = line else { break };
         let Ok(value) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
-        if value.get("method").and_then(Value::as_str) != Some("turn/start") {
-            continue;
+        match value.get("method").and_then(Value::as_str) {
+            Some("initialized") => continue,
+            Some("initialize") => {
+                if let Some(rpc_id) = value.get("id").and_then(Value::as_u64) {
+                    println!("{}", json!({"jsonrpc":"2.0","id":rpc_id,"result":{}}));
+                }
+                continue;
+            }
+            Some("thread/start") => {
+                if let Some(rpc_id) = value.get("id").and_then(Value::as_u64) {
+                    if mode.starts_with("expect-thread-id=") {
+                        println!(
+                            "{}",
+                            json!({"jsonrpc":"2.0","id":rpc_id,"error":{"code":-32602,"message":"thread evidence unavailable"}})
+                        );
+                    } else {
+                        println!(
+                            "{}",
+                            json!({"jsonrpc":"2.0","id":rpc_id,"result":{"thread":{"id":native_thread_id}}})
+                        );
+                    }
+                }
+                continue;
+            }
+            Some("turn/start") => {}
+            _ => continue,
         }
         let Some(rpc_id) = value.get("id").and_then(Value::as_u64) else {
             continue;
         };
+        if mode == "native-thread"
+            && value.pointer("/params/threadId").and_then(Value::as_str)
+                != Some(native_thread_id.as_str())
+        {
+            println!(
+                "{}",
+                json!({"jsonrpc":"2.0","id":rpc_id,"error":{"code":-32602,"message":"native thread not used"}})
+            );
+            continue;
+        }
+        if let Some(expected) = mode.strip_prefix("expect-thread-id=")
+            && value.pointer("/params/threadId").and_then(Value::as_str) != Some(expected)
+        {
+            println!(
+                "{}",
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": rpc_id,
+                    "error": {"code": -32602, "message": "unexpected fixture thread"}
+                })
+            );
+            continue;
+        }
         match mode.as_str() {
             "cut" => {
                 // Read the request (possible emission) then drop the channel
@@ -218,6 +266,24 @@ fn conversation_fixture_child() {
             }
         }
     }
+}
+
+#[test]
+fn stdio_thread_id_is_learned_from_and_used_on_the_same_child() {
+    let mut child = spawn_fixture("native-thread");
+    let thread_id = child.codex_thread_proof().unwrap().thread_id().to_owned();
+    assert!(thread_id.starts_with("fixture-thread-"));
+    let mut adapter = ConversationAdapterV1::new();
+    let request = adapter
+        .issue_turn(uuid::Uuid::new_v4(), &thread_id, "synthetic instruction")
+        .unwrap();
+    child.write_frame(&request.frame().unwrap()).unwrap();
+    let turn = next_json(&mut child);
+    assert_eq!(turn["id"], request.rpc_id);
+    assert!(matches!(
+        adapter.reconcile_response(&turn),
+        Some(AckObservationV1::Acknowledged { .. })
+    ));
 }
 
 /// Spawn the fixture child with its own mode in the child environment (no

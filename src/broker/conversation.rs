@@ -71,6 +71,7 @@ const EPOCH_RETRY_INTERVAL: Duration = Duration::from_millis(5);
 struct BoundConversation {
     adapter: ConversationAdapterV1,
     channel: StdioConversation,
+    thread_id: String,
 }
 
 /// The immutable durable binding and the signal to retire its owned channel.
@@ -174,6 +175,19 @@ pub struct SessionConversationComposerV1<'a> {
     before_ack: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     #[cfg(test)]
     stop_slot_observer: Option<std::sync::mpsc::Sender<()>>,
+}
+
+fn channel_matches_binding(
+    channel: &SessionConversationChannelV1,
+    binding: &SessionConversationBindingV1,
+) -> bool {
+    binding.broker_id.as_deref() == Some(channel.broker_id.as_str())
+        && binding.broker_incarnation.as_deref() == Some(channel.broker_incarnation.as_str())
+        && binding.worker_id.as_deref() == Some(channel.worker_id.as_str())
+        && binding.attempt_id.as_deref() == Some(channel.attempt_id.as_str())
+        && binding.runtime_instance.as_deref() == Some(channel.runtime_instance.as_str())
+        && binding.provider.as_deref() == Some(channel.provider.as_str())
+        && binding.protocol.as_deref() == Some(channel.protocol.as_str())
 }
 
 #[cfg(test)]
@@ -330,6 +344,7 @@ impl<'a> SessionConversationComposerV1<'a> {
         stdio: StdioConversation,
     ) -> anyhow::Result<SessionConversationBindingV1> {
         canonical_uuid(session_id)?;
+        channel.validate()?;
         // Snapshot the currently published slot while holding the same epoch
         // used by bind/STOP publishers. Reap outside both publication guards.
         let observed = {
@@ -345,6 +360,78 @@ impl<'a> SessionConversationComposerV1<'a> {
             // predecessor is reaped. Same-bind replay follows this path too.
             self.reap_predecessor(existing)?;
         }
+
+        // Exact replays reuse their already admitted child and native thread.
+        // Resolve this before starting a thread on a newly presented pipe: a
+        // replay after process loss must remain refused, not create an orphan.
+        {
+            let epoch = self.write_epoch()?;
+            let access = HumanSourceAccess::write(&epoch, self.source)?;
+            let sessions = self.sessions.lock().expect("conversation registry");
+            let current_slot = sessions.get(session_id);
+            let same_slot = match (&observed, current_slot) {
+                (None, None) => true,
+                (Some(observed), Some(current)) => Arc::ptr_eq(observed, current),
+                _ => false,
+            };
+            anyhow::ensure!(same_slot, SessionMessageFailureV1::BindingChanged);
+            let previous = self
+                .store
+                .session_conversation_binding_read(&access, session_id)?;
+            anyhow::ensure!(
+                previous.status != SessionConversationStatusV1::Closed,
+                SessionMessageFailureV1::SessionClosed
+            );
+            let replay_candidate = previous.status == SessionConversationStatusV1::Active
+                && expected_input_epoch.checked_add(1) == Some(previous.input_epoch)
+                && channel_matches_binding(&channel, &previous);
+            if replay_candidate {
+                let binding = self.store.bind_session_conversation_scoped(
+                    &epoch,
+                    self.source,
+                    &BindSessionConversationV1 {
+                        version: 1,
+                        operation_id,
+                        session_id: session_id.into(),
+                        expected_input_epoch,
+                        channel: channel.clone(),
+                    },
+                )?;
+                anyhow::ensure!(binding == previous, SessionMessageFailureV1::BindingChanged);
+                let existing = current_slot
+                    .cloned()
+                    .ok_or(SessionMessageFailureV1::ChannelNotAdmitted)?;
+                anyhow::ensure!(
+                    existing.binding == binding,
+                    SessionMessageFailureV1::BindingChanged
+                );
+                drop(sessions);
+                drop(epoch);
+                self.reap_predecessor(&existing)?;
+                return Ok(binding);
+            }
+            anyhow::ensure!(
+                previous.input_epoch == expected_input_epoch,
+                SessionMessageFailureV1::BindingChanged
+            );
+        }
+
+        // Codex app-server thread identity is accepted only from a correlated
+        // response on this exact owned child. It is held process-locally and
+        // never supplied by the channel DTO or an HTTP request.
+        let thread_id = if channel.provider == "codex" {
+            anyhow::ensure!(
+                channel.protocol == "codex-app-server-v2",
+                SessionMessageFailureV1::ChannelNotAdmitted
+            );
+            stdio
+                .codex_thread_proof()
+                .map_err(|_| SessionMessageFailureV1::ChannelNotAdmitted)?
+                .thread_id()
+                .to_owned()
+        } else {
+            session_id.to_owned()
+        };
 
         let epoch = self.write_epoch()?;
         let access = HumanSourceAccess::write(&epoch, self.source)?;
@@ -405,6 +492,7 @@ impl<'a> SessionConversationComposerV1<'a> {
             bound: Mutex::new(BoundConversation {
                 adapter: ConversationAdapterV1::new(),
                 channel: stdio,
+                thread_id,
             }),
             predecessor: PendingPredecessor::default(),
         });
@@ -499,9 +587,10 @@ impl<'a> SessionConversationComposerV1<'a> {
                     && emission.input_epoch == slot.binding.input_epoch,
                 SessionMessageFailureV1::BindingChanged
             );
-            let request = bound
-                .adapter
-                .issue_turn(operation_id, session_id, &emission.content)?;
+            let request =
+                bound
+                    .adapter
+                    .issue_turn(operation_id, &bound.thread_id, &emission.content)?;
             let frame = request.frame()?;
             if let Err(error) = input.write_frame_guarded(
                 &frame,

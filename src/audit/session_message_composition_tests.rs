@@ -1078,8 +1078,9 @@ fn composition_cut_after_emission_retains_uncertainty() {
     let session_two = launched_session(&retained, &scope, &principal);
     let session_two_uuid = Uuid::parse_str(&session_two.session_id).unwrap();
     let (reader, writer) = std::io::pipe().unwrap();
-    let dead =
-        spawn_fixture("normal").with_stdin_for_test(std::os::fd::OwnedFd::from(writer).into());
+    let mut dead = spawn_fixture("normal");
+    dead.codex_thread_proof().unwrap();
+    let dead = dead.with_stdin_for_test(std::os::fd::OwnedFd::from(writer).into());
     drop(reader);
     composer
         .admit_channel(
@@ -1405,6 +1406,108 @@ fn composition_bind_failure_leaves_no_channel() {
         message_failure(&refusal),
         Some(SessionMessageFailureV1::ChannelNotAdmitted)
     );
+}
+
+// A Codex channel without a correlated child-native thread/start response
+// cannot be admitted. The metadata-only fixture intentionally refuses it.
+#[test]
+fn composition_refuses_codex_channel_without_native_thread_evidence() {
+    let harness = Harness::new();
+    harness.install_markers();
+    let retained = harness.retained("composition-native-thread-evidence.json");
+    let (principal, membership) = provision_membership(&retained).unwrap();
+    let scope = personal_scope(&retained, &principal, &membership);
+    let session = launched_session(&retained, &scope, &principal);
+    let session_id = session.session_id.as_str();
+    let composer = SessionConversationComposerV1::new(
+        &retained.store,
+        &retained.owner,
+        &retained.source,
+        Duration::from_secs(10),
+    )
+    .unwrap();
+
+    // The fixture has issued no thread/start reply. It will acknowledge
+    // turn/start only if the wire request contains the ai-guard session ID.
+    let mode = format!("expect-thread-id={session_id}");
+    let admission = composer.admit_channel(
+        Uuid::new_v4(),
+        session_id,
+        0,
+        channel_facts("attempt-1"),
+        spawn_fixture(&mode),
+    );
+    let refusal = match admission {
+        Err(error) => error,
+        Ok(binding) => {
+            let operation = Uuid::new_v4();
+            send_message(
+                &retained,
+                &scope,
+                operation,
+                Uuid::parse_str(session_id).unwrap(),
+                binding.input_epoch,
+                "synthetic instruction",
+            )
+            .unwrap();
+            let receipts = composer.dispatch(session_id).unwrap();
+            assert_eq!(receipts.len(), 1);
+            assert_eq!(receipts[0].operation_id, operation);
+            assert_eq!(
+                receipts[0].status,
+                SessionMessageStatusV1::Acknowledged,
+                "admission accepted an unproven channel, without the expected wire witness"
+            );
+            panic!(
+                "an unproven channel sent the ai-guard session ID in turn/start.params.threadId"
+            );
+        }
+    };
+    assert_eq!(
+        message_failure(&refusal),
+        Some(SessionMessageFailureV1::ChannelNotAdmitted)
+    );
+    assert_eq!(kind_count(&retained.store, CONVERSATION_BOUND_KIND), 0);
+}
+
+#[test]
+fn composition_dispatches_on_the_native_thread_returned_by_the_admitted_child() {
+    let harness = Harness::new();
+    harness.install_markers();
+    let retained = harness.retained("composition-native-thread-bound.json");
+    let (principal, membership) = provision_membership(&retained).unwrap();
+    let scope = personal_scope(&retained, &principal, &membership);
+    let session = launched_session(&retained, &scope, &principal);
+    let composer = SessionConversationComposerV1::new(
+        &retained.store,
+        &retained.owner,
+        &retained.source,
+        Duration::from_secs(10),
+    )
+    .unwrap();
+    let binding = composer
+        .admit_channel(
+            Uuid::new_v4(),
+            &session.session_id,
+            0,
+            channel_facts("native-thread-bound"),
+            spawn_fixture("native-thread"),
+        )
+        .unwrap();
+    let operation = Uuid::new_v4();
+    send_message(
+        &retained,
+        &scope,
+        operation,
+        Uuid::parse_str(&session.session_id).unwrap(),
+        binding.input_epoch,
+        "synthetic instruction",
+    )
+    .unwrap();
+    let receipts = composer.dispatch(&session.session_id).unwrap();
+    assert_eq!(receipts.len(), 1);
+    assert_eq!(receipts[0].operation_id, operation);
+    assert_eq!(receipts[0].status, SessionMessageStatusV1::Acknowledged);
 }
 
 #[test]
@@ -1792,7 +1895,9 @@ fn assert_stop_fences_remaining_conversation_bytes(
     let stop_operation = Uuid::new_v4();
     let (reader, writer) = std::io::pipe().unwrap();
     let mut peer = eof_fixture::Parser::start(reader);
-    let channel = spawn_fixture("normal").with_stdin_for_test(OwnedFd::from(writer).into());
+    let mut channel = spawn_fixture("normal");
+    channel.codex_thread_proof().unwrap();
+    let channel = channel.with_stdin_for_test(OwnedFd::from(writer).into());
     let mut composer = SessionConversationComposerV1::new(
         &retained.store,
         &retained.owner,
