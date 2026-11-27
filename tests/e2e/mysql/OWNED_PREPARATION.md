@@ -12,10 +12,13 @@ par l’opérateur. L’installation sélectionne directement le format 14 ou 15
    visibilité démontrée. Garder cette connexion pour le premier DDL, la
    transaction de publication et la vérification finale. Un reçu de prévol
    obtenu sur une connexion fermée ne donne aucun droit d’écrire.
-2. Sur une cible non vide, vérifier intégralement le format demandé, son
-   origine et l’état durable. Une cible exacte et vérifiée répond en lecture
-   seule. Une cible Legacy, divergente ou partielle est refusée avant toute
-   écriture. Un verrou perdu ou un inventaire incertain ferme la préparation.
+2. Sur une cible non vide, vérifier dans un seul instantané en lecture seule
+   le format demandé, le manifeste, la cible physique, le tenant, le namespace,
+   l’ancre de l’opération exacte et la tête du préfixe initial. Le reçu exige
+   les projections vides de cet état initial. Une cible Legacy, étrangère,
+   divergente, partielle ou déjà passée au-delà de l’état initial est refusée
+   sans DDL ni transaction d’écriture. Un verrou perdu ou un inventaire
+   incertain ferme la préparation.
 3. Sur une cible vide, exécuter les créations strictes prévues par le format.
    Factoriser les déclarations réellement communes avec le DDL Legacy. La
    sentinelle d’audit reste absente pendant le DDL. L’ancien lecteur doit
@@ -184,12 +187,15 @@ pouvoir référencer les tables de la cible et garder `foreign_key_checks` et
    le singleton et rejoue le préfixe fermé avant `COMMIT`, et `verify_published`
    revérifie le format, l’origine, le tenant, le namespace, la tête et le
    manifeste physique sous verrou dans un nouvel instantané après commit.
-   `prepare_owned_fresh_source` enchaîne installation et publication et rend un
-   reçu sans autorité d’admission. Restent à livrer : la genèse egress du format
-   15 et les marqueurs de supervision owned, le chemin d’écriture owned sur 14/15
-   (le lecteur Legacy reste fermé à ces versions), et le raccord du gateway qui
-   ouvrira la cible publiée via `verify_published`. La recette physique de ces
-   oracles reste `NOT_RUN` sans serveur MySQL 8.4 jetable.
+   `prepare_owned_fresh_source` enchaîne installation et publication sur une
+   cible vide. Sur une cible déjà publiée, il relit l’ancre exacte avec la
+   chaîne et vérifie les projections vides sous le même verrou, en lecture
+   seule. Le reçu porte sur la publication initiale. La genèse egress du
+   format 15, les marqueurs de supervision owned, le chemin d’écriture owned
+   sur 14/15 et le raccord du gateway restent à livrer. Le lecteur Legacy
+   reste fermé à ces versions. Le raccord du gateway exige sa propre preuve
+   d’admission et d’epoch. La recette physique du rejeu exact reste `NOT_RUN`
+   sur ce lot.
    [Publication MySQL](../../../src/mysql_storage/owned_origin/preparation/publication.rs)
 5. Sur commit ou réponse incertains, rapprocher l’opération exacte par une
    relecture intégrale sous verrou. Un état partiel ou divergent reste
@@ -252,8 +258,12 @@ pouvoir référencer les tables de la cible et garder `foreign_key_checks` et
   version commise. Il simule la publication d’une version avec les colonnes
   historiques. La preuve d’installation exige le vrai manifeste de chaque
   format et le refus de l’ancien binaire à toutes les phases publiées.
-- Pour chaque format, prouver l’installation directe, la relecture complète
-  et la reprise en lecture seule après perte de la réponse. Vérifier aussi le
-  refus sans effet d’un format, d’une identité ou d’une origine divergents,
-  et l’absence de seconde publication sous concurrence. Qualifier les deux
-  profils de connexion, mot de passe avec TLS et mot de passe avec mTLS.
+- Exécuter `owned_fresh_source_publishes_once_and_replays_exactly` sur deux
+  cibles MySQL 8.4 jetables, avec `AI_GUARD_MYSQL_OWNED_PUBLISH_14_QA_REGISTRY`
+  et `AI_GUARD_MYSQL_OWNED_PUBLISH_15_QA_REGISTRY`. Utiliser le même UUID de
+  serveur attendu que dans le reste de la recette. L’oracle vérifie la
+  publication initiale, le retour de la même tête après perte simulée du
+  reçu, les refus sur demande divergente et la conservation de la tête et
+  d’une projection divergente injectée en fin de test. Qualifier séparément
+  les profils mot de passe avec TLS et mot de passe avec mTLS. La concurrence
+  et la qualification du CLI gardent leurs propres preuves.

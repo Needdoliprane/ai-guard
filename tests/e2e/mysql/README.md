@@ -233,10 +233,17 @@ agentsandbox prepare-mysql-owned \
   --source-id "${QA_MYSQL_SOURCE_ID:?}"
 ```
 
-On success, stdout contains one verified JSON receipt. A retry on a nonempty
-target is refused, including after a lost receipt. Preserve that target. The
-command performs no automatic SQLite or MySQL migration. Gateway admission
-and restoration require separate qualification. CLI qualification is pending.
+On success, stdout contains one verified JSON receipt. After a lost receipt,
+repeat the command with the same target, format and UUIDs. On a nonempty
+schema, this is a read-only check on the locked SQL session. It verifies the
+manifest, the exact operation anchor, the tenant and namespace, the initial
+audit chain and head, and the empty projections. An exact match returns the
+same publication head. An incomplete, foreign or divergent target, or a
+target that has advanced beyond initial publication, is refused and preserved.
+
+The command performs no automatic SQLite or MySQL migration. Gateway
+admission, including its owner epoch, and restoration require separate
+qualification. CLI qualification is pending.
 [Existing publication evidence](../../../docs/engineering/VALIDATION.md#27-novembre-2026--publication-unique-mysql-owned-14-et-15)
 
 ## What this preflight does not cover
