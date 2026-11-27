@@ -1,4 +1,4 @@
-name: G04 named archive and STOP Linux QA
+name: G04 retained import acknowledgement Linux QA
 
 on:
   push:
