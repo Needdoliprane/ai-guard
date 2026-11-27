@@ -1,6 +1,6 @@
 use super::{
-    BeforeSpawnGuard, CancelGeneration, ContainerPurpose, ContainerSpec, EGRESS_PROXY_MARKER,
-    HELD_CHALLENGE_ENV, NetworkMode, OwnedStartInput, RuntimeKind, SpawnedPrearmedInput,
+    CancelGeneration, ContainerPurpose, ContainerSpec, EGRESS_PROXY_MARKER, HELD_CHALLENGE_ENV,
+    NetworkMode, OwnedStartInput, RuntimeKind, SpawnedPrearmedInput,
     batch_io::OwnedBatchIo,
     bootstrap_stdin::{
         BootstrapStdinSubmitError, MAX_BOOTSTRAP_STDIN_BYTES, PrearmedBootstrapStdin,
@@ -10,6 +10,7 @@ use super::{
     spawn_prearmed_cli,
 };
 use crate::{
+    broker::journal::retirement_live_fixture::live_fixture,
     control::{EgressLaunchV1, LaunchSpecV1, NetworkV1, SecurityPresetV1, WorkerV1},
     provider::{BOOTSTRAP_ENV, BOOTSTRAP_PROGRAM},
 };
@@ -86,14 +87,6 @@ fn held_worker() -> WorkerV1 {
     .unwrap()
 }
 
-struct FixtureGuard;
-impl BeforeSpawnGuard for FixtureGuard {
-    fn check_before_spawn(self: Box<Self>, target: &str) -> Result<()> {
-        anyhow::ensure!(target == TARGET);
-        Ok(())
-    }
-}
-
 fn inert_cli(expected_args: &str) -> Command {
     let mut command = Command::new("/bin/sh");
     command.env_clear().stdin(Stdio::null()).args([
@@ -117,14 +110,25 @@ fn bootstrap_child() -> (Child, PrearmedBootstrapStdin) {
     let (_stop_tx, stop) = watch::channel(false);
     let spec = ContainerSpec::for_held_worker(&held_worker()).unwrap();
     let binding = spec.held_bootstrap_for(true).unwrap().unwrap().clone();
+    let fixture = live_fixture();
+    let target = fixture.registration.prospective().unwrap();
+    let cid = target.owned().handle.id();
     let (child, input) = spawn_prearmed_cli(
-        inert_cli(&format!("start --attach --interactive {TARGET}")),
-        TARGET,
+        inert_cli(&format!("start --attach --interactive {cid}")),
+        target.authority(),
+        target.owned(),
         OwnedStartInput::Bootstrap {
             ready: Box::new(unused_handoff),
             binding,
         },
-        Box::new(FixtureGuard),
+        |authority, created| {
+            anyhow::ensure!(
+                fixture
+                    .registration
+                    .matches_spawn_target(authority, created)
+            );
+            Ok(())
+        },
         &stop,
     )
     .unwrap();
@@ -226,18 +230,29 @@ async fn exclusive_bootstrap_stdin_releases_or_closes_the_exact_pipe_once() {
 #[tokio::test]
 async fn prearmed_spawn_preserves_historical_stdin_and_rejects_wrong_engine_flags() {
     let (_stop_tx, stop) = watch::channel(false);
+    let fixture = live_fixture();
+    let target = fixture.registration.prospective().unwrap();
+    let cid = target.owned().handle.id();
     for archive in [None, Some(tempfile::tempfile().unwrap())] {
         let expected_args = if archive.is_some() {
-            format!("start --attach --interactive {TARGET}")
+            format!("start --attach --interactive {cid}")
         } else {
-            format!("start --attach {TARGET}")
+            format!("start --attach {cid}")
         };
         let has_archive = archive.is_some();
         let (child, input) = spawn_prearmed_cli(
             inert_cli(&expected_args),
-            TARGET,
+            target.authority(),
+            target.owned(),
             OwnedStartInput::Historical(archive),
-            Box::new(FixtureGuard),
+            |authority, created| {
+                anyhow::ensure!(
+                    fixture
+                        .registration
+                        .matches_spawn_target(authority, created)
+                );
+                Ok(())
+            },
             &stop,
         )
         .unwrap();
