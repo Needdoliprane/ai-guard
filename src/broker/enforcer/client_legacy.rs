@@ -1114,16 +1114,16 @@ async fn connect_named_legacy_fixture(
 #[cfg(test)]
 #[tokio::test]
 async fn named_reservation_retains_stale_ack_without_issuing_stop() -> anyhow::Result<()> {
-    use super::super::server::test_support::{LegacyIpcFixture, registration};
+    use super::super::server::test_support::{LegacyIpcFixture, named_import_registration};
 
     let fixture = LegacyIpcFixture::start(1, 0).await;
     let root = fixture.root();
     let client = connect_named_legacy_fixture(&fixture).await?;
-    let target = registration(root.path()).prospective()?;
+    let target = named_import_registration(root.path()).prospective()?;
     let generation = CancelGeneration::new();
     let expected = generation.current();
     let observation = async {
-        let unsent = registration(root.path()).prospective()?;
+        let unsent = named_import_registration(root.path()).prospective()?;
         let unsent_generation = CancelGeneration::new();
         let (held, resume) = fixture.pause_capabilities_reply();
         let reserve_never_sent = client.legacy_reserve_named_prospective(
@@ -1224,12 +1224,12 @@ async fn named_reservation_retains_stale_ack_without_issuing_stop() -> anyhow::R
 #[cfg(test)]
 #[tokio::test]
 async fn named_exchange_never_enters_the_historical_bind() -> anyhow::Result<()> {
-    use super::super::server::test_support::{LegacyIpcFixture, registration};
+    use super::super::server::test_support::{LegacyIpcFixture, named_import_registration};
 
     let fixture = LegacyIpcFixture::start(1, 0).await;
     let client = connect_named_legacy_fixture(&fixture).await?;
     let observation = async {
-        let registration = registration(fixture.root().path());
+        let registration = named_import_registration(fixture.root().path());
         let target = registration.prospective()?;
         let generation = CancelGeneration::new();
         let reserved = client
