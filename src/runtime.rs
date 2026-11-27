@@ -256,6 +256,7 @@ pub enum NetworkMode {
 #[derive(Clone, Copy, Debug)]
 pub enum ContainerPurpose {
     Import,
+    ImportVerification,
     Run,
     Export,
 }
@@ -267,6 +268,7 @@ pub struct ContainerSpec {
     pub argv: Vec<String>,
     pub network: NetworkMode,
     operation: Uuid,
+    read_only_workspace: bool,
     secret_env_file: Option<crate::control_fs::PrivateFile>,
     managed_names: Option<(String, String)>,
     security_preset: crate::control::SecurityPresetV1,
@@ -330,6 +332,7 @@ impl ContainerSpec {
             argv,
             network,
             operation,
+            read_only_workspace: false,
             secret_env_file: None,
             managed_names: None,
             security_preset: crate::control::SecurityPresetV1::FixedSandboxV2,
@@ -425,6 +428,20 @@ impl ContainerSpec {
 
     pub fn operation_id(&self) -> Uuid {
         self.operation
+    }
+    /// Restrict a named ImportVerification helper to reading its retained
+    /// workspace volume. This does not grant permission to create or start it.
+    pub(crate) fn with_read_only_workspace_volume(mut self) -> Result<Self> {
+        ensure!(
+            matches!(self.purpose, ContainerPurpose::ImportVerification)
+                && self.network == NetworkMode::None
+                && self.managed_names.is_some()
+                && self.secret_env_file.is_none()
+                && self.egress_proxy_port.is_none(),
+            "read-only workspace access is reserved for a named, networkless ImportVerification helper"
+        );
+        self.read_only_workspace = true;
+        Ok(self)
     }
     /// Select an already admitted preset when reconstructing a historical
     /// instance. Legacy presets may be inspected, but cannot create or start.
@@ -536,6 +553,7 @@ impl ContainerSpec {
             self.session,
             match self.purpose {
                 ContainerPurpose::Import => "import",
+                ContainerPurpose::ImportVerification => "import_verification",
                 ContainerPurpose::Run => "run",
                 ContainerPurpose::Export => "export",
             },
@@ -553,6 +571,19 @@ impl ContainerSpec {
     }
     fn create_args_for(&self, runtime: RuntimeKind, bootstrap_stdin: bool) -> Result<Vec<String>> {
         self.require_current_creation_policy()?;
+        ensure!(
+            matches!(self.purpose, ContainerPurpose::ImportVerification)
+                == self.read_only_workspace,
+            "ImportVerification requires its read-only workspace mount"
+        );
+        if self.read_only_workspace {
+            ensure!(
+                self.network == NetworkMode::None
+                    && self.secret_env_file.is_none()
+                    && self.egress_proxy_port.is_none(),
+                "ImportVerification cannot use credentials or network access"
+            );
+        }
         let held = self.held_bootstrap_for(bootstrap_stdin)?;
         ensure!(
             held.is_none_or(|binding| binding.runtime == runtime),
@@ -587,6 +618,7 @@ impl ContainerSpec {
                 "agentsandbox.purpose={}",
                 match self.purpose {
                     ContainerPurpose::Import => "import",
+                    ContainerPurpose::ImportVerification => "import_verification",
                     ContainerPurpose::Run => "run",
                     ContainerPurpose::Export => "export",
                 }
@@ -625,7 +657,7 @@ impl ContainerSpec {
             "--env".into(),
             "LANG=C.UTF-8".into(),
             "--mount".into(),
-            format!("type=volume,source={},target=/workspace", self.volume()),
+            self.workspace_volume_mount(runtime),
             "--entrypoint".into(),
             self.argv[0].clone(),
         ];
@@ -666,6 +698,16 @@ impl ContainerSpec {
         args.extend(["--".into(), self.image.clone()]);
         args.extend(self.argv.iter().skip(1).cloned());
         Ok(args)
+    }
+    fn workspace_volume_mount(&self, runtime: RuntimeKind) -> String {
+        let mount = format!("type=volume,source={},target=/workspace", self.volume());
+        if !self.read_only_workspace {
+            return mount;
+        }
+        match runtime {
+            RuntimeKind::Docker => format!("{mount},readonly"),
+            RuntimeKind::Podman => format!("{mount},ro"),
+        }
     }
 }
 fn validate_managed_name(name: &str) -> Result<()> {

@@ -2398,6 +2398,91 @@ pub(crate) fn broker_helper_spec(policy: &HelperExecutionPolicyV1) -> Result<Con
     .with_managed_names(&policy.stable_name, &policy.volume_name)
 }
 
+/// Build only the immutable runtime specification for a named ImportVerification
+/// helper. This does not call Create or grant a start capability.
+pub(crate) fn broker_named_import_verification_spec(
+    policy: &HelperExecutionPolicyV1,
+) -> Result<ContainerSpec> {
+    policy.validate()?;
+    anyhow::ensure!(policy.purpose == HelperPurposeV1::ImportVerification);
+    anyhow::ensure!(policy.network == NetworkV1::None);
+    ContainerSpec::with_operation(
+        Uuid::parse_str(&policy.session_id)?,
+        ContainerPurpose::ImportVerification,
+        &policy.image_id,
+        policy.command.argv.clone(),
+        NetworkMode::None,
+        Uuid::parse_str(&policy.helper_id)?,
+    )?
+    .with_security_preset(policy.security_preset)
+    .with_managed_names(&policy.stable_name, &policy.volume_name)?
+    .with_read_only_workspace_volume()
+}
+
+#[cfg(test)]
+mod named_import_verification_spec_tests {
+    use super::*;
+
+    #[test]
+    fn named_import_verification_runtime_spec_is_exact_and_read_only() {
+        let helper_id = Uuid::from_u128(4);
+        let policy = HelperExecutionPolicyV1 {
+            version: 1,
+            parent_worker_id: Uuid::from_u128(1).to_string(),
+            parent_attempt_id: Uuid::from_u128(2).to_string(),
+            parent_spec_hash: "a".repeat(64),
+            session_id: Uuid::from_u128(3).to_string(),
+            workspace_manifest_digest: "b".repeat(64),
+            helper_id: helper_id.to_string(),
+            purpose: HelperPurposeV1::ImportVerification,
+            authority_id: Uuid::from_u128(5).to_string(),
+            runtime_kind: RuntimeKindV1::Docker,
+            image_id: format!("sha256:{}", "c".repeat(64)),
+            stable_name: format!("aig-parent-h-{}", helper_id.simple()),
+            volume_name: "aig-parent-work".into(),
+            command: CommandSpec {
+                argv: vec![
+                    "/bin/tar".into(),
+                    "--create".into(),
+                    "--file=-".into(),
+                    "--directory=/workspace".into(),
+                    ".".into(),
+                ],
+                cwd: "/workspace".into(),
+            },
+            network: NetworkV1::None,
+            security_preset: SecurityPresetV1::FixedSandboxV2,
+            cpu_millis: 2000,
+            memory_bytes: 1_073_741_824,
+            pids_limit: 256,
+            timeout_seconds: 120,
+            restart_policy: RestartPolicyV1::No,
+            credential_binding_id: None,
+            credential_names: Vec::new(),
+        };
+        policy.validate().unwrap();
+
+        let spec = broker_named_import_verification_spec(&policy).unwrap();
+        assert!(matches!(spec.purpose, ContainerPurpose::ImportVerification));
+        assert_eq!(spec.operation_id(), helper_id);
+        assert_eq!(spec.image, policy.image_id);
+        assert_eq!(spec.argv, policy.command.argv);
+        assert_eq!(spec.network, NetworkMode::None);
+        assert_eq!(spec.name(), policy.stable_name);
+        assert_eq!(spec.volume(), policy.volume_name);
+        let docker = spec.create_args(RuntimeKind::Docker).unwrap();
+        assert!(docker.iter().any(|arg| arg == "--read-only"));
+        assert!(docker.iter().any(|arg| arg == "--network"));
+        assert!(docker.windows(2).any(|pair| pair == ["--network", "none"]));
+        assert!(docker.iter().any(|arg| arg.ends_with(",readonly")));
+        assert!(!docker.iter().any(|arg| arg == "--env-file"));
+        let podman = spec.create_args(RuntimeKind::Podman).unwrap();
+        assert!(podman.windows(2).any(|pair| pair == ["--network", "none"]));
+        assert!(podman.iter().any(|arg| arg.ends_with(",ro")));
+        assert!(!podman.iter().any(|arg| arg == "--env-file"));
+    }
+}
+
 pub(super) fn broker_helper_observation(
     parent: &WorkerV1,
     policy: &HelperExecutionPolicyV1,
