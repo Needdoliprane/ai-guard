@@ -1,0 +1,125 @@
+name: G04 named Import runtime protection Linux QA
+
+on:
+  push:
+    branches: [codex/g04-import-verification-runtime-linux-qa-20261128]
+    paths: [.github/workflows/g04-named-import-runtime-linux-qa.yaml]
+
+permissions:
+  contents: read
+
+jobs:
+  named-observation:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      SOURCE_SHA: d1dd72e65eb238092ddafe42d7e7f565585218ba
+      SOURCE_TREE: e57733fe7538fa5574838c17fefa84fe9fadc283
+      RUNNER_MANAGED_BLOB: ea70aedb41008446d71f4cae74114d2f0989a5ba
+      RUNTIME_BLOB: bb75af948185bac9697da6d599c2a3ebca3d432e
+      RUNTIME_MANAGED_BLOB: 633e76005af1c22e8253888172ed8b2d5922714a
+      CARGO_BUILD_JOBS: '1'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      CARGO_TERM_COLOR: never
+      RUST_MIN_STACK: '8388608'
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          persist-credentials: false
+
+      - name: Build one libtest and verify named ImportVerification runtime protections
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          # The oracle uses a private SQLite journal and synthetic runtime facts.
+          # It does not start a runtime, provider, model, or external service.
+          selectors=(
+            runner::managed::named_import_verification_spec_tests::named_import_verification_runtime_spec_is_exact_and_read_only
+            runtime::managed::log_policy_tests::named_import_verification_args_mount_exact_workspace_read_only_for_both_engines
+            runtime::managed::log_policy_tests::named_import_verification_inspection_rejects_writable_or_extra_workspace_mounts
+            runtime::managed::log_policy_tests::generic_effect_gate_rejects_named_verification_but_keeps_ordinary_purposes
+          )
+
+          report_not_run() {
+            for selector in "${selectors[@]}"; do
+              printf 'test=%s status=NOT_RUN\n' "$selector"
+            done
+          }
+
+          if [[ "$(git rev-parse HEAD)" != "$SOURCE_SHA" ||
+                "$(git rev-parse 'HEAD^{tree}')" != "$SOURCE_TREE" ||
+                "$(git rev-parse HEAD:src/runner/managed.rs)" != "$RUNNER_MANAGED_BLOB" ||
+                "$(git rev-parse HEAD:src/runtime.rs)" != "$RUNTIME_BLOB" ||
+                "$(git rev-parse HEAD:src/runtime/managed.rs)" != "$RUNTIME_MANAGED_BLOB" ]]; then
+            printf 'source=FAIL\n'
+            report_not_run
+            exit 1
+          fi
+          printf 'source=PASS\nsource_sha=%s\nsource_tree=%s\nrunner_managed_blob=%s\nruntime_blob=%s\nruntime_managed_blob=%s\n' \
+            "$SOURCE_SHA" "$SOURCE_TREE" "$RUNNER_MANAGED_BLOB" "$RUNTIME_BLOB" "$RUNTIME_MANAGED_BLOB"
+          export AI_GUARD_BUILD_REVISION="$SOURCE_SHA"
+
+          scratch=$(mktemp -d /tmp/aig-g04-named-runtime-protection.XXXXXX)
+          trap 'rm -rf -- "$scratch"' EXIT
+          export TMPDIR="$scratch"
+          export CARGO_TARGET_DIR="$scratch/target"
+          build_json="$scratch/build.jsonl"
+
+          if ! cargo fetch --locked >"$scratch/fetch.log" 2>&1; then
+            printf 'fetch=FAIL\nbuild=NOT_RUN\n'
+            report_not_run
+            exit 1
+          fi
+          printf 'fetch=PASS\n'
+
+          if cargo test --locked --offline -j1 --no-default-features --lib --no-run \
+              --message-format=json >"$build_json" 2>"$scratch/build.stderr"; then
+            printf 'build=PASS\n'
+          else
+            rc=$?
+            printf 'build=FAIL\nbuild_exit=%s\n' "$rc"
+            report_not_run
+            exit 1
+          fi
+
+          if ! libtest=$(jq -ers '[.[] | select(.reason == "compiler-artifact"
+              and .target.name == "agentsandbox" and .target.kind == ["lib"]
+              and .profile.test == true and (.executable | type) == "string") | .executable]
+              | unique | select(length == 1) | .[0]' "$build_json" 2>/dev/null) ||
+              [[ "$libtest" != "$CARGO_TARGET_DIR"/debug/deps/agentsandbox-* ||
+                 ! -f "$libtest" || ! -x "$libtest" || -L "$libtest" ]]; then
+            printf 'libtest=FAIL\n'
+            report_not_run
+            exit 1
+          fi
+          checksum=$(sha256sum -- "$libtest")
+          libtest_sha=${checksum%% *}
+          if [[ ! "$libtest_sha" =~ ^[0-9a-f]{64}$ ]]; then
+            printf 'libtest=FAIL\n'
+            report_not_run
+            exit 1
+          fi
+          printf 'libtest=PASS\nlibtest_sha256=%s\n' "$libtest_sha"
+
+          index=0
+          for selector in "${selectors[@]}"; do
+            index=$((index + 1))
+            log="$scratch/test-${index}.log"
+            test_exit=0
+            "$libtest" --exact "$selector" --test-threads=1 --color never >"$log" 2>&1 || test_exit=$?
+            if [[ "$test_exit" == 0 ]] &&
+                [[ "$(grep -Fxc "running 1 test" "$log" || true)" == 1 ]] &&
+                [[ "$(grep -Fxc "test $selector ... ok" "$log" || true)" == 1 ]] &&
+                [[ "$(grep -Ec '^test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; [0-9]+ filtered out; finished in [0-9]+([.][0-9]+)?s$' "$log" || true)" == 1 ]]; then
+              printf 'test=%s status=PASS\ntest_exit=0\ntest_pass_count=1\ntest_fail_count=0\n' "$selector"
+            else
+              printf 'test=%s status=FAIL\ntest_exit=%s\n' "$selector" "$test_exit"
+              cat "$log"
+              exit 1
+            fi
+          done
