@@ -26,6 +26,8 @@ use crate::{
 };
 use uuid::Uuid;
 
+const ACK_CAS_ATTEMPTS: usize = 16;
+
 pub(in crate::broker) struct RecordedLegacyNamedAdmission(LegacyNamedSupervisedAdmissionV1);
 
 impl RecordedLegacyNamedAdmission {
@@ -247,7 +249,7 @@ impl WriterClient {
         binding: &RuntimeAuthority,
         owned: OwnedContainerSnapshot,
     ) -> JournalResult<()> {
-        for _ in 0..16 {
+        for _ in 0..ACK_CAS_ATTEMPTS {
             let job = self.load_named_job(plan).await?;
             let retained = retained_admission(&job)?;
             if retained.archive_digest() != Some(archive_digest) {
@@ -346,29 +348,40 @@ impl WriterClient {
         request: &LegacyNamedImportArmRequestV1,
         result: ArmResultV1,
     ) -> JournalResult<()> {
-        let job = self
-            .load(operation)
-            .await?
-            .ok_or(JournalError::InvalidInput)?;
-        let retained = retained_admission(&job)?;
-        let exact = retained
-            .import_arm_request()
-            .ok_or(JournalError::Conflict)?;
-        if canonical(&exact)? != canonical(request)? {
-            return Err(JournalError::Conflict);
-        }
-        let acknowledged = retained.clone().acknowledge_import_arm(result)?;
-        if retained
-            .import_arm()
-            .and_then(|arm| arm.receipt())
-            .is_none()
-        {
+        for _ in 0..ACK_CAS_ATTEMPTS {
+            let job = self
+                .load(operation)
+                .await?
+                .ok_or(JournalError::InvalidInput)?;
+            let retained = retained_admission(&job)?;
+            let exact = retained
+                .import_arm_request()
+                .ok_or(JournalError::Conflict)?;
+            if canonical(&exact)? != canonical(request)? {
+                return Err(JournalError::Conflict);
+            }
+            let acknowledged = retained.clone().acknowledge_import_arm(result.clone())?;
+            if retained
+                .import_arm()
+                .and_then(|arm| arm.receipt())
+                .is_some()
+            {
+                return Ok(());
+            }
             let current = super::lifecycle(&job)?;
             let next = with_admission(&current, acknowledged)?;
-            self.advance_lifecycle(operation, job.head().clone(), next)
-                .await?;
+            // A concurrent STOP advances the prefix. Keep the received Arm
+            // and rebuild the acknowledgement against the new head.
+            match self
+                .advance_lifecycle_diagnosed(operation, job.head().clone(), next)
+                .await
+            {
+                Ok(_) => return Ok(()),
+                Err(WriterCallFailure::Actor(JournalError::Conflict)) => continue,
+                Err(failure) => return Err(failure.journal_error()),
+            }
         }
-        Ok(())
+        Err(JournalError::Conflict)
     }
 
     async fn load_named_job(&self, plan: &LegacyConfirmedPlanV1) -> JournalResult<AcceptedJobV1> {

@@ -1292,12 +1292,40 @@ mod tests {
                 Err(JournalError::Conflict)
             ));
 
+            let pending_arm = writer.load(operation).await?.unwrap();
+            let mut wrong = arm_result.clone();
+            wrong.receipt.control_namespace_uuid = Uuid::new_v4().to_string();
+            assert!(matches!(
+                writer
+                    .acknowledge_legacy_named_import_arm(operation, &submitted, wrong)
+                    .await,
+                Err(JournalError::Conflict)
+            ));
+            let mut different = arm_result.clone();
+            different.receipt.audit_hash = "b".repeat(64);
+
+            // Both ACKs read the pending Arm before STOP through the real FIFO.
+            // Leave them unpolled until STOP has committed.
+            let pause = writer.pause_for_test().await?;
+            let acknowledgement = writer.acknowledge_legacy_named_import_arm(
+                operation,
+                &submitted,
+                arm_result.clone(),
+            );
+            tokio::pin!(acknowledgement);
+            assert!(futures_util::poll!(&mut acknowledgement).is_pending());
+            let conflicting =
+                writer.acknowledge_legacy_named_import_arm(operation, &submitted, different);
+            tokio::pin!(conflicting);
+            assert!(futures_util::poll!(&mut conflicting).is_pending());
+            let stops = writer.stops();
             let stop_id = Uuid::new_v4();
-            let stop = writer
-                .stops()
-                .append_cancel(CancelInputV1::new(operation, stop_id)?)
-                .await
-                .map_err(|failure| failure.error())?;
+            let cancellation = stops.append_cancel(CancelInputV1::new(operation, stop_id)?);
+            tokio::pin!(cancellation);
+            assert!(futures_util::poll!(&mut cancellation).is_pending());
+            assert!(pause.is_paused());
+            drop(pause);
+            let stop = cancellation.await.map_err(|failure| failure.error())?;
             assert!(stop.incomplete());
             assert!(stop.named_reservation().is_none());
             assert!(stop.stops().is_empty());
@@ -1310,17 +1338,10 @@ mod tests {
                 .unwrap();
             assert!(equal(&retained, &submitted)?);
             assert!(receipt.is_none());
-            let mut wrong = arm_result.clone();
-            wrong.receipt.control_namespace_uuid = Uuid::new_v4().to_string();
-            assert!(matches!(
-                writer
-                    .acknowledge_legacy_named_import_arm(operation, &retained, wrong)
-                    .await,
-                Err(JournalError::Conflict)
-            ));
-            writer
-                .acknowledge_legacy_named_import_arm(operation, &retained, arm_result.clone())
-                .await?;
+            let stopped = writer.load(operation).await?.unwrap();
+            assert_eq!(stopped.head().revision(), pending_arm.head().revision() + 1);
+            acknowledgement.await?;
+            assert!(matches!(conflicting.await, Err(JournalError::Conflict)));
             let replayed_stop = writer
                 .stops()
                 .cancel_stop_projection(operation, stop_id)
@@ -1332,6 +1353,14 @@ mod tests {
             assert!(snapshot.incomplete());
             assert_eq!(snapshot.pending_arms(), 0);
             let acknowledged = writer.load(operation).await?.unwrap();
+            assert_eq!(
+                acknowledged.head().revision(),
+                stopped.head().revision() + 1
+            );
+            assert!(equal(
+                &acknowledged.broker_checkpoint_v3().unwrap().commands(),
+                &stopped.broker_checkpoint_v3().unwrap().commands(),
+            )?);
             let (retained, receipt) = writer
                 .load_legacy_named_import_arm(operation)
                 .await?
