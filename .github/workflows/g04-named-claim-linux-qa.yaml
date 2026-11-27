@@ -68,21 +68,58 @@ jobs:
           fi
           printf 'fetch=PASS\n'
 
-          if ! cargo test --locked --offline --features mysql-storage --lib --no-run \
+          build_timer=()
+          if [[ -x /usr/bin/time ]]; then
+            build_timer=(/usr/bin/time -o "$scratch/build.rss" -f '%M')
+          fi
+          if "${build_timer[@]}" \
+              cargo test --locked --offline --features mysql-storage --lib --no-run \
               --message-format=json >"$build_json" 2>"$scratch/build.stderr"; then
-            printf 'build=FAIL\n'
+            printf 'build=PASS\n'
+          else
+            build_rc=$?
+            printf 'build=FAIL\nbuild_exit=%s\n' "$build_rc"
+            if [[ -f "$scratch/build.rss" ]]; then
+              awk '/^[0-9]+$/{printf "build_peak_rss_kib=%s\n", $0}' "$scratch/build.rss"
+            fi
+            df -k "$scratch" | awk 'NR == 2 && $4 ~ /^[0-9]+$/{printf "build_free_disk_kib=%s\n", $4}'
             jq -Rr 'fromjson? | objects
               | select(.reason == "compiler-message" and .message.level == "error")
               | .message as $message
               | ($message.code.code // empty) as $code
               | select($code | test("\\AE[0-9]{4}\\z"))
-              | $message.spans[] | select(.is_primary)
+              | $message.spans[]? | select(.is_primary)
               | select(.file_name | test("\\Asrc/[A-Za-z0-9_./-]+[.]rs\\z"))
               | "compiler_error=\($code) file=\(.file_name) line=\(.line_start)"' "$build_json" 2>/dev/null | sort -u || true
+            jq -Rr 'fromjson? | objects
+              | select(.reason == "compiler-message" and .message.level == "error")
+              | .message as $message
+              | select(($message.code.code // "") == "")
+              | ($message.message | ascii_downcase) as $heading
+              | (if $heading | test("recursion limit|reached the type-length limit") then "compiler_limit"
+                elif $heading | test("overflow evaluating|stack overflow") then "compiler_overflow"
+                elif $heading | test("linking with|linker") then "linker_error"
+                elif $heading | test("cycle detected") then "compiler_cycle"
+                elif $heading | test("internal compiler error|llvm error") then "compiler_internal"
+                else "untyped_compiler_error" end) as $class
+              | ($message.spans | map(select(.is_primary
+                and (.file_name | test("\\A(src|tests)/[A-Za-z0-9_./-]+[.]rs\\z")))) | .[0]) as $span
+              | if $span then "compiler_class=\($class) file=\($span.file_name) line=\($span.line_start)"
+                else "compiler_class=\($class)" end' "$build_json" 2>/dev/null | sort -u | head -30 || true
+            if rg -q 'No space left on device|Disk quota exceeded' "$scratch/build.stderr"; then
+              printf 'build_failure_class=disk_space\n'
+            elif rg -q 'signal: 9, SIGKILL|Killed process' "$scratch/build.stderr"; then
+              printf 'build_failure_class=compiler_killed\n'
+            elif rg -q 'signal: 11, SIGSEGV|rustc interrupted by SIGSEGV' "$scratch/build.stderr"; then
+              printf 'build_failure_class=compiler_crash\n'
+            elif rg -q 'cannot execute linker|linker .* not found' "$scratch/build.stderr"; then
+              printf 'build_failure_class=missing_linker\n'
+            elif rg -q 'internal compiler error|LLVM ERROR' "$scratch/build.stderr"; then
+              printf 'build_failure_class=compiler_internal\n'
+            fi
             report_not_run
             exit 1
           fi
-          printf 'build=PASS\n'
 
           if ! libtest=$(jq -ers '[.[] | select(.reason == "compiler-artifact"
               and .target.name == "agentsandbox" and .target.kind == ["lib"]
