@@ -356,6 +356,7 @@ mod tests {
         },
         control::session_control::{LegacyConfirmedLaunchSpecV1, LegacyNamedInitialDecisionV1},
         control_fs::Directory,
+        identity::IdentityReceiptV1,
         runner::{RunOptions, broker::PreparedSubmission},
     };
     use serde_json::json;
