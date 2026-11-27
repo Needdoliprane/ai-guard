@@ -1,0 +1,171 @@
+name: G09 Full3 recovered negative history Linux QA
+
+'on':
+  push:
+    branches: [codex/g09-full3-recovered-history-linux-qa-20261128]
+    paths: [.github/workflows/g09-full3-recovered-history-linux-qa.yaml]
+
+permissions:
+  contents: read
+
+jobs:
+  full3-relay:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      SOURCE_SHA: d1d12950eaeada05af437a90504c2dbe7e16052b
+      SOURCE_TREE: 8234fbc202290c70e39abbad03a30f1751db4af3
+      FULL3_TEST_BLOB: 3a20b4673b859cd7cc4a3f08bae1c1a5a1ed7c6b
+      SUPPORT_TEST_BLOB: 2f6ee52fe7a67a097c7fb0e8bb47e58e688cd642
+      RECOVERY_PROTOCOL_BLOB: 362e1fcac5c2aba78465021d98750c88d87e41f0
+      RECOVERY_CLIENT_BLOB: 9c14af835fb660627aa3e115d814a4bb8136cf98
+      RECOVERY_SERVER_BLOB: 0d3041bf0851f03e10237f43083a4d95f6ecbc00
+      RECOVERY_READER_BLOB: 1f78cd461037be10c4174bea9c8054356e4586d6
+      CARGO_BUILD_JOBS: '1'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      CARGO_TERM_COLOR: never
+      RUST_MIN_STACK: '8388608'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          persist-credentials: false
+
+      - name: Verify refused Full3 assignments through recovered STOP history
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          selectors=(
+            software_full3_foreign_original_assignment_refuses_before_issue_exec_or_dispatch
+            software_full3_missing_assignment_refuses_genuine_legacy_history_before_issue_exec_or_dispatch
+          )
+
+          report_not_run() {
+            local selector
+            for selector in "${selectors[@]}"; do
+              printf 'test=%s status=NOT_RUN\n' "$selector"
+            done
+          }
+
+          if [[ "$(git rev-parse HEAD 2>/dev/null)" != "$SOURCE_SHA" ||
+                "$(git rev-parse 'HEAD^{tree}' 2>/dev/null)" != "$SOURCE_TREE" ||
+                "$(git rev-parse HEAD:tests/broker_relay_full3.rs 2>/dev/null)" != "$FULL3_TEST_BLOB" ||
+                "$(git rev-parse HEAD:tests/support/broker_relay_full3.rs 2>/dev/null)" != "$SUPPORT_TEST_BLOB" ||
+                "$(git rev-parse HEAD:src/broker/service/protocol.rs 2>/dev/null)" != "$RECOVERY_PROTOCOL_BLOB" ||
+                "$(git rev-parse HEAD:src/broker/service/client.rs 2>/dev/null)" != "$RECOVERY_CLIENT_BLOB" ||
+                "$(git rev-parse HEAD:src/broker/service/server.rs 2>/dev/null)" != "$RECOVERY_SERVER_BLOB" ||
+                "$(git rev-parse HEAD:src/broker/journal/recovery.rs 2>/dev/null)" != "$RECOVERY_READER_BLOB" ]]; then
+            printf 'source=FAIL\n'
+            report_not_run
+            exit 1
+          fi
+          printf 'source=PASS\nsource_sha=%s\nsource_tree=%s\nfull3_test_blob=%s\nsupport_test_blob=%s\nrecovery_protocol_blob=%s\nrecovery_client_blob=%s\nrecovery_server_blob=%s\nrecovery_reader_blob=%s\n' \
+            "$SOURCE_SHA" "$SOURCE_TREE" "$FULL3_TEST_BLOB" "$SUPPORT_TEST_BLOB" \
+            "$RECOVERY_PROTOCOL_BLOB" "$RECOVERY_CLIENT_BLOB" "$RECOVERY_SERVER_BLOB" "$RECOVERY_READER_BLOB"
+          export AI_GUARD_BUILD_REVISION="$SOURCE_SHA"
+
+          # Keep fixture paths short for Unix sockets and keep all raw output private.
+          scratch=$(mktemp -d /tmp/aig-g09.XXXXXX)
+          trap 'rm -rf -- "$scratch"' EXIT
+          export TMPDIR="$scratch"
+          export CARGO_TARGET_DIR="$scratch/target"
+          build_json="$scratch/build.jsonl"
+
+          if ! cargo fetch --locked --target host-tuple >"$scratch/fetch.log" 2>&1; then
+            printf 'fetch=FAIL\nbuild=NOT_RUN\n'
+            report_not_run
+            exit 1
+          fi
+          printf 'fetch=PASS\n'
+
+          if ! cargo test --locked --offline --features mysql-storage --test broker_relay_full3 --no-run \
+              --message-format=json >"$build_json" 2>"$scratch/build.stderr"; then
+            printf 'build=FAIL\n'
+            jq -Rr 'fromjson? | objects
+              | select(.reason == "compiler-message" and .message.level == "error")
+              | .message.code.code // empty | strings | select(test("\\AE[0-9]{4}\\z"))
+              | "compiler_error=" + .' "$build_json" 2>/dev/null | sort -u || true
+            report_not_run
+            exit 1
+          fi
+          printf 'build=PASS\n'
+
+          if ! harness=$(jq -ers '[.[] | select(.reason == "compiler-artifact"
+              and .target.name == "broker_relay_full3" and .target.kind == ["test"]
+              and .profile.test == true and (.executable | type) == "string") | .executable]
+              | unique | select(length == 1) | .[0]' "$build_json" 2>/dev/null) ||
+              [[ "$harness" != "$CARGO_TARGET_DIR"/debug/deps/broker_relay_full3-* ||
+                 ! -f "$harness" || ! -x "$harness" || -L "$harness" ]]; then
+            printf 'harness=FAIL\n'
+            report_not_run
+            exit 1
+          fi
+          printf 'harness=PASS\n'
+          if ! cli=$(jq -ers '[.[] | select(.reason == "compiler-artifact"
+              and .target.name == "agentsandbox" and .target.kind == ["bin"]
+              and .profile.test == false and (.executable | type) == "string") | .executable]
+              | unique | select(length == 1) | .[0]' "$build_json" 2>/dev/null) ||
+              [[ "$cli" != "$CARGO_TARGET_DIR/debug/agentsandbox" ||
+                 ! -f "$cli" || ! -x "$cli" || -L "$cli" ]]; then
+            printf 'cli=FAIL\n'
+            report_not_run
+            exit 1
+          fi
+          harness_hash=$(sha256sum -- "$harness")
+          cli_hash=$(sha256sum -- "$cli")
+          printf 'cli=PASS\nharness_sha256=%s\ncli_sha256=%s\n' \
+            "${harness_hash%% *}" "${cli_hash%% *}"
+
+
+          check_selector() {
+            local selector=$1
+            local log="$scratch/test.log"
+            if ! "$harness" --exact "$selector" --test-threads=1 --color never --show-output >"$log" 2>&1; then
+              printf 'FAIL'
+            elif grep -Fqx 'running 0 tests' "$log"; then
+              printf 'NO_TEST'
+            elif grep -Fqx 'running 1 test' "$log" &&
+                grep -Fqx "test $selector ... ok" "$log" &&
+                grep -Fqx 'phase=full3_retained_relay category=confirmed_no_effects' "$log" &&
+                grep -Eq '^test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; [0-9]+ filtered out;' "$log"; then
+              printf 'PASS'
+            else
+              printf 'FAIL'
+            fi
+          }
+
+          failed=0
+          for selector in "${selectors[@]}"; do
+            status=$(check_selector "$selector")
+            grep -E '^(full3_read_stage=(fresh_requested|fresh_ready|submitted|endpoint_retained|history_confirmed|existing_ready|authorized_arm_confirmed|source_revision_verified|foreign_scope_refused)|full3_read_cleanup=(closed|unconfirmed)|(Error: )?phase=full3_retained_relay category=(confirmed_no_effects|authorized_transport|authorized_read_refused|unconfirmed_worker_arm reason=(Confirmed|RelayRecordAbsent|StopSnapshotIncomplete|WorkerArmNotFound|SourceHeadNotAncestor|RelayReadUnavailable))|(Error: )?phase=full3_refused_history category=(recovery_transport|recovery_status_refused|unconfirmed_stop_only_head))$' "$scratch/test.log" || true
+            printf 'test=%s status=%s\n' "$selector" "$status"
+            if [[ "$status" == PASS ]]; then
+              printf 'retained_relay=confirmed_no_effects\n'
+            else
+              failed=1
+              if grep -Eq '^phase=fixture_broker_ipc_preflight.*category=timeout' "$scratch/test.log"; then
+                category=ipc_preflight_timeout
+              elif grep -Fq 'phase=full3_refused_history category=unconfirmed_stop_only_head' "$scratch/test.log"; then
+                category=recovery_head_unconfirmed
+              elif grep -Fq 'phase=full3_refused_history category=recovery_status_refused' "$scratch/test.log"; then
+                category=recovery_status_refused
+              elif grep -Fq 'phase=full3_refused_history category=recovery_transport' "$scratch/test.log"; then
+                category=recovery_transport
+              elif grep -Fq 'phase=full3_retained_relay category=unconfirmed_worker_arm' "$scratch/test.log"; then
+                category=unconfirmed_assignment
+              elif grep -Fq 'phase=full3_retained_relay category=authorized_read_refused' "$scratch/test.log"; then
+                category=authorized_read_refused
+              elif grep -q 'deadline has elapsed' "$scratch/test.log"; then
+                category=deadline
+              elif [[ "$status" == NO_TEST ]]; then
+                category=selector
+              else
+                category=unclassified
+              fi
+              printf 'test=%s category=%s\n' "$selector" "$category"
+            fi
+          done
+          exit "$failed"
