@@ -130,6 +130,7 @@ fn bootstrap_child() -> (Child, PrearmedBootstrapStdin) {
             Ok(())
         },
         &stop,
+        None,
     )
     .unwrap();
     assert!(child.stdin.is_none(), "only the bootstrap owner can write");
@@ -254,6 +255,7 @@ async fn prearmed_spawn_preserves_historical_stdin_and_rejects_wrong_engine_flag
                 Ok(())
             },
             &stop,
+            None,
         )
         .unwrap();
         let SpawnedPrearmedInput::Historical(archive) = input else {

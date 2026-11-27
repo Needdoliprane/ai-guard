@@ -83,6 +83,7 @@ impl std::fmt::Debug for LegacyStartVeto {
 /// Neither this notification nor the transport establishes a worker's terminal state.
 pub struct PrearmedStartControl {
     guard: OwnedSpawnCheck,
+    spawn_generation: Option<GenerationSpawnGuard>,
     stop: tokio::sync::watch::Receiver<bool>,
     launch_profile: Option<Box<launch_profile::DockerLaunchProfileBindingV1>>,
     stdout_tap: Option<crate::provider_activity::StdoutTap>,
@@ -124,12 +125,26 @@ impl PrearmedStartControl {
     ) -> Self {
         Self {
             guard: Box::new(guard),
+            spawn_generation: None,
             stop,
             launch_profile: launch_profile.map(Box::new),
             stdout_tap: None,
             #[cfg(unix)]
             native_release,
         }
+    }
+    /// Keep the original job generation through the final check and the
+    /// actual local spawn. The guard must not re-enter this generation gate.
+    pub(crate) fn with_generation_fence(
+        mut self,
+        generation: &CancelGeneration,
+        expected: u64,
+    ) -> Self {
+        self.spawn_generation = Some(GenerationSpawnGuard {
+            generation: generation.clone(),
+            expected,
+        });
+        self
     }
     /// Forward the batch client stdout live to the activity collector, in
     /// addition to the unchanged bounded terminal capture. The tap neither
@@ -988,6 +1003,7 @@ fn spawn_prearmed_cli<'execution>(
     input: OwnedStartInput<'execution>,
     guard: impl FnOnce(&RuntimeAuthority, &OwnedContainerSnapshot) -> Result<()>,
     stop: &tokio::sync::watch::Receiver<bool>,
+    spawn_generation: Option<GenerationSpawnGuard>,
 ) -> Result<(tokio::process::Child, SpawnedPrearmedInput<'execution>)> {
     let target = created.handle.id();
     command.args(["start", "--attach"]);
@@ -1002,15 +1018,26 @@ fn spawn_prearmed_cli<'execution>(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    ensure_prearmed_live(stop).with_context(|| {
-        RuntimePrestartStageFailure::new(RuntimePrestartStage::StopBeforeSpawn, target)
-    })?;
+    let stop_failure =
+        || RuntimePrestartStageFailure::new(RuntimePrestartStage::StopBeforeSpawn, target);
     let guard_failure =
         || RuntimePrestartStageFailure::new(RuntimePrestartStage::GuardBeforeSpawn, target);
     let spawn_failure = || RuntimePrestartStageFailure::new(RuntimePrestartStage::Spawn, target);
-    // Keep the final trusted check adjacent to spawn.
-    guard(authority, created).with_context(guard_failure)?;
-    let mut child = command.spawn().with_context(spawn_failure)?;
+    let spawn = || {
+        ensure_prearmed_live(stop).with_context(stop_failure)?;
+        guard(authority, created).with_context(guard_failure)?;
+        // The independent guardian may publish STOP while the final check
+        // runs. Keep its latest notification adjacent to process creation.
+        ensure_prearmed_live(stop).with_context(stop_failure)?;
+        command.spawn().with_context(spawn_failure)
+    };
+    let mut child = match spawn_generation {
+        Some(fence) => fence
+            .generation
+            .with_current_generation(fence.expected, spawn)
+            .with_context(guard_failure)??,
+        None => spawn()?,
+    };
     let input = match input {
         OwnedStartInput::Historical(archive) => SpawnedPrearmedInput::Historical(archive),
         #[cfg(unix)]
@@ -2224,6 +2251,7 @@ impl Runtime {
             })?;
         let PrearmedStartControl {
             guard,
+            spawn_generation,
             mut stop,
             launch_profile,
             stdout_tap,
@@ -2248,6 +2276,7 @@ impl Runtime {
                 )
             },
             &stop,
+            spawn_generation,
         )?;
         let input = match input {
             SpawnedPrearmedInput::Historical(archive) => archive,
@@ -3179,6 +3208,7 @@ mod capture_error_tests {
                     Ok(())
                 },
                 &stop,
+                None,
             ) else {
                 bail!("the nonexistent test program was unexpectedly spawned");
             };
@@ -3189,6 +3219,59 @@ mod capture_error_tests {
         };
         assert_eq!(stage(expected)?, RuntimePrestartStage::Spawn);
         assert_eq!(stage(&different)?, RuntimePrestartStage::GuardBeforeSpawn);
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn prearmed_spawn_obeys_generation_and_stop_at_the_final_check() -> Result<()> {
+        use crate::broker::journal::retirement_live_fixture::live_fixture;
+
+        let fixture = live_fixture();
+        let target = fixture.registration.prospective()?;
+        let temporary = tempfile::tempdir()?;
+        let missing_program = temporary.path().join("no-runtime-program");
+        let generation = CancelGeneration::new();
+        let expected = generation.current();
+        let (owner, stop) = tokio::sync::watch::channel(false);
+        let refuse = |expected, guard: &mut dyn FnMut()| {
+            let Err(error) = spawn_prearmed_cli(
+                Command::new(&missing_program),
+                target.authority(),
+                target.owned(),
+                OwnedStartInput::Historical(None),
+                |_, _| {
+                    guard();
+                    Ok(())
+                },
+                &stop,
+                Some(GenerationSpawnGuard {
+                    generation: generation.clone(),
+                    expected,
+                }),
+            ) else {
+                bail!("the nonexistent test program was unexpectedly spawned");
+            };
+            Ok(error
+                .downcast_ref::<RuntimePrestartStageFailure>()
+                .context("expected the prestart stage")?
+                .stage())
+        };
+
+        assert_eq!(refuse(expected, &mut || {})?, RuntimePrestartStage::Spawn);
+        let replacement = generation.invalidate();
+        assert_eq!(
+            refuse(expected, &mut || panic!(
+                "stale generation reached the guard"
+            ))?,
+            RuntimePrestartStage::GuardBeforeSpawn
+        );
+        assert_eq!(
+            refuse(replacement, &mut || {
+                owner.send_replace(true);
+            })?,
+            RuntimePrestartStage::StopBeforeSpawn
+        );
         Ok(())
     }
 
