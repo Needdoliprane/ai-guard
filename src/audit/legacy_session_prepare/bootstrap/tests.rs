@@ -1155,6 +1155,25 @@ async fn legacy_named_admission_route_replays_the_committed_receipt_after_reopen
     let error: Value =
         serde_json::from_slice(&to_bytes(response.into_body(), 65_536).await.unwrap()).unwrap();
     assert_eq!(error["error"]["code"], "named_admission_receipt_not_found");
+    let mut unrelated = request.clone();
+    unrelated.binding_ref = Uuid::new_v4();
+    let foreign = format!(
+        "/control/api/v1/control/session-confirmations/{}/admission/reconcile",
+        unrelated.binding_ref
+    );
+    let response = app
+        .clone()
+        .oneshot(post(
+            &foreign,
+            BROKER_TOKEN,
+            serde_json::to_vec(&unrelated).unwrap(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let error: Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), 65_536).await.unwrap()).unwrap();
+    assert_eq!(error["error"]["code"], "worker_not_found");
     assert_eq!(store.head().unwrap(), before);
     assert_eq!(
         store

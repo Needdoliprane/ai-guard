@@ -394,7 +394,13 @@ impl Store {
             return Ok(Some(receipt));
         }
         let Some(quota) = fresh_quota else {
+            // Absence is meaningful only for this broker's exact, current plan.
+            // Keep all other references indistinguishable from a foreign receipt.
+            let resolved =
+                self.resolve_legacy_confirmed_plan(&tx, broker, request.binding_ref, &clock)?;
+            request.require_plan(&resolved.plan)?;
             self.commit_authorized(tx, &clock)?;
+            resolved.release_at(Utc::now())?;
             return Ok(None);
         };
         quota.validate()?;
