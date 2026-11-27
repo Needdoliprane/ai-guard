@@ -180,9 +180,11 @@ impl LegacyNamedSourceV1 {
         let mut sources = LegacyNamedSources::new();
         for entry in entries {
             let target = SessionLaunchTargetSelectionV1::new(
-                canonical_uuid(&entry.launch_target_id)?,
+                canonical_uuid(&entry.launch_target_id)
+                    .map_err(|_| anyhow!("invalid launch_target_id in named broker source"))?,
                 entry.target_revision,
-            )?;
+            )
+            .map_err(|_| anyhow!("invalid target_revision in named broker source"))?;
             ensure!(
                 sources
                     .insert(

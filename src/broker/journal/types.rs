@@ -568,6 +568,7 @@ pub enum ReserveResult {
 }
 pub(crate) enum ReservationMode {
     AllowNew(Option<EgressLaunchV1>),
+    AllowLegacyNamed(Uuid),
     ReplayOnly,
 }
 pub enum BindingInputs<'a> {

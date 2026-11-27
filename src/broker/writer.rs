@@ -1277,6 +1277,22 @@ impl WriterClient {
         self.reserve_with_mode(operation_id, submit, ReservationMode::AllowNew(None))
             .await
     }
+    #[allow(
+        dead_code,
+        reason = "the named launch caller is being composed with source selection"
+    )]
+    pub(crate) async fn reserve_legacy_named(
+        &self,
+        operation_id: Uuid,
+        binding_ref: Uuid,
+    ) -> JournalResult<ReserveResult> {
+        self.reserve_with_mode(
+            operation_id,
+            Vec::new(),
+            ReservationMode::AllowLegacyNamed(binding_ref),
+        )
+        .await
+    }
     pub(crate) async fn reserve_with_mode(
         &self,
         operation_id: Uuid,

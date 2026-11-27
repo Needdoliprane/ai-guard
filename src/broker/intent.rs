@@ -520,6 +520,8 @@ impl ExecutionIntentV1 {
             .map_err(|_| IntentError::InvalidIntent)?;
         let options = &self.initial_options.0;
         let launch = &confirmed.launch;
+        crate::control::bounded(&launch.command.cwd, 4096)
+            .map_err(|_| IntentError::InvalidIntent)?;
         let runtime = match options.runtime {
             RuntimeKind::Docker => RuntimeKindV1::Docker,
             RuntimeKind::Podman => RuntimeKindV1::Podman,
@@ -597,7 +599,7 @@ impl ExecutionIntentV1 {
         require(
             request.profile == self.initial_options.0.profile
                 && request.command.argv == self.initial_options.0.argv
-                && request.command.cwd == "/workspace"
+                && (request.command.cwd == "/workspace" || self.legacy_named_launch.is_some())
                 && request.execution_mode.is_some() == self.initial_options.0.interactive
                 && crate::policy::valid_provider_context(request),
         )?;

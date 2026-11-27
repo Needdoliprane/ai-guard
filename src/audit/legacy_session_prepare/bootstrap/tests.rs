@@ -1491,8 +1491,8 @@ async fn legacy_named_writer_retains_confirmed_intent_before_decision() {
     use crate::{
         broker::{
             journal::{
-                ControlSecrets, FsExclusions, Journal, JournalError, JournalLimitsV1,
-                JournalScopeV1, ReserveResult,
+                BindingInputs, ControlSecrets, FsExclusions, Journal, JournalError,
+                JournalLimitsV1, JournalScopeV1, ReservationMode, ReserveResult,
             },
             writer::WriterClient,
         },
@@ -1501,7 +1501,8 @@ async fn legacy_named_writer_retains_confirmed_intent_before_decision() {
     };
     use std::time::Duration;
 
-    let fixture = Fixture::new();
+    let mut fixture = Fixture::new();
+    fixture.target.target.launch.command.cwd = "/workspace/subdir".into();
     let (store, _) = fixture.provision(fixture.create().unwrap()).unwrap();
     let (confirmation, _) = fixture.confirm_target(&store);
     let Some(AuthenticatedWorkload::Broker(broker)) =
@@ -1513,10 +1514,10 @@ async fn legacy_named_writer_retains_confirmed_intent_before_decision() {
     let root = fixture._directory.path().canonicalize().unwrap();
     let config = Directory::open_existing(&root).unwrap();
     let gateway = "http://127.0.0.1:8787";
-    let (prepared, plan) = store
+    let (prepared, mismatched, plan) = store
         .prepare_legacy_confirmed_launch_spec(&broker, binding_ref, |material| {
             let launch = &material.launch;
-            let options = serde_json::from_value(json!({
+            let options: crate::runner::RunOptions = serde_json::from_value(json!({
                 "project": root,
                 "config_dir": root,
                 "gateway": gateway,
@@ -1531,6 +1532,11 @@ async fn legacy_named_writer_retains_confirmed_intent_before_decision() {
                 "argv": launch.command.argv
             }))?;
             Ok((
+                PreparedSubmission::from_legacy_named_launch(
+                    options.clone(),
+                    config.clone(),
+                    material,
+                )?,
                 PreparedSubmission::from_legacy_named_launch(options, config.clone(), material)?,
                 material.plan.clone(),
             ))
@@ -1545,19 +1551,46 @@ async fn legacy_named_writer_retains_confirmed_intent_before_decision() {
         &plan.broker_profile_id,
     )
     .unwrap();
-    let open = || {
+    let open = |directory: &Directory| {
         Journal::open(
-            &config,
+            directory,
             scope.clone(),
             &FsExclusions::new(),
             JournalLimitsV1::default(),
             ControlSecrets::new(vec![]).unwrap(),
         )
     };
-    let writer = WriterClient::start(open().unwrap(), 8, Duration::from_secs(10)).unwrap();
     let operation = confirmation.operation_id;
-    let submit = serde_json::to_vec(&json!({"confirmed_binding": binding_ref})).unwrap();
-    let ReserveResult::New(ticket) = writer.reserve(operation, submit.clone()).await.unwrap()
+    let wrong_dir = tempfile::Builder::new()
+        .permissions(std::fs::Permissions::from_mode(0o700))
+        .tempdir()
+        .unwrap();
+    let wrong = open(&Directory::open_existing(wrong_dir.path()).unwrap()).unwrap();
+    let ReserveResult::New(wrong_ticket) = wrong
+        .reserve_with_mode(
+            operation,
+            &[],
+            ReservationMode::AllowLegacyNamed(Uuid::new_v4()),
+        )
+        .unwrap()
+    else {
+        panic!("fresh mismatched reservation fixture");
+    };
+    assert!(matches!(
+        wrong.accept(
+            wrong_ticket,
+            mismatched.intent(),
+            BindingInputs::None,
+            &mismatched.initial_checkpoint().unwrap(),
+        ),
+        Err(JournalError::Conflict)
+    ));
+
+    let writer = WriterClient::start(open(&config).unwrap(), 8, Duration::from_secs(10)).unwrap();
+    let ReserveResult::New(ticket) = writer
+        .reserve_legacy_named(operation, binding_ref)
+        .await
+        .unwrap()
     else {
         panic!("fresh confirmation fixture");
     };
@@ -1570,12 +1603,16 @@ async fn legacy_named_writer_retains_confirmed_intent_before_decision() {
     assert!(accepted.requires_legacy_named_execution());
     assert_eq!(accepted.intent().legacy_named_plan(), Some(&plan));
     assert!(accepted.broker_checkpoint_v2().is_none());
+    assert_eq!(
+        policy::evaluate(&Policy::default(), accepted.intent().request_data()).outcome,
+        Outcome::Deny
+    );
     assert_eq!(store.head().unwrap(), store_head);
     drop(writer);
 
     let reopened = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            match open() {
+            match open(&config) {
                 Err(JournalError::Busy) => tokio::time::sleep(Duration::from_millis(10)).await,
                 result => break result.unwrap(),
             }
@@ -1583,7 +1620,18 @@ async fn legacy_named_writer_retains_confirmed_intent_before_decision() {
     })
     .await
     .expect("writer releases the journal after its last handle is dropped");
-    let ReserveResult::Accepted(replayed) = reopened.reserve(operation, &submit).unwrap() else {
+    assert!(matches!(
+        reopened.reserve(operation, br#"{"operation_id":"same-uuid"}"#),
+        Err(JournalError::Conflict)
+    ));
+    let ReserveResult::Accepted(replayed) = reopened
+        .reserve_with_mode(
+            operation,
+            &[],
+            ReservationMode::AllowLegacyNamed(binding_ref),
+        )
+        .unwrap()
+    else {
         panic!("the same confirmed binding must replay its acceptance");
     };
     assert_eq!(replayed.head(), accepted.head());

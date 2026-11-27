@@ -609,20 +609,44 @@ struct Reservation {
     submit_hash: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     egress: Option<EgressLaunchV1>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    legacy_named_binding_ref: Option<Uuid>,
 }
 impl Reservation {
-    fn validate_egress(&self) -> JournalResult<()> {
+    fn validate_submission(&self) -> JournalResult<()> {
         if !matches!(
-            (self.version, self.egress.is_some()),
-            (1, false) | (2, true)
+            (
+                self.version,
+                self.egress.is_some(),
+                self.legacy_named_binding_ref.is_some()
+            ),
+            (1, false, false) | (2, true, false) | (3, false, true)
         ) {
             return Err(JournalError::UnsupportedVersion);
         }
         if let Some(egress) = &self.egress {
             egress.validate().map_err(|_| JournalError::Corrupt)?;
         }
+        if let Some(binding_ref) = self.legacy_named_binding_ref
+            && (binding_ref.is_nil()
+                || self.submit_hash != named_submit_hash(self.operation_id, binding_ref))
+        {
+            return Err(JournalError::Corrupt);
+        }
         Ok(())
     }
+    fn matches_intent(&self, intent: &ExecutionIntentV1) -> bool {
+        self.egress.as_ref() == intent.egress()
+            && self.legacy_named_binding_ref
+                == intent.legacy_named_plan().map(|plan| plan.binding_ref)
+    }
+}
+
+fn named_submit_hash(operation_id: Uuid, binding_ref: Uuid) -> String {
+    let mut identity = [0; 32];
+    identity[..16].copy_from_slice(operation_id.as_bytes());
+    identity[16..].copy_from_slice(binding_ref.as_bytes());
+    digest("ai-guard:broker-named-submit:v1", &identity)
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -689,10 +713,14 @@ struct Rejected {
     code: RejectionCodeV1,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     egress: Option<EgressLaunchV1>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    legacy_named_binding_ref: Option<Uuid>,
 }
 impl Rejected {
     fn matches_reservation_format(&self, reservation: &Reservation) -> bool {
-        self.version == reservation.version && self.egress == reservation.egress
+        self.version == reservation.version
+            && self.egress == reservation.egress
+            && self.legacy_named_binding_ref == reservation.legacy_named_binding_ref
     }
 }
 record!(Current {
@@ -1035,8 +1063,21 @@ impl Journal {
         if operation_id.is_nil() {
             return Err(JournalError::InvalidInput);
         }
-        self.0.control.bytes(submit_bytes)?;
-        let submit_hash = digest("ai-guard:broker-submit:v1", submit_bytes);
+        let (submit_hash, legacy_named_binding_ref) = match mode {
+            ReservationMode::AllowLegacyNamed(binding_ref) => {
+                if binding_ref.is_nil() || !submit_bytes.is_empty() {
+                    return Err(JournalError::InvalidInput);
+                }
+                (
+                    named_submit_hash(operation_id, binding_ref),
+                    Some(binding_ref),
+                )
+            }
+            _ => {
+                self.0.control.bytes(submit_bytes)?;
+                (digest("ai-guard:broker-submit:v1", submit_bytes), None)
+            }
+        };
         let mut writer = self.0.writer.lock().map_err(|_| JournalError::Corrupt)?;
         self.check_writer()?;
         let name = operation_id.to_string();
@@ -1047,7 +1088,9 @@ impl Journal {
             }
             let reservation: Reservation = self.read(&job, "reservation.json", SMALL)?;
             self.check_reservation(&reservation, operation_id)?;
-            if reservation.submit_hash != submit_hash {
+            if reservation.submit_hash != submit_hash
+                || reservation.legacy_named_binding_ref != legacy_named_binding_ref
+            {
                 return Err(JournalError::Conflict);
             }
             let result = match self.status_locked(operation_id, &mut writer)? {
@@ -1068,19 +1111,23 @@ impl Journal {
         }
         // Once exact replay and rollback checks have run, a disabled profile
         // may learn that the operation is absent without reserving it.
-        let ReservationMode::AllowNew(egress) = mode else {
-            return Ok(ReserveResult::Absent);
+        let (version, egress) = match mode {
+            ReservationMode::AllowLegacyNamed(_) => (3, None),
+            ReservationMode::AllowNew(Some(egress)) => (2, Some(egress)),
+            ReservationMode::AllowNew(None) => (1, None),
+            ReservationMode::ReplayOnly => return Ok(ReserveResult::Absent),
         };
         if let Some(egress) = &egress {
             egress.validate().map_err(|_| JournalError::InvalidInput)?;
         }
         self.check_observation_capacity(operation_id, &writer)?;
         let reservation = Reservation {
-            version: if egress.is_some() { 2 } else { 1 },
+            version,
             scope_hash: self.0.scope_hash.clone(),
             operation_id,
             submit_hash: submit_hash.clone(),
             egress,
+            legacy_named_binding_ref,
         };
         let bytes = self.checked_record(&reservation, SMALL)?;
         let mut usage = self.usage(None)?;
@@ -1157,6 +1204,7 @@ impl Journal {
             phase,
             code,
             egress: reservation.egress.clone(),
+            legacy_named_binding_ref: reservation.legacy_named_binding_ref,
         };
         let bytes = self.checked_record(&record, SMALL)?;
         self.budget(
@@ -1353,9 +1401,7 @@ impl Journal {
         let job = self.job(ticket.operation)?;
         let reservation: Reservation = self.read(&job, "reservation.json", SMALL)?;
         self.check_reservation(&reservation, ticket.operation)?;
-        if reservation.submit_hash != ticket.submit_hash
-            || reservation.egress.as_ref() != intent.egress()
-        {
+        if reservation.submit_hash != ticket.submit_hash || !reservation.matches_intent(intent) {
             return Err(JournalError::Conflict);
         }
         let intent_bytes = intent
@@ -2102,7 +2148,7 @@ impl Journal {
         let intent_hash = intent.intent_hash().map_err(|_| JournalError::Corrupt)?;
         if intent.operation_id() != operation_id
             || accepted.intent_hash != intent_hash
-            || reservation.egress.as_ref() != intent.egress()
+            || !reservation.matches_intent(&intent)
             || intent
                 .canonical_bytes()
                 .map_err(|_| JournalError::Corrupt)?
@@ -2352,7 +2398,7 @@ impl Journal {
         if reservation.scope_hash != self.0.scope_hash || reservation.operation_id != operation {
             return Err(JournalError::Corrupt);
         }
-        reservation.validate_egress()?;
+        reservation.validate_submission()?;
         valid_hash(&reservation.submit_hash).map_err(|_| JournalError::Corrupt)
     }
     fn context(
