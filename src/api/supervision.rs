@@ -4,8 +4,12 @@ use crate::control::{
     AdmissionResultV1, ArmResultV1, ArmV1, ArmedStartClaimV1, ControlCapabilitiesV1,
     ControlProtocolV1, ExportRequestV1, HelperClaimResultV1, HelperCleanupV1, HelperObservationV1,
     HelperStartClaimV1, MutationReceiptV1, MutationResultV1, SupervisedAdmissionV1,
-    session_control::{LegacyConfirmedPlanV1, canonical_uuid},
+    session_control::{
+        LegacyConfirmedPlanV1, LegacyNamedAdmissionReceiptV1, LegacyNamedSupervisedAdmissionV1,
+        canonical_uuid,
+    },
 };
+use crate::tenant_store::StoreHealth;
 use axum::{extract::FromRequestParts, http::request::Parts};
 
 // Deliberately merged only into /api/v1, preserving historical /api aliases.
@@ -16,6 +20,10 @@ pub(super) fn routes() -> Router<GatewayState> {
         .route(
             "/control/session-confirmations/{binding_ref}",
             get(confirmed_plan),
+        )
+        .route(
+            "/control/session-confirmations/{binding_ref}/admission",
+            post(reserve_named),
         )
         .route("/workers/supervised-reservations", post(reserve))
         .route("/workers/{id}/arms", post(arm))
@@ -131,6 +139,84 @@ async fn confirmed_plan(
         .await
 }
 
+fn named_admission_error(store: &TenantStore, error: anyhow::Error) -> (StatusCode, Json<Value>) {
+    if store.store_healthy() && error.is::<ControlFailure>() {
+        control_error(error)
+    } else {
+        workload::store_failure(store, error)
+    }
+}
+
+fn named_admission_store(tenant: &TenantState, redactor: &Redactor) -> ApiResult<Arc<Store>> {
+    tenant
+        .store
+        .sqlite_api()?
+        .with_additional_redaction(redactor)
+        .map_err(|error| named_admission_error(&tenant.store, error))
+}
+
+fn named_admission_response(
+    receipt: LegacyNamedAdmissionReceiptV1,
+    redactor: &Redactor,
+) -> ApiResult<(StatusCode, Json<LegacyNamedAdmissionReceiptV1>)> {
+    let value = serde_json::to_value(&receipt).map_err(|error| control_error(error.into()))?;
+    if redactor.value_unclipped(&value) != value {
+        return Err(control_error(anyhow::anyhow!(
+            "named admission receipt requires redaction"
+        )));
+    }
+    Ok((admission_status(&receipt.admission), Json(receipt)))
+}
+
+async fn reserve_named(
+    _private: PrivateControlTransport,
+    broker: workload::VerifiedBroker,
+    State(state): State<GatewayState>,
+    Path(binding_ref): Path<String>,
+    body: Result<Json<LegacyNamedSupervisedAdmissionV1>, JsonRejection>,
+) -> ApiResult<(StatusCode, Json<LegacyNamedAdmissionReceiptV1>)> {
+    let binding_ref = canonical_uuid(&binding_ref).map_err(control_error)?;
+    let request = Arc::new(parse_json(body)?);
+    if request.binding_ref != binding_ref {
+        return Err(control_error(ControlFailure::InvalidRequest.into()));
+    }
+    let preflight = Arc::clone(&request);
+    let replay = broker
+        .clone()
+        .blocking(move |tenant, identity, redactor| {
+            let store = named_admission_store(&tenant, &redactor)?;
+            if let Some(receipt) = store
+                .preflight_legacy_named_admission(&identity, &preflight, &tenant.worker_quota)
+                .map_err(|error| named_admission_error(&tenant.store, error))?
+            {
+                return Ok(Some(named_admission_response(receipt, &redactor)?));
+            }
+            tenant.write_quota()?;
+            Ok(None)
+        })
+        .await?;
+    if let Some(response) = replay {
+        return Ok(response);
+    }
+    let (decision, jev) = fresh_policy(&state, &request.admission.admission.decision_request).await;
+    broker
+        .blocking(move |tenant, identity, redactor| {
+            let store = named_admission_store(&tenant, &redactor)?;
+            let receipt = store
+                .admit_legacy_named(
+                    &identity,
+                    &request,
+                    &state.policy,
+                    decision,
+                    jev,
+                    &tenant.worker_quota,
+                )
+                .map_err(|error| named_admission_error(&tenant.store, error))?;
+            named_admission_response(receipt, &redactor)
+        })
+        .await
+}
+
 async fn capabilities(
     _private: PrivateControlTransport,
     RunnerIdentity(tenant): RunnerIdentity,
@@ -236,13 +322,16 @@ async fn reserve(
                 .map_err(control_error)
         })
         .await?;
-    let status = match result.refusal {
+    Ok((admission_status(&result), Json(result)))
+}
+
+fn admission_status(result: &AdmissionResultV1) -> StatusCode {
+    match result.refusal {
         Some(AdmissionRefusalV1::Policy) => StatusCode::FORBIDDEN,
         Some(AdmissionRefusalV1::Quota) => StatusCode::TOO_MANY_REQUESTS,
         None if result.replayed => StatusCode::OK,
         None => StatusCode::CREATED,
-    };
-    Ok((status, Json(result)))
+    }
 }
 
 async fn arm(

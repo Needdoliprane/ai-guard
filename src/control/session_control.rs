@@ -1,9 +1,10 @@
 //! Session control contracts shared by the catalogue and launch.
 
 use super::{
-    ControlFailure, SupervisedAdmissionV1, bounded, conflict, content_hash, invalid, uuid,
+    AdmissionResultV1, ControlFailure, SupervisedAdmissionV1, bounded, conflict, content_hash,
+    invalid, uuid,
 };
-use crate::identity::PrincipalRefV1;
+use crate::identity::{IdentityReceiptV1, PrincipalRefV1};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -182,6 +183,18 @@ impl LegacyNamedSupervisedAdmissionV1 {
                 && admission.launch.spec_hash()? == plan.launch_spec_hash,
         )
     }
+}
+
+/// The admission and ownership grant retained by the same checked transaction.
+/// A receipt never authorizes creating or starting a runtime instance.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct LegacyNamedAdmissionReceiptV1 {
+    pub(crate) version: u32,
+    pub(crate) admission: AdmissionResultV1,
+    pub(crate) grant: Option<IdentityReceiptV1>,
+    pub(crate) audit_seq: i64,
+    pub(crate) audit_hash: String,
 }
 
 /// The exact launch commit of one retained preparation. It names the launch

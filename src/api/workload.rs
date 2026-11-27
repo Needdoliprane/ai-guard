@@ -265,7 +265,7 @@ struct Proof {
     redactor: Redactor,
 }
 impl Proof {
-    async fn extract(parts: &Parts, state: &GatewayState) -> ApiResult<Self> {
+    async fn extract(parts: &Parts, state: &GatewayState) -> ApiResult<Arc<Self>> {
         let token = bearer(&parts.headers).ok_or_else(unauthorized)?;
         if !(32..=512).contains(&token.len()) {
             return Err(unauthorized());
@@ -280,19 +280,19 @@ impl Proof {
             move || {
                 let (source, identity) = resolve_sync(&state, &token)?;
                 let redactor = state.redactor.union(&Redactor::new(vec![token.clone()]));
-                Ok(Self {
+                Ok(Arc::new(Self {
                     state: state.scoped(Arc::default()),
                     source,
                     identity,
                     token,
                     redactor,
-                })
+                }))
             },
         )
         .await
     }
     async fn blocking<T: Send + 'static>(
-        self,
+        self: Arc<Self>,
         operation: impl FnOnce(TenantState, AuthenticatedWorkload, Redactor) -> ApiResult<T>
         + Send
         + 'static,
@@ -312,7 +312,7 @@ impl Proof {
             if source != self.source || !same_identity(&self.identity, &current) {
                 return Err(forbidden());
             }
-            operation(tenant, current, self.redactor)
+            operation(tenant, current, self.redactor.clone())
         })
         .await
     }
@@ -337,8 +337,9 @@ fn same_identity(first: &AuthenticatedWorkload, second: &AuthenticatedWorkload) 
         _ => false,
     }
 }
-pub(super) struct VerifiedWorker(Proof);
-pub(super) struct VerifiedBroker(Proof);
+pub(super) struct VerifiedWorker(Arc<Proof>);
+#[derive(Clone)]
+pub(super) struct VerifiedBroker(Arc<Proof>);
 impl FromRequestParts<GatewayState> for VerifiedWorker {
     type Rejection = (StatusCode, Json<Value>);
     async fn from_request_parts(parts: &mut Parts, state: &GatewayState) -> ApiResult<Self> {

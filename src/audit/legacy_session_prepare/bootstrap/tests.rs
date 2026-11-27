@@ -923,6 +923,111 @@ fn legacy_named_import_arm_preserves_its_prefix_and_closes_manual_claims() {
     assert_eq!(reopened.worker_quota(&quota).unwrap().held_workers, 1);
 }
 
+#[tokio::test]
+async fn legacy_named_admission_route_replays_the_committed_receipt_after_reopen() {
+    use crate::{
+        api::{GatewayState, TenantGateway, gateway_router},
+        control::session_control::LegacyNamedAdmissionReceiptV1,
+    };
+    use axum::{
+        body::{Body, to_bytes},
+        http::{Request, StatusCode, header},
+    };
+    use std::sync::Arc;
+    use tower::ServiceExt;
+
+    const RUNNER: &str = "synthetic-bootstrap-runner-identity-fixture";
+    let make_router = |store| {
+        gateway_router(
+            GatewayState::for_tenants(
+                vec![TenantGateway {
+                    tenant_id: TENANT.into(),
+                    store,
+                    runner_token: RUNNER.into(),
+                    viewer_token: "synthetic-bootstrap-viewer-identity-fixture".into(),
+                }],
+                Policy::default(),
+                None,
+                Redactor::new(vec![]),
+            )
+            .unwrap(),
+        )
+    };
+    let post = |path: &str, secret: &str, body: Vec<u8>| {
+        Request::post(path)
+            .header(header::AUTHORIZATION, format!("Bearer {secret}"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(body))
+            .unwrap()
+    };
+    let f = Fixture::new();
+    let (store, _) = f.provision(f.create().unwrap()).unwrap();
+    let (request, _) = f.confirmed_request(&store);
+    let store = Arc::new(store);
+    let app = make_router(Arc::clone(&store));
+    let path = format!(
+        "/api/v1/control/session-confirmations/{}/admission",
+        request.binding_ref
+    );
+    let private = format!("/control{path}");
+    let mismatched = format!(
+        "/control/api/v1/control/session-confirmations/{}/admission",
+        Uuid::new_v4()
+    );
+    let body = serde_json::to_vec(&request).unwrap();
+    let before = store.head().unwrap();
+    for (uri, token, expected) in [
+        (path.as_str(), BROKER_TOKEN, StatusCode::NOT_FOUND),
+        (private.as_str(), RUNNER, StatusCode::FORBIDDEN),
+        (mismatched.as_str(), BROKER_TOKEN, StatusCode::BAD_REQUEST),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(post(uri, token, body.clone()))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), expected);
+    }
+    assert_eq!(store.head().unwrap(), before);
+
+    let response = app
+        .oneshot(post(&private, BROKER_TOKEN, body.clone()))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let receipt: LegacyNamedAdmissionReceiptV1 =
+        serde_json::from_slice(&to_bytes(response.into_body(), 65_536).await.unwrap()).unwrap();
+    let worker = receipt.admission.worker.as_ref().unwrap();
+    assert_eq!(receipt.version, 1);
+    assert!(!receipt.admission.replayed);
+    assert_eq!(worker.state, WorkerStateV1::Reserved);
+    assert_eq!(receipt.admission.receipt.audit_seq, before + 1);
+    assert_eq!(receipt.grant.as_ref().unwrap().audit_seq, before + 2);
+    assert_eq!(receipt.audit_seq, before + 3);
+    assert_eq!(store.integrity().unwrap().head_hash, receipt.audit_hash);
+    drop(store);
+
+    let reopened = Arc::new(f.reopen());
+    assert!(!reopened.supervision_state().unwrap().active);
+    let response = make_router(Arc::clone(&reopened))
+        .oneshot(post(&private, BROKER_TOKEN, body))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let replay: LegacyNamedAdmissionReceiptV1 =
+        serde_json::from_slice(&to_bytes(response.into_body(), 65_536).await.unwrap()).unwrap();
+    assert!(replay.admission.replayed);
+    assert_eq!(replay.admission.receipt, receipt.admission.receipt);
+    assert_eq!(replay.grant, receipt.grant);
+    assert_eq!(
+        replay.admission.worker.as_ref().unwrap().worker_id,
+        worker.worker_id
+    );
+    assert_eq!(replay.audit_seq, receipt.audit_seq);
+    assert_eq!(replay.audit_hash, receipt.audit_hash);
+    assert_eq!(reopened.head().unwrap(), receipt.audit_seq);
+}
+
 #[test]
 fn legacy_named_admission_retains_policy_and_quota_refusals_without_a_grant() {
     for refusal in [AdmissionRefusalV1::Policy, AdmissionRefusalV1::Quota] {

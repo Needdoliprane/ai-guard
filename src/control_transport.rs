@@ -226,6 +226,11 @@ pub fn control_route(method: &Method, path: &str) -> Option<ControlRouteIdentity
         (&Method::GET, ["control", "session-confirmations", id]) if v1 && canonical_uuid(id) => {
             Some(BrokerPresence)
         }
+        (&Method::POST, ["control", "session-confirmations", id, "admission"])
+            if v1 && canonical_uuid(id) =>
+        {
+            Some(BrokerPresence)
+        }
         // Proposed owned broker-supervision targets (`OwnedBrokerOperationV2`).
         // Classified for relay forwarding and presence capacity only: the
         // gateway gate authenticates the owned proof, and a legacy gateway

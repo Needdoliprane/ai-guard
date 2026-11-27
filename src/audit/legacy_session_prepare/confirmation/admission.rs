@@ -3,8 +3,8 @@ use super::*;
 use crate::{
     audit::{identity::projection::Projection, supervision_admission as admission_codec},
     control::{
-        AdmissionResultV1, DecisionPhaseV1, MutationReceiptV1, QuotaPolicyV1, conflict,
-        session_control::LegacyNamedSupervisedAdmissionV1,
+        DecisionPhaseV1, MutationReceiptV1, QuotaPolicyV1, conflict,
+        session_control::{LegacyNamedAdmissionReceiptV1, LegacyNamedSupervisedAdmissionV1},
     },
     identity::{
         IdentityChangeV1, IdentityMutationV1, IdentityReceiptV1, ResourceGrantV1, ResourceKindV1,
@@ -77,17 +77,6 @@ struct AdmissionFact {
     input_hash: String,
     admission: MutationReceiptV1,
     grant: Option<IdentityReceiptV1>,
-}
-
-#[allow(
-    dead_code,
-    reason = "named admission transport awaits the named claim gate"
-)]
-pub(crate) struct LegacyNamedAdmissionCommit {
-    pub(crate) admission: AdmissionResultV1,
-    pub(crate) grant: Option<IdentityReceiptV1>,
-    pub(crate) audit_seq: i64,
-    pub(crate) audit_hash: String,
 }
 
 fn fact_id(binding_ref: Uuid) -> String {
@@ -305,12 +294,112 @@ pub(super) fn validate_fact(db: &Connection, stored: &StoredEvent) -> anyhow::Re
 }
 
 impl Store {
+    fn verify_legacy_named_admission_input(
+        &self,
+        request: &LegacyNamedSupervisedAdmissionV1,
+    ) -> anyhow::Result<String> {
+        let input_hash = request.input_hash()?;
+        let value = serde_json::to_value(request)?;
+        crate::control::invalid(
+            self.redactor.value(&value) == value && serde_json::to_vec(&value)?.len() <= 65536,
+        )?;
+        Ok(input_hash)
+    }
+
+    fn require_legacy_named_admission_format(tx: &CheckedTransaction<'_>) -> anyhow::Result<()> {
+        let version = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        anyhow::ensure!(
+            format_admits(version) && capability_present(tx)?,
+            ControlFailure::MigrationRequired
+        );
+        Ok(())
+    }
+
+    fn retained_legacy_named_admission(
+        tx: &CheckedTransaction<'_>,
+        broker: &BrokerIdentityV1,
+        request: &LegacyNamedSupervisedAdmissionV1,
+        input_hash: &str,
+        clock: &workload::AuthorizedControlTimeV1,
+    ) -> anyhow::Result<Option<LegacyNamedAdmissionReceiptV1>> {
+        let Some(stored) = event_by_id(tx, &fact_id(request.binding_ref))? else {
+            return Ok(None);
+        };
+        workload::revalidate_broker_identity_checked(tx, broker, clock.at())?;
+        let fact: AdmissionFact = decoded(&stored, ADMITTED)?;
+        anyhow::ensure!(fact.actor.matches_grant(broker), ControlFailure::NotFound);
+        conflict(fact.binding_ref == request.binding_ref && fact.input_hash == input_hash)?;
+        let (admission, record) = admission_record(tx, &fact)?;
+        Ok(Some(LegacyNamedAdmissionReceiptV1 {
+            version: 1,
+            admission: admission_codec::result(&admission, &record, true)?,
+            grant: fact.grant,
+            audit_seq: stored.seq,
+            audit_hash: stored.hash,
+        }))
+    }
+
+    fn resolve_fresh_legacy_named_admission(
+        &self,
+        tx: &CheckedTransaction<'_>,
+        broker: &BrokerIdentityV1,
+        request: &LegacyNamedSupervisedAdmissionV1,
+        clock: &workload::AuthorizedControlTimeV1,
+    ) -> anyhow::Result<ResolvedLegacyConfirmedPlan> {
+        let resolved =
+            self.resolve_legacy_confirmed_plan(tx, broker, request.binding_ref, clock)?;
+        request.require_plan(&resolved.plan)?;
+        anyhow::ensure!(tx.lease.active, ControlFailure::SupervisionInactive);
+        // The launch confirmation does not approve a separate policy review.
+        let admission = &request.admission.admission;
+        conflict(admission.receipt.phase == DecisionPhaseV1::Initial)?;
+        conflict(supervision::operation_receipt(tx, &admission.operation_id)?.is_none())?;
+        Ok(resolved)
+    }
+
+    /// Resolve a replay or prove a currently eligible request before policy evaluation.
+    pub(crate) fn preflight_legacy_named_admission(
+        &self,
+        broker: &BrokerIdentityV1,
+        request: &LegacyNamedSupervisedAdmissionV1,
+        quota: &QuotaPolicyV1,
+    ) -> anyhow::Result<Option<LegacyNamedAdmissionReceiptV1>> {
+        let input_hash = self.verify_legacy_named_admission_input(request)?;
+        admission_codec::admission_input(&request.admission, quota)?;
+        let mut db = self
+            .db
+            .lock()
+            .map_err(|_| IdentityFailureV1::IdentityUnavailable)?;
+        let tx = self.begin_checked(&mut db)?;
+        Self::require_legacy_named_admission_format(&tx)?;
+        let clock = workload::capture_control_time(&tx)?;
+        if let Some(receipt) =
+            Self::retained_legacy_named_admission(&tx, broker, request, &input_hash, &clock)?
+        {
+            let deadline = workload::broker_identity_deadline_checked(&tx, broker, clock.at())?;
+            self.commit_authorized(tx, &clock)?;
+            anyhow::ensure!(
+                workload::canonical_control_time(Utc::now())? < deadline,
+                WorkloadFailureV1::Unauthorized
+            );
+            return Ok(Some(receipt));
+        }
+        let resolved = self.resolve_fresh_legacy_named_admission(&tx, broker, request, &clock)?;
+        let admission = &request.admission.admission;
+        let stored = Self::lookup_decision(
+            &tx,
+            &admission.decision_request,
+            &admission.receipt.request_hash,
+        )?
+        .ok_or(ControlFailure::InvalidRequest)?;
+        crate::audit::worker_admission::require_receipt(&admission.receipt, &stored)?;
+        self.commit_authorized(tx, &clock)?;
+        resolved.release_at(Utc::now())?;
+        Ok(None)
+    }
+
     /// Commit a Legacy named reservation on the authenticated broker's Store.
     /// The retained fact also supports technical replay on an inactive reopen.
-    #[allow(
-        dead_code,
-        reason = "named admission transport awaits the named claim gate"
-    )]
     pub(crate) fn admit_legacy_named(
         &self,
         broker: &BrokerIdentityV1,
@@ -319,52 +408,29 @@ impl Store {
         fresh_decision: Decision,
         jev: Value,
         quota: &QuotaPolicyV1,
-    ) -> anyhow::Result<LegacyNamedAdmissionCommit> {
-        let input_hash = request.input_hash()?;
+    ) -> anyhow::Result<LegacyNamedAdmissionReceiptV1> {
+        let input_hash = self.verify_legacy_named_admission_input(request)?;
         let input = admission_codec::admission_input(&request.admission, quota)?;
-        let value = serde_json::to_value(request)?;
-        crate::control::invalid(
-            self.redactor.value(&value) == value && serde_json::to_vec(&value)?.len() <= 65536,
-        )?;
         let mut db = self
             .db
             .lock()
             .map_err(|_| IdentityFailureV1::IdentityUnavailable)?;
         let tx = self.begin_checked(&mut db)?;
-        let version = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        anyhow::ensure!(
-            format_admits(version) && capability_present(&tx)?,
-            ControlFailure::MigrationRequired
-        );
+        Self::require_legacy_named_admission_format(&tx)?;
         let clock = workload::capture_control_time(&tx)?;
         let event_id = fact_id(request.binding_ref);
-        if let Some(stored) = event_by_id(&tx, &event_id)? {
-            workload::revalidate_broker_identity_checked(&tx, broker, clock.at())?;
-            let fact: AdmissionFact = decoded(&stored, ADMITTED)?;
-            anyhow::ensure!(fact.actor.matches_grant(broker), ControlFailure::NotFound);
-            conflict(fact.binding_ref == request.binding_ref && fact.input_hash == input_hash)?;
-            let (admission, record) = admission_record(&tx, &fact)?;
-            let result = admission_codec::result(&admission, &record, true)?;
+        if let Some(receipt) =
+            Self::retained_legacy_named_admission(&tx, broker, request, &input_hash, &clock)?
+        {
             self.commit_legacy_named_control(tx, &clock, |tx, current| {
                 Ok((
                     None,
                     workload::broker_identity_deadline_checked(tx, broker, current.at())?,
                 ))
             })?;
-            return Ok(LegacyNamedAdmissionCommit {
-                admission: result,
-                grant: fact.grant,
-                audit_seq: stored.seq,
-                audit_hash: stored.hash,
-            });
+            return Ok(receipt);
         }
-        let resolved =
-            self.resolve_legacy_confirmed_plan(&tx, broker, request.binding_ref, &clock)?;
-        request.require_plan(&resolved.plan)?;
-        anyhow::ensure!(tx.lease.active, ControlFailure::SupervisionInactive);
-        // A launch confirmation grants no approval of a separate policy review.
-        conflict(request.admission.admission.receipt.phase == DecisionPhaseV1::Initial)?;
-        conflict(supervision::operation_receipt(&tx, input.operation_id())?.is_none())?;
+        let resolved = self.resolve_fresh_legacy_named_admission(&tx, broker, request, &clock)?;
         let worker_record = self.build_admission_record(
             &tx,
             &request.admission.admission,
@@ -423,7 +489,8 @@ impl Store {
                 Ok((Some(resolved.plan.expires_at), resolved.broker_deadline))
             }
         })?;
-        Ok(LegacyNamedAdmissionCommit {
+        Ok(LegacyNamedAdmissionReceiptV1 {
+            version: 1,
             admission: result,
             grant: fact.grant,
             audit_seq: stored.seq,
