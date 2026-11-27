@@ -44,6 +44,15 @@ fn result(message_uuid: &str, result_uuid: &str) -> Value {
 
 #[test]
 fn native_initialization_is_reported_once_and_does_not_acknowledge_the_turn() {
+    let hook = line(&json!({
+        "type": "system",
+        "subtype": "hook_started",
+        "hook_id": "6b647b09-0009-4387-a15e-f49d9f63c83f",
+        "hook_name": "SessionStart:fixture",
+        "hook_event": "SessionStart",
+        "uuid": "ed358c38-a5d0-4dd4-95ad-56af31aa27ed",
+        "session_id": SESSION,
+    }));
     let init = json!({
         "type": "system",
         "subtype": "init",
@@ -56,13 +65,12 @@ fn native_initialization_is_reported_once_and_does_not_acknowledge_the_turn() {
         frame_uuid: uuid(INITIALIZATION),
     });
     let mut idle = ClaudeStreamJsonAdapterV1::new(uuid(SESSION)).unwrap();
+    assert_eq!(idle.reconcile_line(&hook).unwrap(), None);
     assert_eq!(idle.reconcile_line(&line(&init)).unwrap(), expected);
 
     let mut codec = ClaudeStreamJsonAdapterV1::new(uuid(SESSION)).unwrap();
     codec.issue_turn(uuid(FIRST_MESSAGE), "first").unwrap();
-    let mut hook = init.clone();
-    hook["subtype"] = json!("hook_response");
-    assert_eq!(codec.reconcile_line(&line(&hook)).unwrap(), None);
+    assert_eq!(codec.reconcile_line(&hook).unwrap(), None);
     for (field, value) in [
         ("uuid", json!(Uuid::nil())),
         ("uuid", json!(INITIALIZATION.to_uppercase())),
