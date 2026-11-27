@@ -1,6 +1,6 @@
 //! Retained service registry. Task results containing transport/IO owners are
 //! kept in their entry until explicit joins and exact Worker terminal evidence.
-use super::journal::{AttachmentPhase, ChannelFact};
+use super::journal::{AttachmentPhase, ChannelFact, RetainedChannelEvidence};
 use super::*;
 use crate::{
     broker::{
@@ -25,7 +25,7 @@ use std::{
     },
 };
 use tokio::{
-    sync::{Mutex as AsyncMutex, Semaphore, watch},
+    sync::{Mutex as AsyncMutex, OwnedSemaphorePermit, Semaphore, watch},
     task::JoinHandle,
 };
 use uuid::Uuid;
@@ -34,7 +34,7 @@ mod retirement;
 
 struct TenantState {
     scope: JournalScopeV1,
-    init: AsyncMutex<Option<JoinHandle<Result<Arc<TenantRelayIo>>>>>,
+    init: Arc<AsyncMutex<Option<JoinHandle<Result<Arc<TenantRelayIo>>>>>>,
     io: Mutex<Option<Arc<TenantRelayIo>>>,
     literals: Mutex<Vec<String>>,
     bytes: Arc<Semaphore>,
@@ -162,7 +162,7 @@ impl RelayRegistry {
         }
         let tenant = Arc::new(TenantState {
             scope: shared,
-            init: AsyncMutex::new(None),
+            init: Arc::new(AsyncMutex::new(None)),
             io: Mutex::new(None),
             literals: Mutex::new(self.literals.clone()),
             bytes: Arc::new(Semaphore::new(32 * 1024 * 1024)),
@@ -172,6 +172,97 @@ impl RelayRegistry {
         tenants.insert(scope.tenant_id().into(), tenant.clone());
         Ok(tenant)
     }
+    fn reserve_tenant_io(&self, tenant: &TenantState) -> Result<[OwnedSemaphorePermit; 4]> {
+        const BYTES: u32 = 3 * 1024 * 1024;
+        let tenant_slot = tenant
+            .slots
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| RelayOwnerError::Capacity)?;
+        let global_slot = self
+            .global_io
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| RelayOwnerError::Capacity)?;
+        let tenant_bytes = tenant
+            .bytes
+            .clone()
+            .try_acquire_many_owned(BYTES)
+            .map_err(|_| RelayOwnerError::Capacity)?;
+        let global_bytes = self
+            .global_bytes
+            .clone()
+            .try_acquire_many_owned(BYTES)
+            .map_err(|_| RelayOwnerError::Capacity)?;
+        Ok([tenant_slot, global_slot, tenant_bytes, global_bytes])
+    }
+
+    /// Reads the retained assignment of an operation already recognized by the
+    /// caller. A live or initializing IO owner is never replaced by this read.
+    #[allow(
+        dead_code,
+        reason = "the authenticated retained reader is wired separately"
+    )]
+    pub(in crate::broker) async fn read_retained_channel(
+        &self,
+        scope: &JournalScopeV1,
+        operation: Uuid,
+    ) -> Result<Option<RetainedChannelEvidence>> {
+        if operation.is_nil() {
+            return Err(RelayOwnerError::Scope);
+        }
+        let tenant = self.tenant(scope)?;
+        let init = tenant
+            .init
+            .clone()
+            .try_lock_owned()
+            .map_err(|_| RelayOwnerError::Unknown)?;
+        if tenant.poisoned.load(Ordering::SeqCst)
+            || init.is_some()
+            || tenant
+                .io
+                .lock()
+                .map_err(|_| RelayOwnerError::Unavailable)?
+                .is_some()
+        {
+            return Err(RelayOwnerError::Unknown);
+        }
+        let permits = self.reserve_tenant_io(&tenant)?;
+        let shared = tenant.scope.clone();
+        let profile = scope.profile_id().to_owned();
+        let role = self.role.clone();
+        let root = self.root.clone();
+        let literals = tenant
+            .literals
+            .lock()
+            .map_err(|_| RelayOwnerError::Unavailable)?
+            .clone();
+        tokio::task::spawn_blocking(move || -> Result<_> {
+            // Keep writer initialization excluded even if the caller drops
+            // its future before the blocking filesystem segment exits.
+            let _retained = (init, permits);
+            role.revalidate()
+                .map_err(|_| RelayOwnerError::Unavailable)?;
+            let evidence = match relay_parent(&root, &shared, &literals, false)? {
+                Some(parent) => {
+                    TenantRelayIo::read_retained_channel(&parent, &shared, operation, literals)?
+                }
+                None => None,
+            };
+            role.revalidate()
+                .map_err(|_| RelayOwnerError::Unavailable)?;
+            if evidence
+                .as_ref()
+                .is_some_and(|fact| fact.job_id != operation || fact.source_profile_id != profile)
+            {
+                return Err(RelayOwnerError::Scope);
+            }
+            Ok(evidence)
+        })
+        .await
+        .map_err(|_| RelayOwnerError::Unknown)?
+    }
+
     async fn tenant_io(&self, tenant: &Arc<TenantState>) -> Result<Arc<TenantRelayIo>> {
         if tenant.poisoned.load(Ordering::SeqCst) {
             return Err(RelayOwnerError::Unknown);
@@ -197,26 +288,7 @@ impl RelayRegistry {
             return Ok(io);
         }
         if init.is_none() {
-            let slot = tenant
-                .slots
-                .clone()
-                .try_acquire_owned()
-                .map_err(|_| RelayOwnerError::Capacity)?;
-            let global_slot = self
-                .global_io
-                .clone()
-                .try_acquire_owned()
-                .map_err(|_| RelayOwnerError::Capacity)?;
-            let bytes = tenant
-                .bytes
-                .clone()
-                .try_acquire_many_owned(3 * 1024 * 1024)
-                .map_err(|_| RelayOwnerError::Capacity)?;
-            let global_bytes_permit = self
-                .global_bytes
-                .clone()
-                .try_acquire_many_owned(3 * 1024 * 1024)
-                .map_err(|_| RelayOwnerError::Capacity)?;
+            let permits = self.reserve_tenant_io(tenant)?;
             let scope = tenant.scope.clone();
             let role = self.role.clone();
             let root = self.root.clone();
@@ -230,25 +302,8 @@ impl RelayRegistry {
             let global_bytes = self.global_bytes.clone();
             let global_io = self.global_io.clone();
             *init = Some(tokio::task::spawn_blocking(move || {
-                let _retained = (slot, global_slot, bytes, global_bytes_permit, role.clone());
-                use sha2::{Digest, Sha256};
-                let key = hex::encode(Sha256::digest(
-                    super::super::journal::canonical(&scope).map_err(|_| RelayOwnerError::Scope)?,
-                ));
-                for name in ["relay".to_owned(), key.clone(), format!("relay/{key}")] {
-                    crate::relay::channel::control::validate_private_record(
-                        &serde_json::to_vec(&name).map_err(|_| RelayOwnerError::InvalidMaterial)?,
-                        &literals,
-                    )
-                    .map_err(|_| RelayOwnerError::InvalidMaterial)?;
-                }
-                let relay = root
-                    .persistent_child("relay", true)
-                    .map_err(|_| RelayOwnerError::InvalidMaterial)?
-                    .ok_or(RelayOwnerError::InvalidMaterial)?;
-                let parent = relay
-                    .persistent_child(&key, true)
-                    .map_err(|_| RelayOwnerError::InvalidMaterial)?
+                let _retained = (permits, role.clone());
+                let parent = relay_parent(&root, &scope, &literals, true)?
                     .ok_or(RelayOwnerError::InvalidMaterial)?;
                 TenantRelayIo::open(
                     &parent,
@@ -483,6 +538,35 @@ impl RelayRegistry {
         }
     }
 }
+
+fn relay_parent(
+    root: &Directory,
+    scope: &JournalScopeV1,
+    literals: &[String],
+    create: bool,
+) -> Result<Option<Directory>> {
+    use sha2::{Digest, Sha256};
+    let key = hex::encode(Sha256::digest(
+        super::super::journal::canonical(scope).map_err(|_| RelayOwnerError::Scope)?,
+    ));
+    for name in ["relay".to_owned(), key.clone(), format!("relay/{key}")] {
+        crate::relay::channel::control::validate_private_record(
+            &serde_json::to_vec(&name).map_err(|_| RelayOwnerError::InvalidMaterial)?,
+            literals,
+        )
+        .map_err(|_| RelayOwnerError::InvalidMaterial)?;
+    }
+    let Some(relay) = root
+        .persistent_child("relay", create)
+        .map_err(|_| RelayOwnerError::InvalidMaterial)?
+    else {
+        return Ok(None);
+    };
+    relay
+        .persistent_child(&key, create)
+        .map_err(|_| RelayOwnerError::InvalidMaterial)
+}
+
 fn endpoint(worker: &WorkerV1) -> RelayEndpointV1 {
     RelayEndpointV1 {
         worker_id: worker.worker_id.clone(),
@@ -648,6 +732,110 @@ impl VerifiedRelayExecAdmission {
 mod retention_tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+
+    #[tokio::test]
+    async fn retained_channel_read_requires_existing_outbox_and_exact_profile() {
+        let temporary = tempfile::Builder::new()
+            .permissions(std::fs::Permissions::from_mode(0o700))
+            .tempdir_in(std::fs::canonicalize(std::env::temp_dir()).unwrap())
+            .unwrap();
+        let root = Directory::open_existing(temporary.path()).unwrap();
+        let role = Arc::new(RoleLease::acquire(&root).unwrap());
+        let literals = vec!["software-private-proof-not-persisted".into()];
+        let registry = || {
+            RelayRegistry::new(
+                root.clone(),
+                role.clone(),
+                BTreeMap::new(),
+                literals.clone(),
+            )
+        };
+        let scope = JournalScopeV1::new(
+            Uuid::from_u128(1),
+            "tenant-a",
+            "http://127.0.0.1:9",
+            Uuid::from_u128(2),
+            "fixture",
+        )
+        .unwrap();
+        let operation = Uuid::from_u128(7);
+        let reader = registry();
+        let all_slots = reader.global_io.clone().try_acquire_many_owned(16).unwrap();
+        assert_eq!(
+            reader.read_retained_channel(&scope, operation).await,
+            Err(RelayOwnerError::Capacity)
+        );
+        drop(all_slots);
+        assert_eq!(
+            reader.read_retained_channel(&scope, operation).await,
+            Ok(None)
+        );
+        assert!(root.persistent_child("relay", false).unwrap().is_none());
+
+        let writer = registry();
+        let io = writer
+            .tenant_io(&writer.tenant(&scope).unwrap())
+            .await
+            .unwrap();
+        let arm = super::super::tests::arm();
+        let fact = ChannelFact {
+            version: 1,
+            job_id: operation,
+            source_profile_id: scope.profile_id().into(),
+            endpoint: RelayEndpointV1 {
+                worker_id: arm.worker_id,
+                attempt_id: arm.attempt_id,
+                generation: 1,
+            },
+            source_head_revision: 1,
+            source_head_hash: "a".repeat(64),
+            arm_id: arm.operation_id,
+            original_clock: arm.clock,
+            original_deadline_ns_decimal: arm.deadline_ns_decimal,
+            phase: AttachmentPhase::AwaitingIssuedWorkload,
+            observed_at: "2026-11-08T00:00:00Z".into(),
+            error: None,
+            admission: None,
+            claim: None,
+            core: None,
+            transition: None,
+            local_joined: false,
+        };
+        io.save_channel(fact.clone(), literals.clone())
+            .await
+            .unwrap();
+        assert_eq!(
+            reader.read_retained_channel(&scope, operation).await,
+            Err(RelayOwnerError::Unknown)
+        );
+        drop(io);
+        drop(writer);
+        assert_eq!(
+            reader.read_retained_channel(&scope, operation).await,
+            Ok(Some(RetainedChannelEvidence {
+                job_id: operation,
+                source_profile_id: fact.source_profile_id,
+                source_head_revision: fact.source_head_revision,
+                source_head_hash: fact.source_head_hash,
+                arm_id: fact.arm_id,
+                phase: fact.phase,
+            }))
+        );
+        let another_profile = JournalScopeV1::new(
+            scope.installation_id(),
+            scope.tenant_id(),
+            scope.gateway_origin(),
+            scope.control_namespace_uuid(),
+            "other-profile",
+        )
+        .unwrap();
+        assert_eq!(
+            reader
+                .read_retained_channel(&another_profile, operation)
+                .await,
+            Err(RelayOwnerError::Scope)
+        );
+    }
 
     #[tokio::test]
     async fn known_secret_in_fixed_relay_parent_is_refused_before_directory_creation() {

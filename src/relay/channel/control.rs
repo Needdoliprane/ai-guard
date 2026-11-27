@@ -10,6 +10,13 @@ use super::{
     ResponseResultV1, ResponseV1,
 };
 use crate::{
+    broker::{
+        journal::JournalScopeV1,
+        relay_owner::{
+            RelayOwnerError,
+            journal::{ChannelJournal, RetainedChannelEvidence},
+        },
+    },
     control_fs::{Directory, PrivateFile},
     relay::{
         RelayEndpointV1,
@@ -49,7 +56,7 @@ impl TenantRelayIo {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn open(
         parent: &Directory,
-        scope: &crate::broker::journal::JournalScopeV1,
+        scope: &JournalScopeV1,
         role: Arc<crate::broker::discovery::RoleLease>,
         literals: Vec<String>,
         tenant_bytes: Arc<Semaphore>,
@@ -66,9 +73,8 @@ impl TenantRelayIo {
         } else {
             Outbox::create(parent, scope, &secrets)?
         };
-        let channels =
-            crate::broker::relay_owner::journal::ChannelJournal::open(parent, scope, &secrets.0)
-                .map_err(|_| ControlError::Persistence)?;
+        let channels = ChannelJournal::open(parent, scope, &secrets.0)
+            .map_err(|_| ControlError::Persistence)?;
         Ok(Arc::new(Self {
             io: IoOwner::open(outbox, Some(channels), role, tenant_io, global_io),
             bytes: ByteBudget {
@@ -76,6 +82,27 @@ impl TenantRelayIo {
                 global: global_bytes,
             },
         }))
+    }
+    /// Read the retained prefix under the existing Outbox flock. The caller
+    /// holds the RoleLease and blocking IO admission for the entire read.
+    pub(crate) fn read_retained_channel(
+        parent: &Directory,
+        scope: &JournalScopeV1,
+        operation: uuid::Uuid,
+        literals: Vec<String>,
+    ) -> Result<Option<RetainedChannelEvidence>, RelayOwnerError> {
+        let secrets = Secrets(literals);
+        let outbox = Outbox::open(parent, scope, &secrets).map_err(|error| match error {
+            ControlError::Busy => RelayOwnerError::Unknown,
+            ControlError::Binding => RelayOwnerError::Scope,
+            ControlError::Capacity => RelayOwnerError::Capacity,
+            _ => RelayOwnerError::InvalidMaterial,
+        })?;
+        let evidence = ChannelJournal::retained_evidence(parent, scope, operation, &secrets.0)?;
+        outbox
+            .revalidate()
+            .map_err(|_| RelayOwnerError::InvalidMaterial)?;
+        Ok(evidence)
     }
     pub(crate) async fn join_pending(&self) -> Result<(), ControlError> {
         self.io.join_pending().await
