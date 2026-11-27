@@ -1754,7 +1754,7 @@ impl EnforcerClient {
         registration: RegistrationV1,
         generation: CancelGeneration,
     ) -> EnforcerResult<EnforcedSlot> {
-        let active = self.active()?;
+        let active = self.active_with_historical_registration(Some(registration.arm_id()))?;
         active
             .register_current(registration, generation, false)
             .await
@@ -1767,7 +1767,7 @@ impl EnforcerClient {
         registration: RegistrationV1,
         generation: CancelGeneration,
     ) -> EnforcerResult<EnforcedSlot> {
-        let active = self.active()?;
+        let active = self.active_with_historical_registration(Some(registration.arm_id()))?;
         active
             .register_current(registration, generation, true)
             .await
@@ -1787,6 +1787,8 @@ impl EnforcerClient {
         }
         let local = {
             let mut slots = self.0.slots.lock().map_err(|_| EnforcerError::Unhealthy)?;
+            self.0
+                .require_historical_legacy_registration(registration.arm_id())?;
             if self.0.failed.load(Ordering::SeqCst) {
                 return Err(EnforcerError::Unhealthy);
             }
@@ -2044,6 +2046,7 @@ impl EnforcerClient {
                     .slots
                     .lock()
                     .map_err(|_| EnforcerError::Unhealthy)?;
+                current.0.require_historical_legacy_registration(arm_id)?;
                 if let Some(local) = slots.get(arm_id) {
                     if local.digest != digest || !Arc::ptr_eq(&local.generation.0, &generation.0) {
                         return Err(EnforcerError::Conflict);
@@ -2173,9 +2176,16 @@ impl EnforcerClient {
     }
 
     fn active(&self) -> EnforcerResult<Self> {
+        self.active_with_historical_registration(None)
+    }
+
+    fn active_with_historical_registration(&self, arm_id: Option<&str>) -> EnforcerResult<Self> {
         let mut active = self.clone();
         // The same bound as append-only discovery generations.
         for _ in 0..128 {
+            if let Some(arm_id) = arm_id {
+                active.0.require_historical_legacy_registration(arm_id)?;
+            }
             let replacement = active
                 .0
                 .replacement
@@ -2735,7 +2745,9 @@ impl EnforcedSlot {
         }
         self.local.cancel_durable.store(true, Ordering::SeqCst);
         self.local.stop.send_replace(true);
-        let active = self.client.active()?;
+        let active = self
+            .client
+            .active_with_historical_registration(Some(self.local.registration.arm_id()))?;
         match active
             .0
             .request(
@@ -3271,6 +3283,7 @@ async fn recover_stops(client: Arc<Client>) {
 async fn restore_slot(client: &Arc<Client>, local: Arc<LocalSlot>) -> EnforcerResult<()> {
     {
         let mut slots = client.slots.lock().map_err(|_| EnforcerError::Unhealthy)?;
+        client.require_historical_legacy_registration(local.registration.arm_id())?;
         if slots.len() >= MAX_LEGACY_RETAINED_STOPS
             && !slots.contains_key(&local.registration.arm.operation_id)
         {

@@ -79,13 +79,28 @@ impl LegacyNamedProspectiveBindAck {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LegacyProspectiveRail {
+    Historical,
+    Named,
+}
+
 struct LegacyProspectiveEntry {
     retained: Arc<LocalProspective>,
+    rail: LegacyProspectiveRail,
     can_remove_before_send: bool,
     named_bind_ack: Option<EnforcerSlotStatusV1>,
 }
 
 impl LegacyProspectiveEntry {
+    fn require_rail(&self, rail: LegacyProspectiveRail) -> EnforcerResult<()> {
+        if self.rail == rail {
+            Ok(())
+        } else {
+            Err(EnforcerError::Conflict)
+        }
+    }
+
     fn share(&mut self) -> Arc<LocalProspective> {
         // A second attempt may already have sent and dropped its reference.
         // The current Arc count alone cannot recover that history.
@@ -135,7 +150,8 @@ impl LegacyTransport {
             .map_err(|_| EnforcerError::Unhealthy)?;
         let arm = retained.target.arm_id();
         let exclusive = entries.get(arm).is_some_and(|entry| {
-            entry.can_remove_before_send
+            entry.rail == LegacyProspectiveRail::Named
+                && entry.can_remove_before_send
                 && Arc::ptr_eq(&entry.retained, retained)
                 // The map and the failed attempt are the only owners.
                 && Arc::strong_count(retained) == 2
@@ -313,12 +329,33 @@ impl EnforcerClient {
         }
         let digest = target.digest().map_err(BeforeSend)?;
         let legacy = self.legacy_transport().map_err(BeforeSend)?;
+        let rail = if named_expected.is_some() {
+            LegacyProspectiveRail::Named
+        } else {
+            LegacyProspectiveRail::Historical
+        };
         let retained = {
+            // A generic registration retains its LocalSlot under the same
+            // slots-then-prospective order. Neither can adopt the other's ID.
+            let _slots = if rail == LegacyProspectiveRail::Named {
+                let slots = self
+                    .0
+                    .slots
+                    .lock()
+                    .map_err(|_| BeforeSend(EnforcerError::Unhealthy))?;
+                if slots.contains_key(target.arm_id()) {
+                    return Err(BeforeSend(EnforcerError::Conflict));
+                }
+                Some(slots)
+            } else {
+                None
+            };
             let mut map = legacy
                 .prospective
                 .lock()
                 .map_err(|_| BeforeSend(EnforcerError::Unhealthy))?;
             if let Some(old) = map.get_mut(target.arm_id()) {
+                old.require_rail(rail).map_err(BeforeSend)?;
                 if old.retained.digest != digest
                     || !Arc::ptr_eq(&old.retained.generation.0, &generation.0)
                 {
@@ -341,6 +378,7 @@ impl EnforcerClient {
                     retained.target.arm_id().into(),
                     LegacyProspectiveEntry {
                         retained: Arc::clone(&retained),
+                        rail,
                         can_remove_before_send: named_expected.is_some(),
                         named_bind_ack: None,
                     },
@@ -430,6 +468,15 @@ impl EnforcerClient {
         target: &ProspectiveRegistrationV1,
         generation: &CancelGeneration,
     ) -> EnforcerResult<Arc<LocalProspective>> {
+        self.retained_prospective_in_rail(target, generation, LegacyProspectiveRail::Historical)
+    }
+
+    fn retained_prospective_in_rail(
+        &self,
+        target: &ProspectiveRegistrationV1,
+        generation: &CancelGeneration,
+        rail: LegacyProspectiveRail,
+    ) -> EnforcerResult<Arc<LocalProspective>> {
         let digest = target.digest()?;
         let mut entries = self
             .legacy_transport()?
@@ -439,6 +486,7 @@ impl EnforcerClient {
         let entry = entries
             .get_mut(target.arm_id())
             .ok_or(EnforcerError::NotReady)?;
+        entry.require_rail(rail)?;
         if entry.retained.digest != digest
             || !Arc::ptr_eq(&entry.retained.generation.0, &generation.0)
         {
@@ -501,8 +549,13 @@ impl EnforcerClient {
                 .with_current_generation(expected, || ())
                 .map_err(BeforeSend)?;
         }
+        let rail = if named_expected.is_some() {
+            LegacyProspectiveRail::Named
+        } else {
+            LegacyProspectiveRail::Historical
+        };
         let retained = self
-            .retained_prospective(target, generation)
+            .retained_prospective_in_rail(target, generation, rail)
             .map_err(BeforeSend)?;
         let reservation = retained
             .reservation
@@ -608,7 +661,11 @@ impl EnforcerClient {
             .with_current_generation(expected, || ())
             .map_err(BeforeSend)?;
         let retained = self
-            .retained_prospective(&owner.retained.target, generation)
+            .retained_prospective_in_rail(
+                &owner.retained.target,
+                generation,
+                LegacyProspectiveRail::Named,
+            )
             .map_err(BeforeSend)?;
         if !Arc::ptr_eq(&retained, &owner.retained) || retained.bound.load(Ordering::SeqCst) {
             return Err(BeforeSend(EnforcerError::Conflict));
@@ -664,6 +721,9 @@ impl EnforcerClient {
             let entry = entries
                 .get_mut(registration.arm_id())
                 .ok_or(OutcomeUnknown(EnforcerError::Conflict))?;
+            entry
+                .require_rail(LegacyProspectiveRail::Named)
+                .map_err(OutcomeUnknown)?;
             if !Arc::ptr_eq(&entry.retained, &retained) || entry.named_bind_ack.is_some() {
                 return Err(OutcomeUnknown(EnforcerError::Conflict));
             }
@@ -760,6 +820,7 @@ impl EnforcerClient {
             let entry = entries
                 .get_mut(target.arm_id())
                 .ok_or(EnforcerError::NotReady)?;
+            entry.require_rail(LegacyProspectiveRail::Historical)?;
             if entry.retained.digest != digest {
                 return Err(EnforcerError::Conflict);
             }
@@ -865,6 +926,22 @@ fn registration_for_named_bind(
 }
 
 impl Client {
+    pub(super) fn require_historical_legacy_registration(
+        &self,
+        arm_id: &str,
+    ) -> EnforcerResult<()> {
+        if let Some(legacy) = &self.legacy
+            && let Some(entry) = legacy
+                .prospective
+                .lock()
+                .map_err(|_| EnforcerError::Unhealthy)?
+                .get(arm_id)
+        {
+            entry.require_rail(LegacyProspectiveRail::Historical)?;
+        }
+        Ok(())
+    }
+
     pub(super) fn legacy_observe_only(
         &self,
         registration: &RegistrationV1,
@@ -873,20 +950,18 @@ impl Client {
         let Some(legacy) = &self.legacy else {
             return Ok(requested);
         };
-        if requested {
-            return Ok(true);
-        }
         let map = legacy
             .prospective
             .lock()
             .map_err(|_| EnforcerError::Unhealthy)?;
-        match map.get(registration.arm_id()).map(|entry| &entry.retained) {
-            Some(retained) if !retained.bound.load(Ordering::SeqCst) => {
-                retained.target.matches_registration(registration)?;
-                Ok(false)
+        if let Some(entry) = map.get(registration.arm_id()) {
+            entry.require_rail(LegacyProspectiveRail::Historical)?;
+            if !requested && !entry.retained.bound.load(Ordering::SeqCst) {
+                entry.retained.target.matches_registration(registration)?;
+                return Ok(false);
             }
-            _ => Ok(true),
         }
+        Ok(true)
     }
     pub(super) fn adapt_legacy_request(&self, request: Request) -> EnforcerResult<Request> {
         let Request::Register {
@@ -900,12 +975,18 @@ impl Client {
         let Some(legacy) = &self.legacy else {
             return Err(EnforcerError::Unauthorized);
         };
-        let retained = legacy
-            .prospective
-            .lock()
-            .map_err(|_| EnforcerError::Unhealthy)?
-            .get_mut(registration.arm_id())
-            .map(LegacyProspectiveEntry::share);
+        let retained = {
+            let mut entries = legacy
+                .prospective
+                .lock()
+                .map_err(|_| EnforcerError::Unhealthy)?;
+            if let Some(entry) = entries.get_mut(registration.arm_id()) {
+                entry.require_rail(LegacyProspectiveRail::Historical)?;
+                Some(entry.share())
+            } else {
+                None
+            }
+        };
         let Some(retained) = retained.filter(|retained| !retained.bound.load(Ordering::SeqCst))
         else {
             // This also constrains an older live daemon: receipt-only generic
@@ -981,6 +1062,7 @@ impl Client {
                 .map_err(|_| EnforcerError::Unhealthy)?
                 .get(arm_id)
         {
+            entry.require_rail(LegacyProspectiveRail::Historical)?;
             entry.retained.bound.store(true, Ordering::SeqCst);
         }
         Ok(())
@@ -1074,7 +1156,9 @@ async fn named_reservation_retains_stale_ack_without_issuing_stop() -> anyhow::R
         generation.invalidate();
         resume.send(()).map_err(|_| EnforcerError::Unavailable)?;
         let failure = tokio::time::timeout(REGISTER_TIMEOUT, reserve).await?.err();
-        let retained = client.retained_prospective(&target, &generation)?;
+        let retained = client.retained_prospective_in_rail(
+            &target, &generation, LegacyProspectiveRail::Named,
+        )?;
         let reservation = retained
             .reservation
             .lock()
@@ -1126,15 +1210,50 @@ async fn named_exchange_never_enters_the_historical_bind() -> anyhow::Result<()>
     let client = connect_named_legacy_fixture(&fixture).await?;
     let observation = async {
         let registration = registration(fixture.root().path());
+        let target = registration.prospective()?;
         let generation = CancelGeneration::new();
         let reserved = client
             .legacy_reserve_named_prospective(
-                registration.prospective()?,
+                target.clone(),
                 &generation,
                 generation.current(),
             )
             .await
             .map_err(LegacyNamedProspectiveFailure::code)?;
+
+        for replay_only in [false, true] {
+            let historical = client
+                .legacy_reserve_prospective_diagnosed(target.clone(), generation.clone(), replay_only)
+                .await;
+            anyhow::ensure!(
+                matches!(historical, Err(refusal) if refusal.code() == EnforcerError::Conflict && refusal.motif.is_none()),
+                "historical reservation must refuse the retained named target"
+            );
+        }
+        anyhow::ensure!(
+            fixture.reserve_requests() == 1,
+            "cross-rail Reserve reached the wire"
+        );
+        let historical_begin = client.legacy_begin_prospective_arm_exchange(&target, &generation).await;
+        anyhow::ensure!(
+            matches!(historical_begin, Err(EnforcerError::Conflict)),
+            "historical Begin must refuse the retained named target"
+        );
+        let automatic_stop = client.legacy_cancel_prospective(&target, generation.current()).await;
+        anyhow::ensure!(
+            automatic_stop == Err(EnforcerError::Conflict),
+            "historical automatic STOP must refuse the retained named target"
+        );
+        let observe = client.register_current(registration.clone(), generation.clone(), true).await;
+        anyhow::ensure!(
+            matches!(observe, Err(EnforcerError::Conflict)),
+            "historical ObserveOnly must refuse the retained named target"
+        );
+        let retained_stop = client.cancel_retained(registration.clone(), generation.clone()).await;
+        anyhow::ensure!(
+            retained_stop == Err(EnforcerError::Conflict),
+            "historical retained Cancel must refuse the named rail before retaining a slot"
+        );
         let exchange = client
             .legacy_begin_named_prospective_arm_exchange(reserved)
             .await
