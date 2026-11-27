@@ -451,18 +451,23 @@ impl Service {
                 .await
                 .map_err(jobs::journal_error)?
                 .into_job();
-            let policy = creation
+            let confirmed = creation
                 .broker_checkpoint_v2()
                 .and_then(|checkpoint| checkpoint.supervision().legacy_named_admission())
-                .and_then(|named| named.import_creation())
-                .map(|prep| prep.policy())
                 .ok_or(BrokerErrorCodeV1::NeedsReconciliation)?;
-            let spec =
-                broker_helper_spec(policy).map_err(|_| BrokerErrorCodeV1::NeedsReconciliation)?;
+            let preparation = confirmed
+                .import_creation()
+                .ok_or(BrokerErrorCodeV1::NeedsReconciliation)?;
+            let worker = confirmed
+                .admission_result()
+                .and_then(|result| result.worker.as_ref())
+                .ok_or(BrokerErrorCodeV1::NeedsReconciliation)?;
+            let spec = broker_helper_spec(preparation.policy())
+                .map_err(|_| BrokerErrorCodeV1::NeedsReconciliation)?;
 
             // The intent is durable before either command. Either effect can
             // win before STOP, so a failed response keeps reconciliation open.
-            create_import_volume(&runtime, &admitted.worker, &job.cancel, generation)
+            create_import_volume(&runtime, worker, &job.cancel, generation)
                 .await
                 .map_err(|_| BrokerErrorCodeV1::NeedsReconciliation)?;
             let owned = runtime
