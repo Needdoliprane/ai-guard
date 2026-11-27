@@ -991,13 +991,45 @@ impl ManagedRuntime {
         volume: &str,
         labels: &[(String, String)],
     ) -> Result<()> {
+        self.create_named_volume_inner(volume, labels, None).await
+    }
+
+    pub(crate) async fn create_named_volume_for_generation(
+        &self,
+        volume: &str,
+        labels: &[(String, String)],
+        cancel: &CancelGeneration,
+        expected: u64,
+    ) -> Result<()> {
+        self.create_named_volume_inner(
+            volume,
+            labels,
+            Some(GenerationSpawnGuard {
+                generation: cancel.clone(),
+                expected,
+            }),
+        )
+        .await
+    }
+
+    async fn create_named_volume_inner(
+        &self,
+        volume: &str,
+        labels: &[(String, String)],
+        spawn_guard: Option<GenerationSpawnGuard>,
+    ) -> Result<()> {
         ensure!(
             !labels.is_empty(),
             "managed workspace volume requires control ownership labels"
         );
         self.verify_authority().await?;
         let output = self
-            .cli(&named_volume_args(volume, labels)?, Duration::from_secs(30))
+            .cli_sensitive(
+                &named_volume_args(volume, labels)?,
+                Duration::from_secs(30),
+                &[],
+                spawn_guard,
+            )
             .await?;
         ensure!(
             !output.truncated
@@ -1079,19 +1111,19 @@ impl ManagedRuntime {
         args: &[String],
         duration: Duration,
         extra: &[String],
-        cleanup_guard: Option<CleanupSpawnGuard>,
+        spawn_guard: Option<GenerationSpawnGuard>,
     ) -> Result<Capture> {
         let mut private_redactions = extra.to_vec();
         if let Some(binding) = &self.binding.podman {
             private_redactions.extend([binding.marker_volume.clone(), binding.nonce.to_string()]);
         }
         self.runtime
-            .capture_cli_with_cleanup_guard(
+            .capture_cli_with_generation(
                 self.command_async().await?,
                 args,
                 duration,
                 &[],
-                cleanup_guard,
+                spawn_guard,
             )
             .await
             .map_err(|mut error| {
@@ -1649,7 +1681,7 @@ impl ManagedRuntime {
         F: FnMut(ContainerObservation) -> Fut,
         Fut: Future<Output = Result<()>>,
     {
-        let handle = self.create_owned_handle(spec, false).await?;
+        let handle = self.create_owned_handle(spec, false, None).await?;
         self.execute_owned(
             spec,
             handle,
@@ -1683,6 +1715,7 @@ impl ManagedRuntime {
         &self,
         spec: &ContainerSpec,
         bootstrap_stdin: bool,
+        spawn_guard: Option<GenerationSpawnGuard>,
     ) -> Result<ContainerHandle> {
         spec.require_current_creation_policy()?;
         ensure!(
@@ -1696,9 +1729,11 @@ impl ManagedRuntime {
             super::observation::Phase::CreateRequested,
         );
         let output = self
-            .cli(
+            .cli_sensitive(
                 &spec.create_args_for(self.binding.kind, bootstrap_stdin)?,
                 Duration::from_secs(30),
+                &[],
+                spawn_guard,
             )
             .await
             .context("container creation failed with automatic image pulls disabled (--pull=never); prepare the selected image explicitly if it is absent locally")?;
@@ -1721,6 +1756,74 @@ impl ManagedRuntime {
             configuration_fingerprint_version: Some(spec.fingerprint_version()),
         })
     }
+    /// Create and inspect the exact import helper under the live cancellation
+    /// generation. The caller retains the durable preparation and owns any
+    /// reconciliation when the create response or inspection is unavailable.
+    #[allow(dead_code, reason = "the named import runner is composed separately")]
+    pub(crate) async fn create_owned_import_for_generation(
+        &self,
+        spec: &ContainerSpec,
+        cancel: &CancelGeneration,
+        expected: u64,
+    ) -> Result<OwnedContainerSnapshot> {
+        ensure!(
+            matches!(spec.purpose, ContainerPurpose::Import)
+                && spec.network == NetworkMode::None
+                && spec.secret_env_file.is_none()
+                && spec.egress_proxy_port.is_none()
+                && spec.held_bootstrap.is_none()
+                && !spec.security_preset.is_interactive()
+                && self.binding.docker_launch_profile.is_none(),
+            "guarded import creation requires an ordinary confined helper"
+        );
+        let mut scoped = self.clone();
+        scoped.runtime = self.runtime.observed_operation(spec.operation_id());
+        let handle = scoped
+            .create_owned_handle(
+                spec,
+                false,
+                Some(GenerationSpawnGuard {
+                    generation: cancel.clone(),
+                    expected,
+                }),
+            )
+            .await?;
+        let observation = scoped.inspect_created(spec, handle.id(), None).await?;
+        ensure!(
+            observation.configuration_fingerprint.is_some(),
+            "created import helper lacks a configuration fingerprint"
+        );
+        Ok(OwnedContainerSnapshot {
+            handle,
+            observation,
+        })
+    }
+
+    async fn inspect_created(
+        &self,
+        spec: &ContainerSpec,
+        id: &str,
+        held_bootstrap: Option<&HeldBootstrapBinding>,
+    ) -> Result<ContainerObservation> {
+        let facts = if held_bootstrap.is_some() {
+            self.inspect_bootstrap_facts(id).await?
+        } else {
+            self.inspect_facts(id).await?
+        };
+        let observation = parse_container_observation_version(
+            &facts.bytes,
+            self.binding.kind,
+            spec.fingerprint_version(),
+        )?;
+        ensure!(
+            observation.id.as_deref() == Some(id),
+            "runtime inspected a different immutable instance"
+        );
+        validate_created(spec, &observation)?;
+        validate_configuration_for(spec, &facts.bytes, self.binding.kind, held_bootstrap)?;
+        Ok(observation)
+    }
+
     /// Start an already owned, strictly recovered Created instance. The durable
     /// control callback must return a fresh permit; replay never creates or starts.
     #[allow(clippy::too_many_arguments)]
@@ -1847,7 +1950,7 @@ impl ManagedRuntime {
             .clone();
         let (handle, baseline) = match owned {
             Some(owned) => (owned.handle.clone(), Some(&owned.observation)),
-            None => (self.create_owned_handle(spec, true).await?, None),
+            None => (self.create_owned_handle(spec, true, None).await?, None),
         };
         self.execute_owned(
             spec,
@@ -1884,7 +1987,9 @@ impl ManagedRuntime {
             !spec.security_preset.is_interactive(),
             "prearmed batch transport refuses interactive sessions"
         );
-        let handle = self.create_owned_handle(spec, input.is_bootstrap()).await?;
+        let handle = self
+            .create_owned_handle(spec, input.is_bootstrap(), None)
+            .await?;
         self.execute_owned(
             spec,
             handle,
@@ -1982,21 +2087,7 @@ impl ManagedRuntime {
             observation: observation.clone(),
         });
         let result: Result<OwnedExecutionOutcome> = async {
-            let facts = if held_bootstrap.is_some() {
-                self.inspect_bootstrap_facts(&id).await?
-            } else {
-                self.inspect_facts(&id).await?
-            };
-            let observation = parse_container_observation_version(
-                &facts.bytes,
-                self.binding.kind,
-                spec.fingerprint_version(),
-            )?;
-            ensure!(
-                observation.id.as_deref() == Some(&id),
-                "runtime inspected a different immutable instance"
-            );
-            validate_created(spec, &observation)?;
+            let observation = self.inspect_created(spec, &id, held_bootstrap).await?;
             ensure!(
                 !input.is_bootstrap() || observation.configuration_fingerprint.is_some(),
                 "retained bootstrap lacks its created confinement fingerprint"
@@ -2009,7 +2100,6 @@ impl ManagedRuntime {
                 validate_created(spec, baseline)?;
                 observation.validate_identity_allocation(baseline)?;
             }
-            validate_configuration_for(spec, &facts.bytes, self.binding.kind, held_bootstrap)?;
             let created = OwnedContainerSnapshot {
                 handle: handle.clone(),
                 observation,
@@ -2295,7 +2385,7 @@ impl ManagedRuntime {
         self.cleanup_terminal_inner(
             handle,
             committed,
-            Some(CleanupSpawnGuard {
+            Some(GenerationSpawnGuard {
                 generation: generation.clone(),
                 expected,
             }),
@@ -2307,7 +2397,7 @@ impl ManagedRuntime {
         &self,
         handle: &ContainerHandle,
         committed: &ContainerObservation,
-        cleanup_guard: Option<CleanupSpawnGuard>,
+        spawn_guard: Option<GenerationSpawnGuard>,
     ) -> Result<()> {
         self.validate_handle(handle)?;
         let mut scoped = self.clone();
@@ -2315,7 +2405,7 @@ impl ManagedRuntime {
         let trace = scoped.runtime.trace_target(handle.id());
         super::observation::record(&trace, super::observation::Phase::CleanupRequested);
         let result = scoped
-            .cleanup_terminal_observed(handle, committed, cleanup_guard)
+            .cleanup_terminal_observed(handle, committed, spawn_guard)
             .await;
         super::observation::record(
             &trace,
@@ -2331,7 +2421,7 @@ impl ManagedRuntime {
         &self,
         handle: &ContainerHandle,
         committed: &ContainerObservation,
-        cleanup_guard: Option<CleanupSpawnGuard>,
+        spawn_guard: Option<GenerationSpawnGuard>,
     ) -> Result<()> {
         let now = self.observe(handle).await?;
         now.validate_terminal(self.binding.kind, committed)?;
@@ -2346,7 +2436,7 @@ impl ManagedRuntime {
             &["rm".into(), handle.id.clone()],
             Duration::from_secs(20),
             &[],
-            cleanup_guard,
+            spawn_guard,
         )
         .await?;
         Ok(())

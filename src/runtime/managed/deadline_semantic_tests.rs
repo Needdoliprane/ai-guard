@@ -127,6 +127,92 @@ fn native_program() -> anyhow::Result<(tempfile::TempDir, PathBuf)> {
     fs::write(metadata.join("AI_GUARD_MANAGED_CHILD"), "start_ok")?;
     Ok((temporary, program))
 }
+#[tokio::test]
+async fn import_creation_orders_native_mutations_with_stop() -> anyhow::Result<()> {
+    use crate::broker::enforcer::CancelGeneration;
+
+    let (temporary, program) = native_program()?;
+    let managed = ManagedRuntime::connect_docker_with_runtime(
+        Uuid::new_v4(),
+        "unix:///fixture/docker.sock",
+        Runtime::with_program(RuntimeKind::Docker, &program)?,
+    )
+    .await?;
+    let spec = ContainerSpec::with_operation(
+        Uuid::new_v4(),
+        ContainerPurpose::Import,
+        "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        vec!["/usr/bin/id".into()],
+        NetworkMode::None,
+        Uuid::new_v4(),
+    )?
+    .with_managed_names("aig-fixture-import", "aig-fixture-worker-work")?;
+    let labels = [("agentsandbox.owner".into(), "expected".into())];
+    let cancel = CancelGeneration::new();
+    let rejected_generation = cancel.current();
+    cancel.invalidate();
+    assert!(
+        managed
+            .create_named_volume_for_generation(
+                "aig-fixture-worker-work",
+                &labels,
+                &cancel,
+                rejected_generation
+            )
+            .await
+            .is_err()
+    );
+    assert!(
+        managed
+            .create_owned_import_for_generation(&spec, &cancel, rejected_generation)
+            .await
+            .is_err()
+    );
+    let log = temporary.path().join("log");
+    assert!(
+        fs::read_to_string(&log)?
+            .lines()
+            .all(|line| !line.starts_with("volume create ") && !line.starts_with("create "))
+    );
+
+    let fresh = CancelGeneration::new();
+    managed
+        .create_named_volume_for_generation(
+            "aig-fixture-worker-work",
+            &labels,
+            &fresh,
+            fresh.current(),
+        )
+        .await?;
+    let created = managed
+        .create_owned_import_for_generation(&spec, &fresh, fresh.current())
+        .await?;
+    assert_eq!(created.observation.process.running, Some(false));
+    assert!(created.observation.process.started_at.is_none());
+    assert_eq!(created.observation.id.as_deref(), Some(created.handle.id()));
+    let calls = fs::read_to_string(log)?;
+    assert_eq!(
+        calls
+            .lines()
+            .filter(|line| line.starts_with("volume create "))
+            .count(),
+        1
+    );
+    assert_eq!(
+        calls
+            .lines()
+            .filter(|line| line.starts_with("create "))
+            .count(),
+        1
+    );
+    assert!(
+        calls
+            .lines()
+            .all(|line| !line.starts_with("start ") && !line.starts_with("rm "))
+    );
+    Ok(())
+}
+
 async fn exited_command(
     mut command: tokio::process::Command,
 ) -> anyhow::Result<(OwnedBatchIo, ExitStatus)> {

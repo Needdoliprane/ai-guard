@@ -262,7 +262,7 @@ impl NativeControlScope {
         mut command: Command,
         args: &[String],
         environment: &[(&str, &str)],
-        cleanup_guard: Option<CleanupSpawnGuard>,
+        spawn_guard: Option<GenerationSpawnGuard>,
     ) -> Result<(Io, Instant)> {
         {
             let mut state = self.state();
@@ -305,7 +305,7 @@ impl NativeControlScope {
                 .envs(environment)
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped());
-            let child = match spawn_capture_child(&mut command, runtime.kind, cleanup_guard) {
+            let child = match spawn_capture_child(&mut command, runtime.kind, spawn_guard) {
                 Ok(child) => child,
                 Err(error) => {
                     scope.state().settled = true;

@@ -907,7 +907,7 @@ impl<'a> Execution<'a> {
             .and_then(|name| name.split('-').next())
             .context("worker namespace is missing")?;
         runtime
-            .create_named_volume(
+            .create_named_volume_for_generation(
                 &worker.attempt.volume_name,
                 &[
                     (
@@ -917,6 +917,8 @@ impl<'a> Execution<'a> {
                     ("agentsandbox.worker".into(), worker.worker_id.clone()),
                     ("agentsandbox.namespace".into(), namespace.into()),
                 ],
+                self.context.cancel_generation(),
+                self.context.expected_generation(),
             )
             .await?;
         let admission = self.admission_receipt().await?;

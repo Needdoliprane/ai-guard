@@ -1145,7 +1145,7 @@ fn record_cli_exit(trace: &Option<observation::Scope>, status: Option<std::proce
     }
 }
 
-struct CleanupSpawnGuard {
+struct GenerationSpawnGuard {
     generation: CancelGeneration,
     expected: u64,
 }
@@ -1153,13 +1153,13 @@ struct CleanupSpawnGuard {
 fn spawn_capture_child(
     command: &mut Command,
     kind: RuntimeKind,
-    cleanup_guard: Option<CleanupSpawnGuard>,
+    spawn_guard: Option<GenerationSpawnGuard>,
 ) -> Result<tokio::process::Child> {
-    let child = match cleanup_guard {
+    let child = match spawn_guard {
         Some(guard) => guard
             .generation
             .with_current_generation(guard.expected, || command.spawn())
-            .context("terminal cleanup spawn refused by the cancellation gate")?,
+            .context("runtime mutation spawn refused by the cancellation gate")?,
         None => command.spawn(),
     };
     child.with_context(|| {
@@ -1252,7 +1252,7 @@ impl Runtime {
         mut command: Command,
         args: &[String],
         environment: &[(&str, &str)],
-        cleanup_guard: Option<CleanupSpawnGuard>,
+        spawn_guard: Option<GenerationSpawnGuard>,
     ) -> Result<(batch_io::OwnedBatchIo, Instant)> {
         let runtime = self.clone();
         let args = args.to_vec();
@@ -1276,7 +1276,7 @@ impl Runtime {
                 .envs(environment)
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped());
-            let child = spawn_capture_child(&mut command, runtime.kind, cleanup_guard)?;
+            let child = spawn_capture_child(&mut command, runtime.kind, spawn_guard)?;
             let armed = Instant::now();
             observation::record(&trace, observation::Phase::StopSpawnReturned);
             Ok((
@@ -1305,17 +1305,17 @@ impl Runtime {
         duration: Duration,
         environment: &[(&str, &str)],
     ) -> Result<Capture> {
-        self.capture_cli_with_cleanup_guard(command, args, duration, environment, None)
+        self.capture_cli_with_generation(command, args, duration, environment, None)
             .await
     }
 
-    async fn capture_cli_with_cleanup_guard(
+    async fn capture_cli_with_generation(
         &self,
         command: Command,
         args: &[String],
         duration: Duration,
         environment: &[(&str, &str)],
-        cleanup_guard: Option<CleanupSpawnGuard>,
+        spawn_guard: Option<GenerationSpawnGuard>,
     ) -> Result<Capture> {
         let stop = args.first().map(String::as_str) == Some("kill") && args.len() == 2;
         let trace = if stop {
@@ -1325,7 +1325,7 @@ impl Runtime {
         };
         observation::record(&trace, observation::Phase::StopInvocationRequested);
         let result = self
-            .capture_cli_inner(command, args, duration, environment, cleanup_guard)
+            .capture_cli_inner(command, args, duration, environment, spawn_guard)
             .await;
         observation::record(
             &trace,
@@ -1343,7 +1343,7 @@ impl Runtime {
         args: &[String],
         duration: Duration,
         environment: &[(&str, &str)],
-        cleanup_guard: Option<CleanupSpawnGuard>,
+        spawn_guard: Option<GenerationSpawnGuard>,
     ) -> Result<Capture> {
         ensure!(
             environment.iter().all(|(key, value)| {
@@ -1358,9 +1358,7 @@ impl Runtime {
             "runtime environment override is not an approved absolute control configuration or temporary directory"
         );
         if let Some(scope) = &self.native_control {
-            let (io, armed) = scope
-                .spawn(command, args, environment, cleanup_guard)
-                .await?;
+            let (io, armed) = scope.spawn(command, args, environment, spawn_guard).await?;
             let mut owned = io.lock().await;
             let result = self.collect_cli_capture(&mut owned, armed, duration).await;
             if owned.is_collected() {
@@ -1371,7 +1369,7 @@ impl Runtime {
             return result;
         }
         let (mut owned, armed) = self
-            .spawn_capture_command(command, args, environment, cleanup_guard)
+            .spawn_capture_command(command, args, environment, spawn_guard)
             .await?;
         self.collect_cli_capture(&mut owned, armed, duration).await
     }
