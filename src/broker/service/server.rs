@@ -1988,9 +1988,12 @@ impl Service {
                 .await?;
             let mut literals = self.material.literals.clone();
             literals.push(credential.to_owned());
+            let session_id = Uuid::new_v4();
             let mut prepared = self
                 .filesystem(move || {
-                    prepare_broker_submission_with_egress(options, operation, &literals, egress)
+                    prepare_broker_submission_with_egress(
+                        options, operation, session_id, &literals, egress,
+                    )
                 })
                 .await?;
             if job.cancel.current() != preparation_generation {

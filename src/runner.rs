@@ -1470,6 +1470,7 @@ enum PlanPreparation<'a> {
     Legacy,
     Broker {
         operation_id: Uuid,
+        session_id: Uuid,
         control_literals: &'a [String],
         egress: Option<&'a EgressLaunchV1>,
     },
@@ -1675,7 +1676,14 @@ fn choose_plan_prepared(
             provider_record,
         })
     } else {
-        let session = Uuid::new_v4();
+        let (operation_id, session) = match preparation {
+            PlanPreparation::Legacy => (Uuid::new_v4(), Uuid::new_v4()),
+            PlanPreparation::Broker {
+                operation_id,
+                session_id,
+                ..
+            } => (operation_id, session_id),
+        };
         let request = DecisionRequest {
             request_id: Uuid::new_v4().to_string(),
             profile: options.profile.clone(),
@@ -1698,10 +1706,6 @@ fn choose_plan_prepared(
                 .interactive
                 .then_some(crate::model::ExecutionModeV1::InteractiveTtyV1),
             provider_resolution,
-        };
-        let operation_id = match preparation {
-            PlanPreparation::Legacy => Uuid::new_v4(),
-            PlanPreparation::Broker { operation_id, .. } => operation_id,
         };
         Ok(ChosenPlan {
             plan: RunPlan {

@@ -147,14 +147,22 @@ pub fn prepare_broker_submission(
     operation_id: Uuid,
     control_literals: &[String],
 ) -> Result<PreparedSubmission> {
-    prepare_broker_submission_with_egress(options, operation_id, control_literals, None)
+    prepare_broker_submission_with_egress(
+        options,
+        operation_id,
+        Uuid::new_v4(),
+        control_literals,
+        None,
+    )
 }
 
 /// The broker service checks retained runtime availability before reserving a
 /// fresh operation and calling this preparation with its selected profile.
+/// The session UUID comes from the trusted caller and binds the intent and decision request.
 pub(crate) fn prepare_broker_submission_with_egress(
     options: RunOptions,
     operation_id: Uuid,
+    session_id: Uuid,
     control_literals: &[String],
     egress: Option<EgressLaunchV1>,
 ) -> Result<PreparedSubmission> {
@@ -162,6 +170,7 @@ pub(crate) fn prepare_broker_submission_with_egress(
         !operation_id.is_nil(),
         "broker operation UUID must not be nil"
     );
+    ensure!(!session_id.is_nil(), "broker session UUID must not be nil");
     ensure!(
         options.approve_hash.is_none(),
         "broker submission does not accept approve_hash"
@@ -178,7 +187,7 @@ pub(crate) fn prepare_broker_submission_with_egress(
             && control_literals.iter().map(String::len).sum::<usize>() <= 256 * 1024,
         "broker control literal context exceeds its bounds"
     );
-    prepare_submission(options, operation_id, control_literals, egress)
+    prepare_submission(options, operation_id, session_id, control_literals, egress)
         .map_err(|_| anyhow!("broker submission preparation failed"))
 }
 
@@ -208,6 +217,7 @@ pub(crate) fn require_fresh_source(job: &AcceptedJobV1) -> Result<()> {
 fn prepare_submission(
     options: RunOptions,
     operation_id: Uuid,
+    session_id: Uuid,
     control_literals: &[String],
     egress: Option<EgressLaunchV1>,
 ) -> Result<PreparedSubmission> {
@@ -215,6 +225,7 @@ fn prepare_submission(
         options,
         PlanPreparation::Broker {
             operation_id,
+            session_id,
             control_literals,
             egress: egress.as_ref(),
         },

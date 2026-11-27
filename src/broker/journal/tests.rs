@@ -351,18 +351,37 @@ fn managed_egress_plan_derives_and_reloads_the_same_provider_binding() {
     let egress = EgressLaunchV1::broker_proxy(3240).unwrap();
 
     assert!(prepare_broker_submission(options.clone(), operation(), &[]).is_err());
+    let session = Uuid::new_v4();
     let mut bridge = options.clone();
     bridge.network = NetworkMode::Bridge;
     assert!(
-        prepare_broker_submission_with_egress(bridge, operation(), &[], Some(egress.clone()),)
-            .is_err()
+        prepare_broker_submission_with_egress(
+            bridge,
+            operation(),
+            session,
+            &[],
+            Some(egress.clone())
+        )
+        .is_err()
     );
-
-    let prepared =
-        prepare_broker_submission_with_egress(options, operation(), &[], Some(egress.clone()))
-            .unwrap();
+    let prepared = prepare_broker_submission_with_egress(
+        options,
+        operation(),
+        session,
+        &[],
+        Some(egress.clone()),
+    )
+    .unwrap();
     let intent = prepared.intent();
-    let resolution = intent.request_data().provider_resolution.as_ref().unwrap();
+    let request = intent.request_data();
+    let session_text = session.to_string();
+    let agent = format!("codex-{session}");
+    assert_eq!(intent.operation_id(), operation());
+    assert_eq!(intent.session(), session);
+    assert_eq!(request.session_id.as_deref(), Some(session_text.as_str()));
+    assert_eq!(request.sandbox_id.as_deref(), Some(session_text.as_str()));
+    assert_eq!(request.agent_id.as_deref(), Some(agent.as_str()));
+    let resolution = request.provider_resolution.as_ref().unwrap();
     assert_eq!(resolution.client, crate::provider::ClientKind::Codex);
     assert_eq!(
         resolution.transport,
@@ -437,6 +456,7 @@ fn managed_egress_plan_derives_and_reloads_the_same_provider_binding() {
     let journal = open(journal_root.path());
     let stored = journal.load(operation()).unwrap().unwrap();
     let replayed = BrokerRunState::from_job(&stored).unwrap();
+    assert_eq!(replayed.session(), session);
     assert_eq!(replayed.options().network, NetworkMode::None);
     assert_eq!(
         replayed

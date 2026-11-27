@@ -735,6 +735,7 @@ fn prepare(
     let mut prepared = prepare_broker_submission_with_egress(
         options,
         operation,
+        Uuid::new_v4(),
         &[],
         Some(EgressLaunchV1::broker_proxy(PORT)?),
     )?;
