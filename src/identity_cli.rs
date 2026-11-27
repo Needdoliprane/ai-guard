@@ -31,6 +31,7 @@ pub enum HumanCommand {
     /// Apply a typed offline mutation; actor is derived from control ownership.
     Apply(ApplyArgs),
     /// Provision a fixed Legacy session target with the control stopped.
+    #[command(mut_arg("max_events", |arg| arg.default_value(crate::audit::DEFAULT_GATEWAY_AUDIT_MAX_EVENTS_ARG)))]
     ProvisionLegacySessionTarget(LegacySessionTargetArgs),
     /// Retain a preparation for a fixed target as a locally authenticated human.
     PrepareLegacySession(LegacySessionRequestArgs),

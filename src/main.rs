@@ -150,7 +150,7 @@ enum Command {
         /// Operator attestation: gateway and brokers are stopped.
         #[arg(long, required = true)]
         confirm_control_stopped: bool,
-        #[arg(long, default_value_t = 100_000)]
+        #[arg(long, default_value = agentsandbox::audit::DEFAULT_GATEWAY_AUDIT_MAX_EVENTS_ARG)]
         max_events: u64,
         /// Payload byte cap the gateway uses for this SQLite tenant store.
         #[arg(long, default_value_t = agentsandbox::audit::DEFAULT_PHYSICAL_BYTES)]
@@ -259,7 +259,7 @@ struct GatewayArgs {
     viewer_token_file: PathBuf,
     #[arg(long, default_value = "policies/default.json")]
     policy: PathBuf,
-    #[arg(long, default_value_t = 100_000)]
+    #[arg(long, default_value = agentsandbox::audit::DEFAULT_GATEWAY_AUDIT_MAX_EVENTS_ARG)]
     max_events: u64,
     /// Payload byte cap of each SQLite tenant store, 256 MiB to 2 GiB. A larger
     /// cap lengthens every full validation; MySQL keeps 256 MiB.
@@ -1776,6 +1776,71 @@ mod gateway_main_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_session_maintenance_matches_gateway_audit_event_default() {
+        use agentsandbox::identity_cli::{HumanArgs, HumanCommand};
+
+        let gateway = Cli::try_parse_from(["agentsandbox", "gateway"]).unwrap();
+        assert!(matches!(
+            gateway.command,
+            Command::Gateway(GatewayArgs {
+                max_events: 100_000,
+                ..
+            })
+        ));
+
+        let offline = [
+            "--data",
+            "fixture.sqlite",
+            "--tenant-id",
+            "tenant-a",
+            "--confirm-control-stopped",
+        ];
+        let parse = |command: &[&str]| {
+            Cli::try_parse_from(
+                std::iter::once("agentsandbox")
+                    .chain(command.iter().copied())
+                    .chain(offline),
+            )
+            .unwrap()
+            .command
+        };
+        assert!(matches!(
+            parse(&["enable-legacy-session-prepare", "--backup", "before.sqlite"]),
+            Command::EnableLegacySessionPrepare {
+                max_events: 100_000,
+                ..
+            }
+        ));
+
+        let target = [
+            "human",
+            "provision-legacy-session-target",
+            "--target-file",
+            "target.json",
+        ];
+        assert!(matches!(
+            parse(&target),
+            Command::Human(HumanArgs {
+                command: HumanCommand::ProvisionLegacySessionTarget(args),
+            }) if args.offline.max_events == 100_000
+        ));
+        let mut explicit = target.to_vec();
+        explicit.extend(["--max-events", "43123"]);
+        assert!(matches!(
+            parse(&explicit),
+            Command::Human(HumanArgs {
+                command: HumanCommand::ProvisionLegacySessionTarget(args),
+            }) if args.offline.max_events == 43_123
+        ));
+        assert!(matches!(
+            parse(&["human", "apply", "--mutation-file", "mutation.json"]),
+            Command::Human(HumanArgs {
+                command: HumanCommand::Apply(args),
+            }) if args.offline.max_events == 1_000_000
+        ));
+    }
 
     #[cfg(feature = "mysql-storage")]
     #[test]

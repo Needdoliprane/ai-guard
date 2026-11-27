@@ -11,6 +11,8 @@ pub(crate) const PHYSICAL_BYTES: u64 = 256 * 1024 * 1024;
 pub const MAX_SQLITE_PHYSICAL_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 /// Default and smallest selectable payload cap of a tenant store.
 pub const DEFAULT_PHYSICAL_BYTES: u64 = PHYSICAL_BYTES;
+/// CLI default for the gateway and its Legacy session maintenance commands.
+pub const DEFAULT_GATEWAY_AUDIT_MAX_EVENTS_ARG: &str = "100000";
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

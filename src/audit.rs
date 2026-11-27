@@ -23,8 +23,8 @@ mod capacity;
 pub(crate) mod capacity_policy;
 pub use capacity::WorkloadAuditPolicyV1;
 pub use capacity_policy::{
-    AuditCapacityFailureV1, AuditCapacityPolicyV1, AuditCapacityV1, DEFAULT_PHYSICAL_BYTES,
-    MAX_SQLITE_PHYSICAL_BYTES,
+    AuditCapacityFailureV1, AuditCapacityPolicyV1, AuditCapacityV1,
+    DEFAULT_GATEWAY_AUDIT_MAX_EVENTS_ARG, DEFAULT_PHYSICAL_BYTES, MAX_SQLITE_PHYSICAL_BYTES,
 };
 pub(crate) mod decision_codec;
 pub use decision_codec::DecisionFailure;

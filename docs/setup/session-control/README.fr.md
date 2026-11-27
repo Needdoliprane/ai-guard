@@ -24,15 +24,15 @@ Le CLI Legacy utilise un compte local nominatif et un contexte personnel doté d
 ### Maintenance opérateur
 
 1. Utilisez la base SQLite existante du tenant, de format 10 à 13. Arrêtez le gateway, les brokers et les redémarrages automatiques avant d’indiquer `--confirm-control-stopped`. Si nécessaire, installez d’abord le marqueur `human_rights_v2` avec `migrate-human-rights` et une nouvelle sauvegarde distincte. [Migration des droits humains](../identity/README.fr.md#activer-les-capacités-des-droits-humains)
-2. Renseignez `tenant_db`, `tenant_id` et `audit_limit` avec le chemin de la base, le tenant et la limite d’événements configurée. Choisissez un chemin `prepare_backup` libre dans un répertoire privé, puis installez la capacité de préparation distincte.
+2. Renseignez `tenant_db` et `tenant_id` avec le chemin de la base et le tenant. Choisissez un chemin `prepare_backup` libre dans un répertoire privé, puis installez la capacité de préparation distincte.
 
    ```sh
    agentsandbox enable-legacy-session-prepare \
-     --data "$tenant_db" --tenant-id "$tenant_id" --max-events "$audit_limit" \
+     --data "$tenant_db" --tenant-id "$tenant_id" \
      --backup "$prepare_backup" --confirm-control-stopped
    ```
 
-   Utilisez les mêmes paramètres de capacité d’audit pour les deux commandes de maintenance. Si le gateway utilise un plafond explicite, passez `--audit-max-bytes` avec sa valeur en octets. La valeur par défaut est de 256 Mio. Si le gateway utilise un fichier privé `--audit-capacity-file`, passez ce fichier. Avec un registre de tenants, enregistrez uniquement l’objet `audit_capacity_policy` de ce tenant dans un fichier JSON privé et passez ce fichier. Une incompatibilité entre plafond et politique est refusée avant l’ouverture de SQLite. Lorsque la politique est valide et le budget ordinaire plein, l’écriture est refusée pour préserver les réserves STOP et identité.
+   Utilisez les mêmes paramètres de capacité d’audit pour les deux commandes de maintenance. Les valeurs par défaut suivent celles du gateway à 100 000 événements et 256 Mio. Passez `--max-events` ou `--audit-max-bytes` si le gateway configure une autre limite et indiquez la seconde en octets. Si le gateway utilise un fichier privé `--audit-capacity-file`, passez ce fichier. Avec un registre de tenants, enregistrez uniquement l’objet `audit_capacity_policy` de ce tenant dans un fichier JSON privé et passez ce fichier. Une incompatibilité entre plafond et politique est refusée avant l’ouverture de SQLite. Lorsque la politique est valide et le budget ordinaire plein, l’écriture est refusée pour préserver les réserves STOP et identité.
 
    Conservez la sauvegarde vérifiée et le rapport JSON. `from_version` et `to_version` indiquent tous deux le format de la base existante. `backup_path`, `genesis_seq` et `genesis_hash` identifient la sauvegarde et le marqueur. Une seconde installation est refusée. En cas de perte du rapport, conservez la sauvegarde et recherchez `control.legacy_session_prepare.genesis` dans l’audit du tenant avant toute nouvelle tentative. La migration actuelle vers `owned_sources` refuse une base qui porte ce marqueur. [Maintenance des sources humaines](../human-sources-maintenance/README.fr.md)
 
@@ -40,7 +40,7 @@ Le CLI Legacy utilise un compte local nominatif et un contexte personnel doté d
 
    ```sh
    agentsandbox human provision-legacy-session-target \
-     --data "$tenant_db" --tenant-id "$tenant_id" --max-events "$audit_limit" \
+     --data "$tenant_db" --tenant-id "$tenant_id" \
      --target-file "$target_file" --confirm-control-stopped
    ```
 

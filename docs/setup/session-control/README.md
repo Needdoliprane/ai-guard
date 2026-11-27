@@ -24,15 +24,15 @@ The Legacy CLI uses a local named account and a personal context with `launch_se
 ### Operator maintenance
 
 1. Use the existing tenant SQLite database at format 10–13. Stop the gateway, brokers and automatic restarts before setting `--confirm-control-stopped`. If needed, install the `human_rights_v2` marker first with `migrate-human-rights` and its own fresh backup. [Human rights migration](../identity/README.md#enable-the-human-rights-capabilities)
-2. Set `tenant_db`, `tenant_id` and `audit_limit` to the source database path, tenant and configured event limit. Choose an unused `prepare_backup` path in a private directory, then install the separate preparation capability.
+2. Set `tenant_db` and `tenant_id` to the source database path and tenant. Choose an unused `prepare_backup` path in a private directory, then install the separate preparation capability.
 
    ```sh
    agentsandbox enable-legacy-session-prepare \
-     --data "$tenant_db" --tenant-id "$tenant_id" --max-events "$audit_limit" \
+     --data "$tenant_db" --tenant-id "$tenant_id" \
      --backup "$prepare_backup" --confirm-control-stopped
    ```
 
-   Use the same audit capacity settings for both maintenance commands. If the gateway uses an explicit byte ceiling, pass `--audit-max-bytes` with its configured value in bytes. The default is 256 MiB. If the gateway uses a private `--audit-capacity-file`, pass that file. With a tenant registry, save the tenant’s `audit_capacity_policy` object on its own in a private JSON file and pass that file. An incompatible ceiling or policy is refused before SQLite is opened. When a valid policy leaves the ordinary budget full, the write is refused to preserve the STOP and identity reserves.
+   Use the same audit capacity settings for both maintenance commands. The defaults match the gateway at 100,000 events and 256 MiB. Pass `--max-events` or `--audit-max-bytes` when the gateway configures a different limit, with the latter specified in bytes. If the gateway uses a private `--audit-capacity-file`, pass that file. With a tenant registry, save the tenant’s `audit_capacity_policy` object on its own in a private JSON file and pass that file. An incompatible ceiling or policy is refused before SQLite is opened. When a valid policy leaves the ordinary budget full, the write is refused to preserve the STOP and identity reserves.
 
    Keep the verified backup and the JSON report. `from_version` and `to_version` both report the existing store format. `backup_path`, `genesis_seq` and `genesis_hash` identify the backup and marker. A second installation is refused. If the report is lost, preserve the backup and inspect the tenant audit for `control.legacy_session_prepare.genesis` before retrying. The current migration to `owned_sources` refuses a database carrying this marker. [Human source maintenance](../human-sources-maintenance/README.md)
 
@@ -40,7 +40,7 @@ The Legacy CLI uses a local named account and a personal context with `launch_se
 
    ```sh
    agentsandbox human provision-legacy-session-target \
-     --data "$tenant_db" --tenant-id "$tenant_id" --max-events "$audit_limit" \
+     --data "$tenant_db" --tenant-id "$tenant_id" \
      --target-file "$target_file" --confirm-control-stopped
    ```
 
