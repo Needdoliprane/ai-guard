@@ -88,9 +88,11 @@ jobs:
               | .message as $message
               | ($message.code.code // empty) as $code
               | select($code | test("\\AE[0-9]{4}\\z"))
-              | $message.spans[]? | select(.is_primary)
-              | select(.file_name | test("\\Asrc/[A-Za-z0-9_./-]+[.]rs\\z"))
-              | "compiler_error=\($code) file=\(.file_name) line=\(.line_start)"' "$build_json" 2>/dev/null | sort -u || true
+              | ([$message.spans[]? | select(.is_primary)
+                  | recurse(.expansion.span // empty)
+                  | select(.file_name | test("\\A(src|tests)/[A-Za-z0-9_./-]+[.]rs\\z"))] | .[0]) as $span
+              | if $span then "compiler_error=\($code) file=\($span.file_name) line=\($span.line_start)"
+                else "compiler_error=\($code) scope=outside_product_sources" end' "$build_json" 2>/dev/null | sort -u || true
             jq -Rr 'fromjson? | objects
               | select(.reason == "compiler-message" and .message.level == "error")
               | .message as $message
