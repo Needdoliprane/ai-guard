@@ -241,7 +241,8 @@ impl WriterClient {
         let current = super::lifecycle(&job)?;
         require_open(&current)?;
         let retained = retained_admission(&job)?;
-        if retained.archive_digest() != Some(archive_digest) {
+        if retained.archive_digest() != Some(archive_digest) || retained.import_creation().is_none()
+        {
             return Err(JournalError::Conflict);
         }
         let pending = retained.clone().with_import_arm(arm)?;

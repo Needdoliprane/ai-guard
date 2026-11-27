@@ -911,6 +911,20 @@ mod tests {
             checkpoint(named_arm.clone())?.validate_transition(Some(&prepared)),
             Err(JournalError::Conflict)
         ));
+        let arm_without_latch = checkpoint(
+            named_arm
+                .clone()
+                .acknowledge_import_arm(arm_result.clone())?,
+        )?;
+        let historical_bytes = arm_without_latch.canonical_bytes()?;
+        let reopened = BrokerCheckpointV2::from_bytes(&historical_bytes)?;
+        assert_eq!(reopened.canonical_bytes()?, historical_bytes);
+        let retained = reopened.supervision().legacy_named_admission().unwrap();
+        assert!(retained.import_creation().is_none());
+        assert!(equal(
+            retained.import_arm().unwrap().receipt().unwrap(),
+            &arm_result.receipt
+        )?);
         let latched = accepted.clone().with_import_creation(helper_id)?;
         let other_latch = accepted.with_import_creation(Uuid::new_v4())?;
         assert!(matches!(
@@ -992,6 +1006,20 @@ mod tests {
 
             assert!(matches!(
                 writer
+                    .record_legacy_named_import_arm(&plan, &digest, arm.clone())
+                    .await,
+                Err(JournalError::Conflict)
+            ));
+            assert_eq!(
+                writer.load(operation).await?.unwrap().head(),
+                admitted.head()
+            );
+            let recorded_creation = writer
+                .record_legacy_named_import_creation(&plan, &digest, helper_id)
+                .await?;
+            let before_arm = recorded_creation.job().head();
+            assert!(matches!(
+                writer
                     .record_legacy_named_import_arm(&plan, &"0".repeat(64), arm.clone())
                     .await,
                 Err(JournalError::Conflict)
@@ -1013,10 +1041,7 @@ mod tests {
                     .await,
                 Err(JournalError::Conflict)
             ));
-            assert_eq!(
-                writer.load(operation).await?.unwrap().head(),
-                admitted.head()
-            );
+            assert_eq!(writer.load(operation).await?.unwrap().head(), before_arm);
             let (first, second) = tokio::join!(
                 writer.record_legacy_named_import_arm(&plan, &digest, arm.clone()),
                 writer.record_legacy_named_import_arm(&plan, &digest, arm.clone()),
@@ -1026,10 +1051,13 @@ mod tests {
                 | (Err(JournalError::Conflict), Ok(recorded)) => recorded.into_request(),
                 _ => panic!("only one exact import Arm write may issue a ticket"),
             };
-            let next = BrokerCheckpointV3::new(checkpoint(named_arm.clone())?, Vec::new())?;
+            let next = BrokerCheckpointV3::new(
+                checkpoint(latched.clone().with_import_arm(arm.clone())?)?,
+                Vec::new(),
+            )?;
             assert!(matches!(
                 writer
-                    .advance_lifecycle(operation, admitted.head().clone(), next)
+                    .advance_lifecycle(operation, before_arm.clone(), next)
                     .await,
                 Err(JournalError::Conflict)
             ));
