@@ -1261,7 +1261,8 @@ impl Fixture {
         )?);
         self.fresh_start_attempted = fresh;
         self.selection = role;
-        timeout(Duration::from_secs(60), async {
+        let mut last_list = ("not_attempted", None);
+        let started = timeout(Duration::from_secs(60), async {
             loop {
                 ensure!(
                     self.broker
@@ -1279,25 +1280,48 @@ impl Fixture {
                     }
                     println!("phase=fixture_start_guardian category=identity_attested");
                 }
-                if matches!(
-                    service::request(
-                        &self.broker_root,
-                        "a",
-                        A_RUNNER,
-                        BrokerCommandV1::List {
-                            after: None,
-                            limit: 1
-                        }
-                    )
-                    .await,
-                    Ok(BrokerReplyV1::Page { .. })
-                ) {
-                    return Ok::<_, anyhow::Error>(());
-                }
+                last_list = match service::request(
+                    &self.broker_root,
+                    "a",
+                    A_RUNNER,
+                    BrokerCommandV1::List {
+                        after: None,
+                        limit: 1,
+                    },
+                )
+                .await
+                {
+                    Ok(BrokerReplyV1::Page { .. }) => return Ok::<_, anyhow::Error>(()),
+                    Ok(BrokerReplyV1::Error { code }) => ("broker_refusal", Some(code)),
+                    Ok(_) => ("unexpected_reply", None),
+                    Err(_) => ("request_error", None),
+                };
                 sleep(Duration::from_millis(20)).await;
             }
         })
-        .await?
+        .await;
+        if started.is_err() {
+            let child_state = match self.broker.as_mut().map(|owner| owner.child.try_wait()) {
+                Some(Ok(None)) => "running",
+                Some(Ok(Some(_))) => "exited",
+                Some(Err(_)) => "wait_unavailable",
+                None => "not_owned",
+            };
+            let broker_announcement = self
+                .broker_root
+                .join("broker/announcements/e-0001.json")
+                .is_file();
+            let guardian_announcement = self
+                .broker_root
+                .join(role.name())
+                .join("announcements/e-0001.json")
+                .is_file();
+            println!(
+                "phase=fixture_broker_ipc_preflight category=timeout last_list={} refusal={:?} broker_announcement={broker_announcement} guardian_announcement={guardian_announcement} child_state={child_state}",
+                last_list.0, last_list.1
+            );
+        }
+        started?
     }
     pub async fn restart(&mut self, role: Role) -> Result<(Uuid, Uuid)> {
         let before = self.broker_epoch()?;
