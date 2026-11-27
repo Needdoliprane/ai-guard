@@ -182,6 +182,20 @@ impl Client {
         }
         Ok((status, bytes))
     }
+    pub(super) async fn send_session_bounded(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        request: Option<Vec<u8>>,
+        limits: Limits,
+    ) -> Result<(StatusCode, Vec<u8>)> {
+        if crate::control_transport::control_route(&method, path)
+            != Some(crate::control_transport::ControlRouteIdentity::BrokerSession)
+        {
+            return Err(PresenceError::Protocol);
+        }
+        self.send_bounded(method, path, request, limits).await
+    }
     pub(super) async fn identity(&self, p: &PreparedPresence) -> Result<BrokerIdentityViewV1> {
         self.exchange(p, "/api/v1/brokers/identity", None).await
     }
@@ -226,7 +240,7 @@ impl Client {
         .await
     }
 }
-fn remote_error(status: StatusCode, value: &Value) -> PresenceError {
+pub(super) fn remote_error(status: StatusCode, value: &Value) -> PresenceError {
     let code = value
         .get("error")
         .and_then(|v| v.get("code"))

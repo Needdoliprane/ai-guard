@@ -28,6 +28,7 @@ mod hash_tests;
 mod http;
 #[cfg(test)]
 mod http_tests;
+mod legacy_named_admission;
 /// Proposed owned broker-supervision publisher, selected only by its explicit
 /// configuration profile. It never falls back to, adopts or migrates legacy.
 pub(crate) mod owned;
@@ -50,6 +51,7 @@ pub(crate) enum PresenceError {
     Clock,
     Protocol,
     Transport,
+    AdmissionOutcomeUnknown,
     Unavailable,
     Stopped,
     /// Closed owned-profile state. It never carries remote prose or a secret.
@@ -57,7 +59,10 @@ pub(crate) enum PresenceError {
 }
 impl PresenceError {
     pub(crate) fn fences_admission(self) -> bool {
-        matches!(self, Self::InvalidConfig | Self::UnsafeFilesystem)
+        matches!(
+            self,
+            Self::InvalidConfig | Self::UnsafeFilesystem | Self::AdmissionOutcomeUnknown
+        )
     }
 }
 impl fmt::Display for PresenceError {
@@ -75,6 +80,9 @@ impl fmt::Display for PresenceError {
             Self::Clock => "broker presence control clock requires operator reconciliation",
             Self::Protocol => "broker presence response failed validation",
             Self::Transport => "broker presence transport attempts were exhausted",
+            Self::AdmissionOutcomeUnknown => {
+                "named admission outcome is unknown; preserve and reconcile the exact request"
+            }
             Self::Unavailable => "broker presence is unavailable",
             Self::Stopped => "broker presence was stopped",
             Self::Owned(block) => return fmt::Display::fmt(block, f),
@@ -316,6 +324,20 @@ impl PreparedPresence {
                 .map_err(|_| PresenceError::UnsafeFilesystem)?;
         }
         Ok(())
+    }
+    /// Perform one broker-authorized Legacy admission exchange. Callers keep
+    /// this exact request and its IDs if the response outcome is uncertain.
+    #[allow(
+        dead_code,
+        reason = "the broker admission caller is a separate G04 integration"
+    )]
+    pub(crate) async fn admit_legacy_named(
+        &self,
+        expected_broker_profile_id: &str,
+        request: &crate::control::session_control::LegacyNamedSupervisedAdmissionV1,
+    ) -> Result<legacy_named_admission::Outcome> {
+        self.revalidate()?;
+        legacy_named_admission::admit(self, expected_broker_profile_id, request).await
     }
     fn screen_material(&self) -> Result<()> {
         let source = serde_json::from_slice::<Value>(self.files[0].bytes())
