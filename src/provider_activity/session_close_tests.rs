@@ -217,16 +217,27 @@ async fn collect_and_finish_clean_claude_hook(
     root: &Directory,
     context: ActivityContext,
     sink: &RecordedActivity,
+    live_stdout: bool,
 ) -> Result<()> {
     let session_id = context.session;
-    let session = LiveSession::open(
+    let mut session = LiveSession::open(
         root,
         context,
         Redactor::new(Vec::new()),
         sink.clone(),
         ActivityLimits::default(),
-        false,
+        live_stdout,
     )?;
+    if live_stdout {
+        let tap = session.take_tap().expect("fixture stdout tap");
+        let frame = serde_json::json!({
+            "type": "system",
+            "subtype": "init",
+            "session_id": session_id,
+            "uuid": uuid::Uuid::new_v4(),
+        });
+        tap.send(format!("{frame}\n").as_bytes()).await;
+    }
     let transport = OneClaudeHook(Some(HookFrame::Hook {
         seq: 1,
         event: EventV1::SessionStart,
@@ -266,7 +277,7 @@ async fn collect_and_finish_clean_claude_hook(
 async fn a_reopened_claude_spool_keeps_coverage_partial_after_a_clean_live_drain() -> Result<()> {
     let (_fresh, fresh_root, fresh_context) = retained_fixture();
     let clean = RecordedActivity::default();
-    collect_and_finish_clean_claude_hook(&fresh_root, fresh_context, &clean).await?;
+    collect_and_finish_clean_claude_hook(&fresh_root, fresh_context, &clean, false).await?;
     {
         let events = clean.0.lock().unwrap();
         let coverage = events.last().unwrap();
@@ -291,7 +302,7 @@ async fn a_reopened_claude_spool_keeps_coverage_partial_after_a_clean_live_drain
     let prefix = std::fs::read(&path)?;
 
     let resumed = RecordedActivity::default();
-    collect_and_finish_clean_claude_hook(&root, context.clone(), &resumed).await?;
+    collect_and_finish_clean_claude_hook(&root, context.clone(), &resumed, true).await?;
     let sealed = std::fs::read(&path)?;
     assert!(sealed.starts_with(&prefix));
     {
@@ -301,6 +312,16 @@ async fn a_reopened_claude_spool_keeps_coverage_partial_after_a_clean_live_drain
         assert_eq!(events[0].provenance, "declared");
         assert_eq!(events[0].data["count"], 1);
         assert!(events.iter().any(|event| event.kind == "session.declared"));
+        let stdout_state = |state: &str| {
+            events.iter().position(|event| {
+                event.kind == "activity.channel"
+                    && event.data["channel"] == "stdout"
+                    && event.data["state"] == state
+            })
+        };
+        let opened = stdout_state("opened").expect("resumed stdout open");
+        let closed = stdout_state("closed").expect("resumed stdout close");
+        assert!(opened < closed && closed < events.len() - 1);
         let coverage = events.last().unwrap();
         assert_eq!(coverage.kind, "activity.coverage");
         assert_eq!(coverage.coverage, "partial");
@@ -318,7 +339,7 @@ async fn a_reopened_claude_spool_keeps_coverage_partial_after_a_clean_live_drain
         Redactor::new(Vec::new()),
         replay.clone(),
         ActivityLimits::default(),
-        false,
+        true,
     )?
     .finish(true)
     .await?;

@@ -261,11 +261,6 @@ impl LiveSession {
                 // on recovery. Leave its verified prefix open until terminal.
                 return Ok(());
             }
-            if self.reopened_spool {
-                // Producer counters cover only this run. The retained prefix
-                // needs its original summary or an explicit coverage gap.
-                return self.collector.ensure_replay_coverage();
-            }
             if unattached {
                 let _ = self.collector.channel_state(
                     ActivityChannel::Hook,
@@ -280,6 +275,11 @@ impl LiveSession {
                 let _ = self
                     .collector
                     .channel_state(ActivityChannel::Stdout, "closed", None);
+            }
+            if self.reopened_spool {
+                // The channel facts describe this run. Coverage of the retained
+                // prefix needs its original summary or an explicit gap.
+                return self.collector.ensure_replay_coverage();
             }
             self.collector.finish()?;
             Ok(())
