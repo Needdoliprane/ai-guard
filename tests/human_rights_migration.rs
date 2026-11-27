@@ -46,7 +46,7 @@ fn legacy_capacity_files(directory: &Path) -> (PathBuf, PathBuf) {
     (increased_cap, write("capacity-exhausted.json", &exhausted))
 }
 
-fn assert_capacity_refusal(output: Output, reason: &str) {
+fn assert_cli_refusal(output: Output, reason: &str) {
     assert!(!output.status.success());
     assert!(output.stdout.is_empty());
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -303,7 +303,7 @@ fn legacy_session_prepare_capability_is_explicit_and_survives_reopen() {
         .unwrap();
     drop(store);
 
-    assert_capacity_refusal(
+    assert_cli_refusal(
         enable(&backup)
             .arg("--audit-capacity-file")
             .arg(&capacity)
@@ -315,7 +315,7 @@ fn legacy_session_prepare_capability_is_explicit_and_survives_reopen() {
     assert_eq!(open(&path).integrity().unwrap().head_hash, before.head_hash);
 
     let exhausted_backup = files.path().join("before-exhausted-prepare.sqlite");
-    assert_capacity_refusal(
+    assert_cli_refusal(
         enable(&exhausted_backup)
             .arg("--audit-max-bytes")
             .arg(LEGACY_AUDIT_MAX_BYTES.to_string())
@@ -401,7 +401,7 @@ async fn legacy_local_confirmation_survives_reopen_without_admission() {
         },
         model::DecisionRequest,
         policy::{self, Policy},
-        workload::{WorkloadBindingIssueV1, WorkloadSubjectV1},
+        workload::{WorkloadBindingIssueV1, WorkloadBindingRevocationV1, WorkloadSubjectV1},
     };
     use axum::{
         Router,
@@ -435,34 +435,62 @@ async fn legacy_local_confirmation_survives_reopen_without_admission() {
     let credential_id = Uuid::new_v4();
     let authority_id = Uuid::new_v4();
     let expires_at = "2100-01-01T00:00:00.000Z";
+    let binding = WorkloadBindingIssueV1 {
+        version: 1,
+        operation_id: Uuid::new_v4().to_string(),
+        credential_id: credential_id.to_string(),
+        expected_revision: 0,
+        subject: WorkloadSubjectV1::Broker {
+            broker_id: broker_id.to_string(),
+            incarnation_id: incarnation_id.to_string(),
+        },
+        sha256_digest: hex::encode(Sha256::digest(b"synthetic legacy prepare broker")),
+        expires_at: expires_at.into(),
+    };
+    store.issue_workload_binding(&binding).unwrap();
+    let grant = BrokerGrantMutationV1 {
+        version: 1,
+        operation_id: Uuid::new_v4().to_string(),
+        broker_id: broker_id.to_string(),
+        expected_revision: None,
+        credential_id: credential_id.to_string(),
+        incarnation_id: incarnation_id.to_string(),
+        authorities: vec![BrokerAuthorityV1 {
+            authority_id: authority_id.to_string(),
+            runtime_kind: BrokerRuntimeKindV1::Docker,
+        }],
+        lease_seconds: 120,
+        not_after: expires_at.into(),
+    };
+    store.mutate_broker_grant(&grant).unwrap();
+
+    let other_broker_id = Uuid::new_v4();
+    let other_incarnation_id = Uuid::new_v4();
+    let other_authority_id = Uuid::new_v4();
+    let other_credential_id = Uuid::new_v4();
     store
         .issue_workload_binding(&WorkloadBindingIssueV1 {
-            version: 1,
             operation_id: Uuid::new_v4().to_string(),
-            credential_id: credential_id.to_string(),
-            expected_revision: 0,
+            credential_id: other_credential_id.to_string(),
             subject: WorkloadSubjectV1::Broker {
-                broker_id: broker_id.to_string(),
-                incarnation_id: incarnation_id.to_string(),
+                broker_id: other_broker_id.to_string(),
+                incarnation_id: Uuid::new_v4().to_string(),
             },
-            sha256_digest: hex::encode(Sha256::digest(b"synthetic legacy prepare broker")),
-            expires_at: expires_at.into(),
+            sha256_digest: hex::encode(Sha256::digest(b"synthetic legacy other incarnation")),
+            ..binding
         })
         .unwrap();
     store
         .mutate_broker_grant(&BrokerGrantMutationV1 {
-            version: 1,
             operation_id: Uuid::new_v4().to_string(),
-            broker_id: broker_id.to_string(),
-            expected_revision: None,
-            credential_id: credential_id.to_string(),
-            incarnation_id: incarnation_id.to_string(),
+            broker_id: other_broker_id.to_string(),
+            credential_id: other_credential_id.to_string(),
+            incarnation_id: other_incarnation_id.to_string(),
             authorities: vec![BrokerAuthorityV1 {
-                authority_id: authority_id.to_string(),
+                authority_id: other_authority_id.to_string(),
                 runtime_kind: BrokerRuntimeKindV1::Docker,
             }],
-            lease_seconds: 120,
-            not_after: expires_at.into(),
+            ..grant
         })
         .unwrap();
     let before = store.head().unwrap();
@@ -525,7 +553,7 @@ async fn legacy_local_confirmation_survives_reopen_without_admission() {
         assert_eq!(integrity.head_hash, before_hash);
         assert_eq!(store.head().unwrap(), before);
     };
-    assert_capacity_refusal(
+    assert_cli_refusal(
         provision_target(&input)
             .arg("--audit-capacity-file")
             .arg(&capacity)
@@ -534,7 +562,7 @@ async fn legacy_local_confirmation_survives_reopen_without_admission() {
         "audit capacity policy must preserve reserves",
     );
     assert_unchanged();
-    assert_capacity_refusal(
+    assert_cli_refusal(
         provision_target(&input)
             .arg("--audit-max-bytes")
             .arg(LEGACY_AUDIT_MAX_BYTES.to_string())
@@ -555,6 +583,17 @@ async fn legacy_local_confirmation_survives_reopen_without_admission() {
             .output()
             .unwrap()
     };
+    let mut mismatched_incarnation = input.clone();
+    mismatched_incarnation["target"]["broker_id"] = serde_json::json!(other_broker_id);
+    mismatched_incarnation["target"]["incarnation_id"] = serde_json::json!(other_incarnation_id);
+    mismatched_incarnation["target"]["launch"]["authority_id"] =
+        serde_json::json!(other_authority_id);
+    assert_cli_refusal(
+        apply(&mismatched_incarnation),
+        "Legacy session launch target has no usable broker workload binding",
+    );
+    assert_unchanged();
+
     let accepted = apply(&input);
     assert!(
         accepted.status.success(),
@@ -918,12 +957,55 @@ async fn legacy_local_confirmation_survives_reopen_without_admission() {
     input["expected_revision"] = 2.into();
     input["target"]["catalogue"]["revision"] = 3.into();
     input["target"]["catalogue"]["launchers"] = original_launchers;
-    assert!(apply(&input).status.success(), "restore the target ACL");
+    let restored = apply(&input);
+    assert!(restored.status.success(), "restore the target ACL");
+    let restored: serde_json::Value = serde_json::from_slice(&restored.stdout).unwrap();
+    let store = reopen();
+    store
+        .revoke_workload_binding(&WorkloadBindingRevocationV1 {
+            version: 1,
+            operation_id: Uuid::new_v4().to_string(),
+            credential_id: credential_id.to_string(),
+            expected_revision: 1,
+        })
+        .unwrap();
+    let head_hash = store.integrity().unwrap().head_hash;
+    drop(store);
+
+    let retained = apply(&input);
+    assert!(retained.status.success());
+    let retained: serde_json::Value = serde_json::from_slice(&retained.stdout).unwrap();
+    assert_eq!(retained["replayed"], true);
+    assert_eq!(retained["audit_hash"], restored["audit_hash"]);
+    let mut new_revision = input.clone();
+    new_revision["expected_revision"] = 3.into();
+    new_revision["target"]["catalogue"]["revision"] = 4.into();
+    assert_cli_refusal(
+        apply(&new_revision),
+        "Legacy session launch target has no usable broker workload binding",
+    );
     let reopened = reopen();
+    let integrity = reopened.integrity().unwrap();
+    assert!(integrity.valid);
+    assert_eq!(integrity.head_hash, head_hash);
     let router = make_router(reopened.clone());
     let who = audited_identity(&router, &reopened, &credential).await;
     let head = reopened.head().unwrap();
     let context = who["contexts"][0]["id"].as_str().unwrap();
+    let new_preparation = serde_json::json!({
+        "version": 1, "operation_id": Uuid::new_v4(), "launch_target_id": target_id,
+        "expected_target_revision": 3,
+        "expires_at": (chrono::Utc::now() + chrono::Duration::minutes(2)).to_rfc3339(),
+    });
+    let (status, body) = call(
+        &router,
+        "/api/v1/human/legacy/sessions/prepare",
+        &credential,
+        Some((context, &new_preparation)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(body["error"]["code"], "conflict");
     for (path, input, original) in [
         (
             "/api/v1/human/legacy/sessions/prepare",

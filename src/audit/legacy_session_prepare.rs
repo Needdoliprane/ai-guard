@@ -1,7 +1,7 @@
 //! Explicit persistence capability for nominative preparation on Legacy SQLite.
 use super::{control::supervision, *};
 use crate::{
-    broker_registry::BrokerRuntimeKindV1,
+    broker_registry::{BrokerRuntimeKindV1, BrokerV1},
     control::{RuntimeKindV1, session_control::ProvisionLegacySessionTargetV1},
     identity::{IdentityFailureV1, LegacyControlRoleV1, PrincipalRefV1},
 };
@@ -128,15 +128,15 @@ fn event_by_id(db: &Connection, id: &str) -> anyhow::Result<Option<StoredEvent>>
         .optional()?)
 }
 
-fn validate_target_broker(
+fn target_broker_at(
     db: &Connection,
     command: &ProvisionLegacySessionTargetV1,
     at: chrono::DateTime<chrono::Utc>,
     before_seq: i64,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Option<BrokerV1>> {
     let target = &command.target;
     if !target.catalogue.active {
-        return Ok(());
+        return Ok(None);
     }
     let broker = broker_registry::broker_at(db, &target.broker_id.to_string(), before_seq)?
         .ok_or(IdentityFailureV1::NotFound)?;
@@ -155,6 +155,21 @@ fn validate_target_broker(
             }),
         IdentityFailureV1::Conflict
     );
+    Ok(Some(broker))
+}
+
+fn validate_target_broker(
+    db: &Connection,
+    command: &ProvisionLegacySessionTargetV1,
+    at: chrono::DateTime<chrono::Utc>,
+    before_seq: i64,
+) -> anyhow::Result<()> {
+    if let Some(broker) = target_broker_at(db, command, at, before_seq)?
+        && !workload::broker_grant_binding_is_current(db, &broker, at)?
+    {
+        return Err(anyhow::Error::new(IdentityFailureV1::Conflict)
+            .context("Legacy session launch target has no usable broker workload binding"));
+    }
     Ok(())
 }
 
@@ -211,12 +226,15 @@ pub(super) fn validate_target_event(
             "invalid target revision order"
         );
     }
-    validate_target_broker(
+    // Replay checks the grant at publication. The current workload binding is
+    // a precondition of new operations and can change after publication.
+    target_broker_at(
         db,
         &record.command,
         crate::broker_registry::parse_time(&stored.event.timestamp)?,
         stored.seq,
-    )
+    )?;
+    Ok(())
 }
 
 fn target_receipt(
@@ -324,6 +342,11 @@ impl Store {
             return Ok(target_receipt(target_id, revision, stored, true));
         }
         let clock = workload::capture_control_time(&tx)?;
+        let before_seq = audit_head(&tx)?
+            .0
+            .checked_add(1)
+            .context("audit sequence exhausted")?;
+        validate_target_broker(&tx, &record.command, clock.at(), before_seq)?;
         let mut event = Event::new(TARGET_KIND);
         event.id = id;
         event.timestamp = crate::broker_registry::format_time(clock.at());

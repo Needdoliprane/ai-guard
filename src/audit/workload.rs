@@ -810,11 +810,30 @@ fn tenant_matches(db: &Connection, tenant: &str) -> anyhow::Result<()> {
     workload_authorized(actual == tenant)
 }
 fn binding_active(binding: &WorkloadBinding, at: DateTime<Utc>) -> anyhow::Result<()> {
-    workload_authorized(
-        !binding.revoked
-            && at >= parse_time(&binding.updated_at)?
-            && at < parse_time(&binding.expires_at)?,
-    )
+    workload_authorized(binding_is_active(binding, at)?)
+}
+fn binding_is_active(binding: &WorkloadBinding, at: DateTime<Utc>) -> anyhow::Result<bool> {
+    Ok(!binding.revoked
+        && at >= parse_time(&binding.updated_at)?
+        && at < parse_time(&binding.expires_at)?)
+}
+
+/// Checks the grant's workload topology for a new operation in the caller's transaction.
+pub(super) fn broker_grant_binding_is_current(
+    db: &Connection,
+    broker: &BrokerV1,
+    at: DateTime<Utc>,
+) -> anyhow::Result<bool> {
+    let Some(binding) = load_binding(db, &broker.credential_id)? else {
+        return Ok(false);
+    };
+    Ok(binding.credential_id == broker.credential_id
+        && matches!(
+            &binding.subject,
+            WorkloadSubjectV1::Broker { broker_id, incarnation_id }
+                if broker_id == &broker.broker_id && incarnation_id == &broker.incarnation_id
+        )
+        && binding_is_active(&binding, at)?)
 }
 fn load_broker(db: &Connection, id: &str) -> anyhow::Result<Option<BrokerV1>> {
     db.query_row(
