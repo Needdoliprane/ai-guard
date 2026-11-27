@@ -321,6 +321,7 @@ fn legacy_session_prepare_capability_is_explicit_and_survives_reopen() {
 async fn legacy_local_confirmation_survives_reopen_without_admission() {
     use agentsandbox::{
         api::{GatewayState, TenantGateway, gateway_router},
+        audit::EventQuery,
         broker_registry::{BrokerAuthorityV1, BrokerGrantMutationV1, BrokerRuntimeKindV1},
         control::{
             AdmissionV1, DecisionPhaseV1, DecisionReceiptV1, LaunchSpecV1, SupervisedAdmissionV1,
@@ -688,6 +689,44 @@ async fn legacy_local_confirmation_survives_reopen_without_admission() {
     assert_eq!(replay["replayed"], true);
     replay["replayed"] = false.into();
     assert_eq!(replay, receipt);
+
+    let audit_fact = |receipt: &serde_json::Value, kind: &str| {
+        let seq = receipt["audit_seq"].as_i64().unwrap();
+        let mut events = reopened
+            .events(&EventQuery {
+                kind: Some(kind.into()),
+                after: Some(seq - 1),
+                before: Some(seq + 1),
+                limit: Some(1),
+                ..Default::default()
+            })
+            .unwrap();
+        let stored = events.pop().expect("the receipt resolves after reopening");
+        assert_eq!(stored.hash, receipt["audit_hash"].as_str().unwrap());
+        assert_eq!(stored.event.source, "gateway");
+        assert_eq!(stored.event.provenance, "observed");
+        assert_eq!(stored.event.coverage, "native");
+        assert!(stored.event.session_id.is_none());
+        stored.event
+    };
+    let preparation = audit_fact(&prepare_receipt, "control.legacy_session_prepare.prepared");
+    let confirmation = audit_fact(&receipt, "control.legacy_session_prepare.confirmed");
+    assert_eq!(
+        preparation.id,
+        prepare_receipt["preparation_id"].as_str().unwrap()
+    );
+    assert_eq!(
+        preparation.data["initiator"]["principal"],
+        serde_json::to_value(&membership.principal).unwrap()
+    );
+    assert_eq!(confirmation.id, binding_ref);
+    assert_eq!(confirmation.data["session_id"], session_id.as_str());
+    assert_eq!(confirmation.data["preparation_id"], preparation.id);
+    assert_eq!(
+        confirmation.data["preparation_audit_hash"],
+        prepare_receipt["audit_hash"]
+    );
+
     assert!(reopened.workers().unwrap().is_empty());
     assert_eq!(
         reopened
@@ -700,7 +739,7 @@ async fn legacy_local_confirmation_survives_reopen_without_admission() {
         reopened
             .identity_resource_grant(&ResourceRefV1 {
                 kind: ResourceKindV1::Session,
-                resource_id: session_id
+                resource_id: session_id.clone(),
             })
             .unwrap()
             .is_none()
@@ -776,7 +815,7 @@ async fn legacy_local_confirmation_survives_reopen_without_admission() {
     reopened
         .mutate_identity(&control(IdentityChangeV1::Membership {
             expected_revision: restricted.revision - 1,
-            membership: restricted,
+            membership: restricted.clone(),
         }))
         .unwrap();
     let head = reopened.head().unwrap();
@@ -790,6 +829,50 @@ async fn legacy_local_confirmation_survives_reopen_without_admission() {
         let (status, body) = call(&router, path, &credential, Some((context, input))).await;
         assert_eq!(status, StatusCode::FORBIDDEN);
         assert_eq!(body["error"]["code"], "permission_denied");
+    }
+
+    // ReadMetadata grants the operation in principle. Confirmation creates no session grant.
+    let attribution = who["contexts"][0]["operations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["operation"] == "session_attribution_read")
+        .unwrap();
+    assert_eq!(attribution["permission"], "granted");
+    assert_eq!(attribution["scope"], "own_and_shared");
+    assert_eq!(attribution["availability"], "not_in_this_build");
+    let scope = reopened
+        .authorize_human_context(
+            &restricted.principal,
+            &restricted.membership_id,
+            restricted.revision,
+            ContextModeV1::Personal,
+        )
+        .unwrap();
+    for resource_id in [session_id, Uuid::new_v4().to_string()] {
+        let request = Request::get(format!("/api/v1/human/sessions/{resource_id}/attribution"))
+            .header("authorization", format!("Bearer {credential}"))
+            .header("x-aiguard-context", context)
+            .body(Body::empty())
+            .unwrap();
+        let resource = ResourceRefV1 {
+            kind: ResourceKindV1::Session,
+            resource_id,
+        };
+        assert!(
+            reopened
+                .authorized_resource_grant(&scope, &resource, ResourcePermissionV1::Metadata)
+                .unwrap()
+                .is_none()
+        );
+        let response = router.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert!(
+            to_bytes(response.into_body(), 65_536)
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
     assert_eq!(reopened.head().unwrap(), head);
 }
