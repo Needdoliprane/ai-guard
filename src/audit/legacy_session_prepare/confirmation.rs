@@ -152,13 +152,7 @@ fn decoded<T: serde::de::DeserializeOwned>(
     Ok(serde_json::from_value(stored.event.data.clone())?)
 }
 
-fn require_current_target(
-    db: &Connection,
-    selection: crate::control::session_control::SessionLaunchTargetSelectionV1,
-    initiator: &Initiator,
-    clock: &workload::AuthorizedControlTimeV1,
-) -> anyhow::Result<(StoredEvent, TargetRecord)> {
-    let (stored, record) = target(db, selection)?;
+fn require_target_launcher(record: &TargetRecord, initiator: &Initiator) -> anyhow::Result<()> {
     let catalogue = &record.command.target.catalogue;
     anyhow::ensure!(
         catalogue.active
@@ -166,6 +160,18 @@ fn require_current_target(
             && catalogue.launchers.contains(&initiator.principal),
         IdentityFailureV1::PermissionDenied
     );
+    Ok(())
+}
+
+fn require_current_target(
+    db: &Connection,
+    selection: crate::control::session_control::SessionLaunchTargetSelectionV1,
+    initiator: &Initiator,
+    clock: &workload::AuthorizedControlTimeV1,
+) -> anyhow::Result<(StoredEvent, TargetRecord)> {
+    let (stored, record) = target(db, selection)?;
+    require_target_launcher(&record, initiator)?;
+    let catalogue = &record.command.target.catalogue;
     anyhow::ensure!(
         event_by_id(
             db,
@@ -176,6 +182,29 @@ fn require_current_target(
     );
     validate_target_broker(db, &record.command, clock.at(), audit_head(db)?.0 + 1)?;
     Ok((stored, record))
+}
+
+fn authorize_target_replay(
+    db: &Connection,
+    preparation: &Prepared,
+    initiator: &Initiator,
+) -> anyhow::Result<()> {
+    let selection = preparation.request.selection()?;
+    let (pinned, _) = target(db, selection)?;
+    anyhow::ensure!(
+        pinned.hash == preparation.target_audit_hash,
+        IdentityFailureV1::Conflict
+    );
+    // Provisioning enforces contiguous revisions in audit order for each target.
+    let current = db.query_row(
+        "SELECT seq,received_at,prev_hash,hash,payload FROM events \
+         WHERE kind=?1 AND seq>=?2 AND json_extract(payload,'$.data.command.target.catalogue.launch_target_id')=?3 \
+         ORDER BY seq DESC LIMIT 1",
+        params![TARGET_KIND, pinned.seq, selection.launch_target_id().to_string()],
+        row_event,
+    )?;
+    let record: TargetRecord = decoded(&current, TARGET_KIND)?;
+    require_target_launcher(&record, initiator)
 }
 
 fn prepared_receipt(
@@ -445,6 +474,7 @@ impl Store {
                 IdentityFailureV1::PermissionDenied
             );
             anyhow::ensure!(record.request == request, IdentityFailureV1::Conflict);
+            authorize_target_replay(&tx, &record, &initiator)?;
             let receipt = prepared_receipt(&stored, &record, true)?;
             self.commit_checked(tx)?;
             return Ok(receipt);
@@ -502,6 +532,7 @@ impl Store {
         if let Some(confirmed) = event_by_id(&tx, &id)? {
             let record: Confirmed = decoded(&confirmed, CONFIRMED)?;
             anyhow::ensure!(record.request == request, IdentityFailureV1::Conflict);
+            authorize_target_replay(&tx, &prepared, &initiator)?;
             let receipt = confirmed_receipt(&confirmed, &record, true);
             self.commit_checked(tx)?;
             return Ok(receipt);

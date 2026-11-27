@@ -455,10 +455,16 @@ async fn legacy_local_confirmation_survives_reopen_without_admission() {
     let replay: serde_json::Value = serde_json::from_slice(&replay.stdout).unwrap();
     assert_eq!(replay["audit_hash"], receipt["audit_hash"]);
     assert_eq!(replay["replayed"], true);
-    input["target"]["broker_profile_id"] = "other-profile".into();
-    assert!(!apply(&input).status.success());
-    let reopened =
-        Store::open_existing_for_tenant(&path, "tenant-a", Redactor::new(vec![]), 1000).unwrap();
+    let mut divergent = input.clone();
+    divergent["target"]["broker_profile_id"] = "other-profile".into();
+    assert!(!apply(&divergent).status.success());
+    let reopen = || {
+        Arc::new(
+            Store::open_existing_for_tenant(&path, "tenant-a", Redactor::new(vec![]), 1000)
+                .unwrap(),
+        )
+    };
+    let reopened = reopen();
     assert!(reopened.integrity().unwrap().valid);
     assert_eq!(reopened.head().unwrap(), before + 1);
     assert!(reopened.workers().unwrap().is_empty());
@@ -511,15 +517,16 @@ async fn legacy_local_confirmation_survives_reopen_without_admission() {
     };
     let add_unrelated_account = |store: &Store| {
         let before = store.identity_authorization_revision().unwrap();
+        let principal = PrincipalRefV1::HumanLocal {
+            installation_id: Uuid::new_v4().to_string(),
+            account_id: Uuid::new_v4().to_string(),
+        };
         let receipt = store
             .mutate_identity(&control(IdentityChangeV1::Account {
                 expected_revision: 0,
                 account: HumanAccountV1 {
                     version: 1,
-                    principal: PrincipalRefV1::HumanLocal {
-                        installation_id: Uuid::new_v4().to_string(),
-                        account_id: Uuid::new_v4().to_string(),
-                    },
+                    principal: principal.clone(),
                     display_name: "Unrelated fixture account".into(),
                     revision: 1,
                     active: true,
@@ -527,8 +534,8 @@ async fn legacy_local_confirmation_survives_reopen_without_admission() {
             }))
             .unwrap();
         assert_eq!(receipt.authorization_revision, before + 1);
+        principal
     };
-    let reopened = Arc::new(reopened);
     let router = make_router(reopened.clone());
     let (status, who) = call(&router, "/api/v1/human/identity", &credential, None).await;
     assert_eq!(status, StatusCode::OK);
@@ -663,10 +670,8 @@ async fn legacy_local_confirmation_survives_reopen_without_admission() {
     }
     assert_eq!(reopened.head().unwrap(), head);
     drop((router, reopened));
-    let reopened = Arc::new(
-        Store::open_existing_for_tenant(&path, "tenant-a", Redactor::new(vec![]), 1000).unwrap(),
-    );
-    add_unrelated_account(&reopened);
+    let reopened = reopen();
+    let other_principal = add_unrelated_account(&reopened);
     let router = make_router(reopened.clone());
     let (status, who) = call(&router, "/api/v1/human/identity", &credential, None).await;
     assert_eq!(status, StatusCode::OK);
@@ -701,6 +706,68 @@ async fn legacy_local_confirmation_survives_reopen_without_admission() {
             .is_none()
     );
     assert!(reopened.integrity().unwrap().valid);
+    assert_eq!(reopened.head().unwrap(), head);
+
+    let authorization_revision = reopened.identity_authorization_revision().unwrap();
+    drop((router, reopened));
+    let original_launchers = input["target"]["catalogue"]["launchers"].clone();
+    input["expected_revision"] = 1.into();
+    input["target"]["catalogue"]["revision"] = 2.into();
+    input["target"]["catalogue"]["launchers"] = serde_json::json!([other_principal]);
+    assert!(
+        apply(&input).status.success(),
+        "replace only the target ACL"
+    );
+
+    let reopened = reopen();
+    assert_eq!(
+        reopened.identity_authorization_revision().unwrap(),
+        authorization_revision
+    );
+    let router = make_router(reopened.clone());
+    let head = reopened.integrity().unwrap().head_hash;
+    let (status, who) = call(&router, "/api/v1/human/identity", &credential, None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        who["contexts"][0]["capabilities"],
+        serde_json::json!(["launch_session"])
+    );
+    let context = who["contexts"][0]["id"].as_str().unwrap();
+    for (path, input) in [
+        ("/api/v1/human/legacy/sessions/prepare", &prepared),
+        ("/api/v1/human/legacy/sessions/confirm", &confirm),
+    ] {
+        let (status, body) = call(&router, path, &credential, Some((context, input))).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["error"]["code"], "permission_denied");
+    }
+    assert_eq!(reopened.integrity().unwrap().head_hash, head);
+
+    drop((router, reopened));
+    input["expected_revision"] = 2.into();
+    input["target"]["catalogue"]["revision"] = 3.into();
+    input["target"]["catalogue"]["launchers"] = original_launchers;
+    assert!(apply(&input).status.success(), "restore the target ACL");
+    let reopened = reopen();
+    let router = make_router(reopened.clone());
+    let head = reopened.head().unwrap();
+    let (status, who) = call(&router, "/api/v1/human/identity", &credential, None).await;
+    assert_eq!(status, StatusCode::OK);
+    let context = who["contexts"][0]["id"].as_str().unwrap();
+    for (path, input, original) in [
+        (
+            "/api/v1/human/legacy/sessions/prepare",
+            &prepared,
+            &prepare_receipt,
+        ),
+        ("/api/v1/human/legacy/sessions/confirm", &confirm, &receipt),
+    ] {
+        let (status, mut body) = call(&router, path, &credential, Some((context, input))).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["replayed"], true);
+        body["replayed"] = false.into();
+        assert_eq!(&body, original);
+    }
     assert_eq!(reopened.head().unwrap(), head);
 
     let mut restricted = membership;
