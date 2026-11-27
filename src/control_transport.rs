@@ -239,7 +239,7 @@ pub fn control_route(method: &Method, path: &str) -> Option<ControlRouteIdentity
                 "session-confirmations",
                 id,
                 "admission",
-                "reconcile" | "cancel-reserved" | "import-arm" | "import-claim",
+                "reconcile" | "cancel-reserved" | "import-arm",
             ],
         )
         | (
@@ -249,10 +249,33 @@ pub fn control_route(method: &Method, path: &str) -> Option<ControlRouteIdentity
                 "session-confirmations",
                 id,
                 "admission",
-                "import-arm" | "import-claim",
+                "import-arm",
                 "reconcile",
             ],
         ) if v1 && canonical_uuid(id) => Some(BrokerSession),
+        (
+            &Method::POST,
+            [
+                "control",
+                "session-confirmations",
+                id,
+                "admission",
+                "import-claim",
+            ],
+        )
+        | (
+            &Method::POST,
+            [
+                "control",
+                "session-confirmations",
+                id,
+                "admission",
+                "import-claim",
+                "reconcile",
+            ],
+        ) if v1 && crate::control::session_control::canonical_uuid(id).is_ok() => {
+            Some(BrokerSession)
+        }
         // Proposed owned broker-supervision targets (`OwnedBrokerOperationV2`).
         // Classified for relay forwarding and presence capacity only: the
         // gateway gate authenticates the owned proof, and a legacy gateway
@@ -305,7 +328,7 @@ mod reconciliation_tests {
                 path.replace(binding, &binding.to_uppercase()),
                 format!("{path}/extra"),
             ] {
-                assert_eq!(control_route(&Method::POST, &bad), None);
+                assert_eq!(control_route(&Method::POST, &bad), None, "accepted {bad}");
             }
         }
     }
