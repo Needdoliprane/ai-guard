@@ -33,7 +33,10 @@ pub(super) struct ReserveProbe {
 
 impl ReserveProbe {
     pub(super) fn observe_request(&self, request: &Request) {
-        if matches!(request, Request::ReserveProspective { .. }) {
+        if matches!(
+            request,
+            Request::ReserveProspective { .. } | Request::ReserveNamedProspective { .. }
+        ) {
             self.requests.fetch_add(1, Ordering::SeqCst);
         }
     }

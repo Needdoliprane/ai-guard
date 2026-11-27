@@ -16,7 +16,10 @@ mod server;
 mod auth_bootstrap_tests;
 
 use crate::{
-    control::{ArmReceiptV1, ArmV1, HostClockSampleV1, RuntimeKindV1},
+    control::{
+        ArmReceiptV1, ArmSubjectV1, ArmV1, HelperPermissionV1, HelperPurposeV1, HostClockSampleV1,
+        RuntimeKindV1,
+    },
     runtime::{ContainerObservation, OwnedContainerSnapshot, RuntimeAuthority, RuntimeKind},
 };
 use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
@@ -433,6 +436,17 @@ impl fmt::Debug for ProspectiveRegistrationV1 {
     }
 }
 impl ProspectiveRegistrationV1 {
+    fn validate_named_import(&self) -> EnforcerResult<()> {
+        match &self.arm.subject {
+            ArmSubjectV1::Helper {
+                purpose: HelperPurposeV1::Import,
+                permission,
+                ..
+            } if matches!(permission.as_ref(), HelperPermissionV1::Admission { .. }) => Ok(()),
+            _ => Err(EnforcerError::InvalidInput),
+        }
+    }
+
     pub(crate) fn new(
         control_origin_hash: String,
         tenant_id: String,
@@ -765,6 +779,16 @@ struct Challenge {
 struct Authentication {
     proof: String,
 }
+
+/// An immutable distinction at the guardian, independent of the current IPC
+/// connection. Named custody is held by the client that issued the first
+/// reservation and is never returned by a discovery or recovery request.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LegacyProspectiveRailV1 {
+    Historical,
+    Named(Uuid),
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum Request {
@@ -778,9 +802,19 @@ enum Request {
         generation: u64,
         replay_only: bool,
     },
+    ReserveNamedProspective {
+        prospective: Box<ProspectiveRegistrationV1>,
+        generation: u64,
+        custody_nonce: Uuid,
+    },
     BeginProspectiveArmExchange {
         reservation: ProspectiveReservationV1,
         generation: u64,
+    },
+    BeginNamedProspectiveArmExchange {
+        reservation: ProspectiveReservationV1,
+        generation: u64,
+        custody_nonce: Uuid,
     },
     BindProspective {
         reservation: ProspectiveReservationV1,
@@ -789,6 +823,13 @@ enum Request {
         observe_only: bool,
         #[serde(deserialize_with = "deserialize_legacy_optional_uuid")]
         original_exchange_nonce: Option<Uuid>,
+    },
+    BindNamedProspective {
+        reservation: ProspectiveReservationV1,
+        registration: Box<RegistrationV1>,
+        generation: u64,
+        original_exchange_nonce: Uuid,
+        custody_nonce: Uuid,
     },
     CancelProspective {
         reservation: ProspectiveReservationV1,

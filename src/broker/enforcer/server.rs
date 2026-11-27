@@ -435,7 +435,30 @@ async fn dispatch(
             replay_only,
         } => {
             match state
-                .reserve_prospective(*prospective, generation, replay_only)
+                .reserve_prospective(
+                    *prospective,
+                    generation,
+                    replay_only,
+                    LegacyProspectiveRailV1::Historical,
+                )
+                .await
+            {
+                Ok(reservation) => Ok(Response::ProspectiveReserved { reservation }),
+                Err(refusal) => Ok(refusal.into_response(motif_negotiated)),
+            }
+        }
+        Request::ReserveNamedProspective {
+            prospective,
+            generation,
+            custody_nonce,
+        } => {
+            match state
+                .reserve_prospective(
+                    *prospective,
+                    generation,
+                    false,
+                    LegacyProspectiveRailV1::Named(custody_nonce),
+                )
                 .await
             {
                 Ok(reservation) => Ok(Response::ProspectiveReserved { reservation }),
@@ -446,8 +469,22 @@ async fn dispatch(
             reservation,
             generation,
         } => Ok(Response::ProspectiveArmExchange {
-            original_exchange_nonce: state
-                .begin_prospective_arm_exchange(&reservation, generation)?,
+            original_exchange_nonce: state.begin_prospective_arm_exchange(
+                &reservation,
+                generation,
+                LegacyProspectiveRailV1::Historical,
+            )?,
+        }),
+        Request::BeginNamedProspectiveArmExchange {
+            reservation,
+            generation,
+            custody_nonce,
+        } => Ok(Response::ProspectiveArmExchange {
+            original_exchange_nonce: state.begin_prospective_arm_exchange(
+                &reservation,
+                generation,
+                LegacyProspectiveRailV1::Named(custody_nonce),
+            )?,
         }),
         Request::BindProspective {
             reservation,
@@ -463,6 +500,25 @@ async fn dispatch(
                     generation,
                     observe_only,
                     original_exchange_nonce,
+                    LegacyProspectiveRailV1::Historical,
+                )
+                .await
+        }
+        Request::BindNamedProspective {
+            reservation,
+            registration,
+            generation,
+            original_exchange_nonce,
+            custody_nonce,
+        } => {
+            state
+                .bind_prospective(
+                    reservation,
+                    *registration,
+                    generation,
+                    false,
+                    Some(original_exchange_nonce),
+                    LegacyProspectiveRailV1::Named(custody_nonce),
                 )
                 .await
         }
@@ -474,7 +530,7 @@ async fn dispatch(
             Ok(Response::Acknowledged {})
         }
         Request::BeginRecovery {} => Ok(Response::RecoveryBegun {
-            generation: state.begin_recovery()?,
+            generation: state.begin_recovery_for_historical(None)?,
         }),
         Request::Slots { arm_ids } => {
             if arm_ids.is_empty()
@@ -505,6 +561,7 @@ async fn dispatch(
                 .admission
                 .lock()
                 .map_err(|_| EnforcerError::Unhealthy)?;
+            state.require_historical_prospective(&arm_id)?;
             state.check_original(&admitted)?;
             if !state.admission_healthy() {
                 return Err(EnforcerError::Unhealthy);
@@ -546,6 +603,7 @@ async fn dispatch(
                 .admission
                 .lock()
                 .map_err(|_| EnforcerError::Unhealthy)?;
+            state.require_historical_prospective(&arm_id)?;
             let actor = state.actor(&arm_id, &registration_hash)?;
             let mut value = actor.state.lock().map_err(|_| EnforcerError::Unhealthy)?;
             if generation < value.generation {
@@ -615,7 +673,7 @@ async fn register(
 ) -> EnforcerResult<Response> {
     let digest = registration.digest()?;
     if observe_only {
-        state.begin_recovery()?;
+        state.begin_recovery_for_historical(Some(registration.arm_id()))?;
         let retained_prospective = state
             .prospective
             .lock()
@@ -630,6 +688,7 @@ async fn register(
             .admission
             .lock()
             .map_err(|_| EnforcerError::Unhealthy)?;
+        state.require_historical_prospective(registration.arm_id())?;
         let mut slots = state.slots.lock().map_err(|_| EnforcerError::Unhealthy)?;
         if state.closing.load(Ordering::SeqCst) {
             return Err(EnforcerError::Unavailable);
