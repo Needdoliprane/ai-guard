@@ -645,7 +645,7 @@ impl NativePeer {
                     "broker::enforcer::client::retained_cancel_tests::native_cancel_server_child",
                     "--ignored",
                 ])
-                .env("AI_GUARD_TEST_RETAINED_CANCEL_ROOT", root.path());
+                .env("AI_GUARD_TEST_RETAINED_CANCEL_PARENT", root.path());
         }
         let egress_stop = egress_stop_budget.map(|budget| {
             // SAFETY: getpgrp only reads the libtest process group inherited
