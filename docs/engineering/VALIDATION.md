@@ -1,5 +1,41 @@
 # Validation courante
 
+## 27 novembre 2026 — cible Prepare, garde stdin E3 et fenêtres OIDC
+
+Le libtest Darwin ARM64 du gel `302e0db7` (arbre `ce6381d5`) compile.
+La garde de démarrage refuse le même conteneur lorsqu’il est présenté
+avec une autre opération. Deux sélecteurs vérifient les appels de
+démarrage avec bootstrap retenu et au format historique. Le témoin
+E3 observe les deux acquittements durables, le premier octet, puis
+l’EOF seulement après fermeture explicite par l’appelant. La garde
+Prepare et la possession du stdin correspondent aux blobs intégrés
+dans `9d4c00de`, `3b325e66`, `c463a5ee` et `0014342f`. Ces tests
+utilisent des fixtures. Le témoin DockerNormalCompletion et le passage
+du canal vers une conversation fournisseur réelle restent ouverts.
+
+La fenêtre commune de démarrage, la séparation des places natives
+et la capacité réservée à un tenant passent avec une horloge de test
+par instance. Le test d’échéance confirme le refus sur la borne de
+15 secondes et la collecte ultérieure du propriétaire expiré. Ce lot
+est repris dans `1e12c32b`. Manifeste du sélecteur d’échéance
+`483830973483b208d1c9cf3202119819aab240367c4a3bc1baa2262ea29b880a`.
+
+Le test de projection refuse le format SQLite 16 dans `d3361218`.
+Le témoin de faute après COMMIT échoue à l’ouverture SQLite sans
+suivi de lien sous `/var`, puis passe sur le même libtest avec le
+répertoire temporaire canonique. Le candidat `c5237daf` canonise
+le chemin dans cette fixture. Son rejeu à partir du candidat exact
+reste à exécuter. Manifeste du rejeu
+`f32946c0502af901dc6d52bfb0d5c0894c26afff18ccf7c2e045e1488def6858`.
+
+Sur le même gel, la suite conversation passe 16 cas, dont les gardes
+du premier octet et d’EOF, et échoue sur le retour de STOP quand un
+tiers occupe l’epoch. Le canal observateur ignoré par le libtest est
+invoqué par son test parent. Un sélecteur isolé passe pour la
+conservation du canal remplacé. Le composeur reste en validation.
+Manifeste commun
+`16f52bba75988cd38d955850e1a0716a2642c686e3df038654448bb3458c5a36`.
+
 ## 27 novembre 2026 — CI e1f24fa5 et garde durable des ACK
 
 Sur `e1f24fa5`, la CI réussit le front et signale 37 échecs Rust
