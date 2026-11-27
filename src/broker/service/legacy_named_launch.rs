@@ -149,6 +149,7 @@ impl PendingLegacyNamedImportClaim {
 #[allow(dead_code, reason = "the named Import start is composed separately")]
 pub(super) struct ConfirmedLegacyNamedImportClaim {
     bound: BoundLegacyNamedImport,
+    request: LegacyNamedImportClaimRequestV1,
     receipt: MutationReceiptV1,
 }
 
@@ -994,6 +995,12 @@ impl Service {
             if acknowledged.disposition != ClaimDispositionV1::EmitOnce {
                 return Err(BrokerErrorCodeV1::NeedsReconciliation);
             }
+            require_generation(&cancel, generation)?;
+            pending
+                .bound
+                .acknowledgement
+                .require_live_custody()
+                .map_err(|_| BrokerErrorCodeV1::NeedsReconciliation)?;
             let clock = crate::broker::clock::NativeHostClock::new()
                 .and_then(|clock| clock.sample())
                 .map_err(|_| BrokerErrorCodeV1::Unavailable)?;
@@ -1011,6 +1018,7 @@ impl Service {
                     }
                     Ok(ConfirmedLegacyNamedImportClaim {
                         bound: pending.bound,
+                        request,
                         receipt: acknowledged.receipt,
                     })
                 })

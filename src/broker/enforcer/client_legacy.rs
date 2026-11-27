@@ -51,7 +51,8 @@ pub(crate) enum LegacyNamedProspectiveBind {
     Replayed,
 }
 
-/// Exact native ACK data. This never provides a LocalSlot or a claim right.
+/// Exact native Bind acknowledgement with its original prospective custody.
+/// Only the first live Bind can construct this process-local value.
 #[allow(
     dead_code,
     reason = "the named Legacy service caller is composed separately"
@@ -59,7 +60,7 @@ pub(crate) enum LegacyNamedProspectiveBind {
 pub(crate) struct LegacyNamedProspectiveBindAck {
     registration: RegistrationV1,
     status: EnforcerSlotStatusV1,
-    generation: CancelGeneration,
+    owner: LegacyNamedProspectiveReservation,
 }
 
 #[allow(
@@ -76,7 +77,39 @@ impl LegacyNamedProspectiveBindAck {
     }
 
     pub(crate) fn generation(&self) -> (&CancelGeneration, u64) {
-        (&self.generation, self.status.generation)
+        (&self.owner.retained.generation, self.owner.expected)
+    }
+
+    /// Check the original client's retained Bind before handing off a fresh
+    /// claim. The guardian still has to arbitrate its one-shot Prepare.
+    pub(crate) fn require_live_custody(&self) -> EnforcerResult<()> {
+        let (generation, expected) = self.generation();
+        if generation.current() != expected || self.status.generation != expected {
+            return Err(EnforcerError::NotReady);
+        }
+        let client = &self.owner.client;
+        client.0.check_health()?;
+        self.owner
+            .retained
+            .reservation
+            .lock()
+            .map_err(|_| EnforcerError::Unhealthy)?
+            .as_ref()
+            .ok_or(EnforcerError::NotReady)?
+            .validate_for(
+                &self.owner.retained.target,
+                client.0.endpoint.epoch(),
+                expected,
+            )?;
+        let entries = client
+            .legacy_transport()?
+            .prospective
+            .lock()
+            .map_err(|_| EnforcerError::Unhealthy)?;
+        let entry = entries
+            .get(self.registration.arm_id())
+            .ok_or(EnforcerError::NotReady)?;
+        entry.require_bound_custody(&self.owner.retained, self.owner.custody_nonce, &self.status)
     }
 }
 
@@ -96,6 +129,33 @@ impl LegacyProspectiveEntry {
         } else {
             Err(EnforcerError::Conflict)
         }
+    }
+
+    fn require_bound_custody(
+        &self,
+        retained: &Arc<LocalProspective>,
+        custody_nonce: Uuid,
+        bind: &EnforcerSlotStatusV1,
+    ) -> EnforcerResult<()> {
+        self.require_custody(Some(custody_nonce))?;
+        let saved = self
+            .named_bind_ack
+            .as_ref()
+            .ok_or(EnforcerError::NotReady)?;
+        if !Arc::ptr_eq(&self.retained, retained)
+            || saved.arm_id != bind.arm_id
+            || saved.registration_hash != bind.registration_hash
+            || saved.generation != bind.generation
+        {
+            return Err(EnforcerError::Conflict);
+        }
+        if !self.retained.bound.load(Ordering::SeqCst)
+            || saved.phase != SlotPhaseV1::Ready
+            || saved.prepared_once
+        {
+            return Err(EnforcerError::NotReady);
+        }
+        Ok(())
     }
 
     fn share(&mut self) -> Arc<LocalProspective> {
@@ -660,7 +720,6 @@ impl EnforcerClient {
 
         let owner = exchange
             .legacy_named_reservation
-            .as_ref()
             .ok_or(BeforeSend(EnforcerError::Unauthorized))?;
         let original_nonce = exchange
             .original_exchange_nonce
@@ -680,14 +739,14 @@ impl EnforcerClient {
         if self.0.failed.load(Ordering::SeqCst) {
             return Err(BeforeSend(EnforcerError::Unhealthy));
         }
-        let generation = &owner.retained.generation;
+        let generation = owner.retained.generation.clone();
         generation
             .with_current_generation(expected, || ())
             .map_err(BeforeSend)?;
         let retained = self
             .retained_prospective_with_custody(
                 &owner.retained.target,
-                generation,
+                &generation,
                 Some(owner.custody_nonce),
             )
             .map_err(BeforeSend)?;
@@ -718,7 +777,7 @@ impl EnforcerClient {
                     custody_nonce: owner.custody_nonce,
                 },
                 REGISTER_TIMEOUT,
-                Some((generation, expected)),
+                Some((&generation, expected)),
             )
             .await?;
         let (status, replayed) = match reply {
@@ -772,7 +831,7 @@ impl EnforcerClient {
                     LegacyNamedProspectiveBindAck {
                         registration,
                         status,
-                        generation: generation.clone(),
+                        owner,
                     },
                 )))
             })
@@ -876,6 +935,74 @@ impl EnforcerClient {
             reply => Err(response_error(reply)),
         }
     }
+}
+
+#[cfg(test)]
+#[test]
+fn named_import_prepare_pin_requires_the_original_bound_custody() -> anyhow::Result<()> {
+    use super::super::server::test_support::named_import_registration;
+
+    let root = tempfile::tempdir()?;
+    let (registration, _) = named_import_registration(root.path());
+    let target = registration.prospective()?;
+    let prospective_hash = target.digest()?;
+    let generation = CancelGeneration::new();
+    let make_retained = || {
+        Arc::new(LocalProspective {
+            target: target.clone(),
+            digest: prospective_hash.clone(),
+            generation: generation.clone(),
+            reservation: Mutex::new(None),
+            bound: AtomicBool::new(true),
+            original_exchange_nonce: Mutex::new(None),
+        })
+    };
+    let retained = make_retained();
+    let custody_nonce = Uuid::new_v4();
+    let bind = EnforcerSlotStatusV1 {
+        arm_id: registration.arm_id().into(),
+        registration_hash: registration.digest()?,
+        phase: SlotPhaseV1::Ready,
+        prepared_once: false,
+        generation: generation.current(),
+        clock: None,
+        observation: None,
+        stop_failures: 0,
+    };
+    let mut entry = LegacyProspectiveEntry {
+        retained: Arc::clone(&retained),
+        custody_nonce: Some(custody_nonce),
+        can_remove_before_send: false,
+        named_bind_ack: Some(bind.clone()),
+    };
+    entry.require_bound_custody(&retained, custody_nonce, &bind)?;
+    assert_eq!(
+        entry.require_bound_custody(&make_retained(), custody_nonce, &bind),
+        Err(EnforcerError::Conflict)
+    );
+    assert_eq!(
+        entry.require_bound_custody(&retained, Uuid::new_v4(), &bind),
+        Err(EnforcerError::Conflict)
+    );
+    let mut divergent = bind.clone();
+    divergent.generation += 1;
+    assert_eq!(
+        entry.require_bound_custody(&retained, custody_nonce, &divergent),
+        Err(EnforcerError::Conflict)
+    );
+    if let Some(saved) = &mut entry.named_bind_ack {
+        saved.prepared_once = true;
+    }
+    assert_eq!(
+        entry.require_bound_custody(&retained, custody_nonce, &bind),
+        Err(EnforcerError::NotReady)
+    );
+    entry.named_bind_ack = None;
+    assert_eq!(
+        entry.require_bound_custody(&retained, custody_nonce, &bind),
+        Err(EnforcerError::NotReady)
+    );
+    Ok(())
 }
 
 fn registration_for_named_bind(
@@ -1105,7 +1232,7 @@ mod tests;
 mod reservation_motif_tests;
 
 #[cfg(test)]
-async fn connect_named_legacy_fixture(
+pub(in crate::broker) async fn connect_named_legacy_fixture(
     fixture: &super::super::server::test_support::LegacyIpcFixture,
 ) -> EnforcerResult<EnforcerClient> {
     let root = fixture.root();
