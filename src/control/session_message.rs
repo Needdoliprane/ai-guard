@@ -22,6 +22,7 @@
 //! automatically resent.
 
 use super::{bounded, content_hash, invalid};
+use serde::Deserialize;
 use serde_json::Value;
 use std::{
     io::{self, Write},
@@ -32,13 +33,20 @@ use std::{
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CodexJsonRpcFrameV1 {
-    jsonrpc: String,
+    #[serde(default, deserialize_with = "deserialize_optional_jsonrpc")]
+    jsonrpc: Option<String>,
     #[serde(default)]
     id: Option<u64>,
     method: Option<String>,
     params: Option<Value>,
     result: Option<Value>,
     error: Option<Value>,
+}
+
+fn deserialize_optional_jsonrpc<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<String>, D::Error> {
+    String::deserialize(deserializer).map(Some)
 }
 
 pub mod claude;
@@ -79,7 +87,6 @@ impl TurnRequestV1 {
     pub fn frame(&self) -> anyhow::Result<String> {
         self.validate()?;
         let value = serde_json::json!({
-            "jsonrpc": "2.0",
             "id": self.rpc_id,
             "method": "turn/start",
             "params": {
@@ -125,7 +132,10 @@ pub enum OutcomeObservationV1 {
 /// Parse one observed response frame against the exact issued RPC id. Pure:
 /// the caller decides durably whether to record the acknowledgement.
 pub fn observe_response(frame: &Value, issued_rpc_id: u64) -> AckObservationV1 {
-    if frame.get("jsonrpc").and_then(Value::as_str) != Some("2.0") {
+    if frame
+        .get("jsonrpc")
+        .is_some_and(|version| version.as_str() != Some("2.0"))
+    {
         return AckObservationV1::NotAResponse;
     }
     let Some(id) = frame.get("id").and_then(Value::as_u64) else {
@@ -154,6 +164,12 @@ pub fn observe_response(frame: &Value, issued_rpc_id: u64) -> AckObservationV1 {
 
 /// Parse one observed notification against the exact acknowledged turn id.
 pub fn observe_outcome(frame: &Value, acknowledged_turn_id: &str) -> OutcomeObservationV1 {
+    if frame
+        .get("jsonrpc")
+        .is_some_and(|version| version.as_str() != Some("2.0"))
+    {
+        return OutcomeObservationV1::NotAnOutcome;
+    }
     if frame.get("method").and_then(Value::as_str) != Some("turn/completed") {
         return OutcomeObservationV1::NotAnOutcome;
     }
@@ -472,7 +488,6 @@ impl StdioConversation {
     fn start_codex_thread(&mut self) -> io::Result<CodexThreadProofV1> {
         let response_deadline = Instant::now() + CODEX_HANDSHAKE_TIMEOUT;
         let initialize = serde_json::json!({
-            "jsonrpc": "2.0",
             "id": 1,
             "method": "initialize",
             "params": {"clientInfo": {"name": "ai-guard", "version": env!("CARGO_PKG_VERSION")}},
@@ -485,10 +500,9 @@ impl StdioConversation {
                 "invalid Codex initialize response",
             ));
         }
-        self.write_frame(r#"{"jsonrpc":"2.0","method":"initialized"}"#)?;
+        self.write_frame(r#"{"method":"initialized"}"#)?;
 
         let start = serde_json::json!({
-            "jsonrpc": "2.0",
             "id": 2,
             "method": "thread/start",
             "params": {},
@@ -520,22 +534,31 @@ impl StdioConversation {
                 ));
             }
             let line = self.read_line(remaining)?;
-            // The re-executed libtest fixture can emit bounded harness text on
-            // stdout before its first frame. Such text is never accepted as
-            // identity evidence; only a correlated JSON-RPC response is.
-            // Ignore only non-JSON harness chatter. Once a line is JSON,
-            // enforce the closed top-level envelope (including duplicate
-            // known fields) instead of treating schema errors as noise.
+            // Only unit-test re-execs may emit harness text on stdout. It is
+            // never accepted as identity evidence; production rejects it.
             if serde_json::from_str::<Value>(&line).is_err() {
+                #[cfg(test)]
                 continue;
+                #[cfg(not(test))]
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "non-JSON Codex stdout frame",
+                ));
             }
+            // Once a line is JSON, enforce the closed envelope (including
+            // duplicate known fields). `result` remains open for Codex's
+            // useful response fields.
             let frame = serde_json::from_str::<CodexJsonRpcFrameV1>(&line).map_err(|_| {
                 io::Error::new(
                     io::ErrorKind::InvalidData,
                     "invalid Codex JSON-RPC envelope",
                 )
             })?;
-            if frame.jsonrpc != "2.0" {
+            if frame
+                .jsonrpc
+                .as_deref()
+                .is_some_and(|version| version != "2.0")
+            {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
                     "invalid Codex JSON-RPC version",

@@ -6,10 +6,10 @@ use super::*;
 use serde_json::json;
 
 fn response(rpc_id: u64, turn_id: &str) -> Value {
-    json!({"jsonrpc":"2.0","id":rpc_id,"result":{"turn":{"id":turn_id}}})
+    json!({"id":rpc_id,"result":{"turn":{"id":turn_id}}})
 }
 fn completed(turn_id: &str) -> Value {
-    json!({"jsonrpc":"2.0","method":"turn/completed","params":{"turn":{"id":turn_id,"status":"completed"}}})
+    json!({"method":"turn/completed","params":{"turn":{"id":turn_id,"status":"completed"}}})
 }
 
 #[test]
@@ -37,6 +37,26 @@ fn valid_receipt_acknowledges_only_the_exact_issued_rpc() {
     let outcome = adapter.reconcile_outcome(&completed("turn-a")).unwrap();
     assert!(matches!(outcome, OutcomeObservationV1::Completed { .. }));
     assert!(adapter.pending().unwrap().completed);
+}
+
+#[test]
+fn response_accepts_absent_or_exact_optional_jsonrpc_version() {
+    let absent = response(7, "turn-7");
+    assert!(matches!(
+        observe_response(&absent, 7),
+        AckObservationV1::Acknowledged { .. }
+    ));
+    let mut compatible = absent.clone();
+    compatible["jsonrpc"] = json!("2.0");
+    assert!(matches!(
+        observe_response(&compatible, 7),
+        AckObservationV1::Acknowledged { .. }
+    ));
+    compatible["jsonrpc"] = json!("1.0");
+    assert_eq!(
+        observe_response(&compatible, 7),
+        AckObservationV1::NotAResponse
+    );
 }
 
 #[test]
@@ -111,12 +131,12 @@ fn rejected_and_malformed_responses_do_not_acknowledge() {
     let request = adapter
         .issue_turn(uuid::Uuid::new_v4(), "thread-1", "instruction")
         .unwrap();
-    let error = json!({"jsonrpc":"2.0","id":request.rpc_id,"error":{"code":-1,"message":"no"}});
+    let error = json!({"id":request.rpc_id,"error":{"code":-1,"message":"no"}});
     assert_eq!(
         adapter.reconcile_response(&error).unwrap(),
         AckObservationV1::Rejected
     );
-    let malformed = json!({"jsonrpc":"2.0","id":request.rpc_id,"result":{"turn":{}}});
+    let malformed = json!({"id":request.rpc_id,"result":{"turn":{}}});
     assert_eq!(
         adapter.reconcile_response(&malformed).unwrap(),
         AckObservationV1::Malformed
@@ -134,6 +154,7 @@ fn frame_is_bounded_and_carries_the_exact_text() {
     let frame = request.frame().unwrap();
     let value: Value = serde_json::from_str(&frame).unwrap();
     assert_eq!(value["method"], "turn/start");
+    assert!(value.get("jsonrpc").is_none());
     assert_eq!(value["id"], 7);
     assert_eq!(value["params"]["threadId"], "thread-1");
     assert_eq!(value["params"]["input"][0]["text"], "synthetic instruction");
@@ -157,31 +178,45 @@ fn conversation_fixture_child() {
     use std::io::BufRead;
     let mode = std::env::var("AI_GUARD_CONV_FIXTURE_MODE").unwrap_or_else(|_| "normal".into());
     let native_thread_id = format!("fixture-thread-{}", std::process::id());
+    let mut saw_jsonrpc_header = false;
     let stdin = std::io::stdin();
     for line in stdin.lock().lines() {
         let Ok(line) = line else { break };
         let Ok(value) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
+        saw_jsonrpc_header |= value.get("jsonrpc").is_some();
         match value.get("method").and_then(Value::as_str) {
             Some("initialized") => continue,
             Some("initialize") => {
                 if let Some(rpc_id) = value.get("id").and_then(Value::as_u64) {
-                    println!("{}", json!({"jsonrpc":"2.0","id":rpc_id,"result":{}}));
+                    if saw_jsonrpc_header {
+                        println!(
+                            "{}",
+                            json!({"id":rpc_id,"error":{"code":-32600,"message":"unexpected jsonrpc field"}})
+                        );
+                    } else {
+                        println!("{}", json!({"id":rpc_id,"result":{}}));
+                    }
                 }
                 continue;
             }
             Some("thread/start") => {
                 if let Some(rpc_id) = value.get("id").and_then(Value::as_u64) {
-                    if mode.starts_with("expect-thread-id=") {
+                    if saw_jsonrpc_header {
                         println!(
                             "{}",
-                            json!({"jsonrpc":"2.0","id":rpc_id,"error":{"code":-32602,"message":"thread evidence unavailable"}})
+                            json!({"id":rpc_id,"error":{"code":-32600,"message":"unexpected jsonrpc field"}})
+                        );
+                    } else if mode.starts_with("expect-thread-id=") {
+                        println!(
+                            "{}",
+                            json!({"id":rpc_id,"error":{"code":-32602,"message":"thread evidence unavailable"}})
                         );
                     } else {
                         println!(
                             "{}",
-                            json!({"jsonrpc":"2.0","id":rpc_id,"result":{"thread":{"id":native_thread_id}}})
+                            json!({"id":rpc_id,"result":{"thread":{"id":native_thread_id}}})
                         );
                     }
                 }
@@ -193,13 +228,20 @@ fn conversation_fixture_child() {
         let Some(rpc_id) = value.get("id").and_then(Value::as_u64) else {
             continue;
         };
+        if saw_jsonrpc_header {
+            println!(
+                "{}",
+                json!({"id":rpc_id,"error":{"code":-32600,"message":"unexpected jsonrpc field"}})
+            );
+            continue;
+        }
         if mode == "native-thread"
             && value.pointer("/params/threadId").and_then(Value::as_str)
                 != Some(native_thread_id.as_str())
         {
             println!(
                 "{}",
-                json!({"jsonrpc":"2.0","id":rpc_id,"error":{"code":-32602,"message":"native thread not used"}})
+                json!({"id":rpc_id,"error":{"code":-32602,"message":"native thread not used"}})
             );
             continue;
         }
@@ -209,7 +251,6 @@ fn conversation_fixture_child() {
             println!(
                 "{}",
                 json!({
-                    "jsonrpc": "2.0",
                     "id": rpc_id,
                     "error": {"code": -32602, "message": "unexpected fixture thread"}
                 })
