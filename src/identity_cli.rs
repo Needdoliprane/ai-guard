@@ -149,6 +149,9 @@ pub struct LegacySessionTargetArgs {
     /// Private JSON containing the exact target and its expected previous revision.
     #[arg(long)]
     pub target_file: PathBuf,
+    /// Private broker registry V2 for deriving or verifying the exact target's source identity.
+    #[arg(long)]
+    pub broker_registry: Option<PathBuf>,
 }
 
 #[derive(Args)]

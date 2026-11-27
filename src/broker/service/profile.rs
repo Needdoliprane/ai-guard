@@ -9,7 +9,8 @@ use crate::{
     control::{
         EgressLaunchV1, content_hash,
         session_control::{
-            LegacyConfirmedLaunchSpecV1, SessionLaunchTargetSelectionV1, canonical_uuid,
+            LegacyConfirmedLaunchSpecV1, ProvisionLegacySessionTargetV1,
+            SessionLaunchTargetSelectionV1, canonical_uuid,
         },
     },
     control_fs::{Directory, PrivateFile, absolute_path},
@@ -287,6 +288,61 @@ impl fmt::Debug for Registry {
         f.write_str("BrokerRegistry(<private>)")
     }
 }
+
+/// Bind an offline target to the exact configured source while retaining the
+/// registry directory, file and source descriptors through publication.
+pub(crate) fn with_legacy_target_source<T>(
+    registry_path: &Path,
+    tenant_id: &str,
+    namespace: Uuid,
+    mut input: ProvisionLegacySessionTargetV1,
+    publish: impl FnOnce(ProvisionLegacySessionTargetV1) -> Result<T>,
+) -> Result<T> {
+    input.validate()?;
+    let target = &mut input.target;
+    ensure!(
+        target.catalogue.tenant_id == tenant_id,
+        "named target tenant does not match the offline database"
+    );
+    let registry = absolute_path(registry_path)
+        .and_then(|path| Registry::load(&path))
+        .map_err(|_| anyhow!("private broker registry is unavailable or invalid"))?;
+    ensure!(
+        registry.data.version == 2,
+        "named source attestation requires broker registry version 2"
+    );
+    let profile = registry
+        .profile(&target.broker_profile_id)
+        .map_err(|_| anyhow!("named target broker profile is not configured"))?;
+    ensure!(
+        profile.tenant_id == tenant_id && profile.control_namespace_uuid == namespace,
+        "named broker profile tenant or control namespace does not match the offline database"
+    );
+    let selection = SessionLaunchTargetSelectionV1::new(
+        target.catalogue.launch_target_id,
+        target.catalogue.revision,
+    )?;
+    let source = registry.open_legacy_named_source_for_profile(profile, selection)?;
+    let observed = source
+        .identity_hash()
+        .map_err(|_| anyhow!("named broker source identity is unavailable"))?;
+    if let Some(expected) = &target.source_identity_hash {
+        ensure!(
+            expected == &observed,
+            "named broker source identity conflicts with the target"
+        );
+    } else {
+        target.version = 2;
+        target.source_identity_hash = Some(observed);
+    }
+    registry
+        .source
+        .revalidate()
+        .and_then(|()| registry.source_directory.revalidate())
+        .map_err(|_| anyhow!("private broker registry changed before target publication"))?;
+    publish(input)
+}
+
 impl Registry {
     pub(super) fn load(path: &Path) -> Result<Self> {
         let source = PrivateFile::open(path, MAX_CONFIG_BYTES)
@@ -499,6 +555,14 @@ impl Registry {
                 && scope.control_namespace_uuid() == profile.control_namespace_uuid,
             "named broker source scope does not match the operator profile"
         );
+        self.open_legacy_named_source_for_profile(profile, target)
+    }
+
+    fn open_legacy_named_source_for_profile(
+        &self,
+        profile: &ControlProfileV1,
+        target: SessionLaunchTargetSelectionV1,
+    ) -> Result<AuthorizedSource> {
         let key = (target.launch_target_id(), target.expected_target_revision());
         let path = self
             .legacy_named_sources

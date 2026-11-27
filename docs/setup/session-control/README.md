@@ -44,6 +44,12 @@ The Legacy CLI uses a local named account and a personal context with `launch_se
      --target-file "$target_file" --confirm-control-stopped
    ```
 
+   To bind a target revision to the broker's local project, add `--broker-registry "$broker_registry"`. Use the broker host and the mount it will use for that project. Keep the Registry2 JSON in a private directory with file mode `0600`. In the profile named by the target's `broker_profile_id`, add a `legacy_named_sources` entry with the exact `launch_target_id`, the new catalogue revision as `target_revision`, and the absolute `source` under one of the profile's `source_roots`. The profile must match the database tenant and control namespace.
+
+   The option derives the source identity and publishes a V2 target from a V1 input. For a V2 input it checks the supplied `source_identity_hash` against the same local mapping. Use the same file and option for a retry. Without the option, a historical V1 file remains V1 and an authorized operator can provision or replay an existing V2 file with its retained hash. Publish a new revision to change the source or add source identity to an existing V1 target. A filesystem that cannot report the source directory's creation time causes refusal before publication. Keep `workspace_manifest_digest` in the launch specification. It still identifies the filtered contents.
+
+   Upgrade readers before the first V2 target is published. Readers that predate the new target record refuse that history even when the SQLite schema version matches. Authorized tenant audit readers can see the opaque source hash. Keep host paths in the private broker registry.
+
    The JSON receipt returns `target_id`, `target_revision`, `audit_seq` and `audit_hash`. Reusing the same target file and revision returns the same audit receipt with `replayed: true`. Give the named user the target ID and revision. Resume the Legacy gateway for the human requests below.
 
    Publishing an active target, preparing a launch and confirming it for the first time require a valid workload credential for the broker and incarnation named by the grant. After a revocation, restore a valid broker binding. Publish a new target revision when the grant revision changes.
