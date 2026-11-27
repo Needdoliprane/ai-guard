@@ -1399,17 +1399,6 @@ mod tests {
             Err(JournalError::Conflict)
         ));
         assert_eq!(writer.load(operation).await?.unwrap().head(), creation_head);
-        let stop = writer
-            .stops()
-            .append_cancel(CancelInputV1::new(operation, Uuid::new_v4())?)
-            .await
-            .map_err(|failure| failure.error())?;
-        assert!(stop.incomplete());
-        assert!(stop.named_reservation().is_none());
-        let snapshot = writer.stops().recovery_status(operation).await?.unwrap();
-        assert!(snapshot.incomplete());
-        assert_eq!(snapshot.pending_arms(), 0);
-        let stopped_job = writer.load(operation).await?.unwrap();
         let mut invocation_changed = serde_json::to_value(&authority)?;
         invocation_changed["invocation"]["cwd"] = json!(root.join("different-cwd"));
         let invocation_changed: RuntimeAuthority = serde_json::from_value(invocation_changed)?;
@@ -1433,18 +1422,52 @@ mod tests {
                 .await,
             Err(JournalError::Conflict)
         ));
-        assert_eq!(
-            writer.load(operation).await?.unwrap().head(),
-            stopped_job.head()
+        assert_eq!(writer.load(operation).await?.unwrap().head(), creation_head);
+        let mut different = serde_json::to_value(&owned)?;
+        different["handle"]["id"] = json!("a".repeat(64));
+        different["observation"]["id"] = json!("a".repeat(64));
+        let different: OwnedContainerSnapshot = serde_json::from_value(different)?;
+
+        // Queue both observation loads before STOP, then let STOP commit
+        // before polling either acknowledgement again.
+        let pause = writer.pause_for_test().await?;
+        let acknowledgement = writer.acknowledge_legacy_named_import_creation(
+            &plan,
+            &digest,
+            &authority,
+            owned.clone(),
         );
-        writer
-            .acknowledge_legacy_named_import_creation(&plan, &digest, &authority, owned.clone())
-            .await?;
+        tokio::pin!(acknowledgement);
+        assert!(futures_util::poll!(&mut acknowledgement).is_pending());
+        let conflicting =
+            writer.acknowledge_legacy_named_import_creation(&plan, &digest, &authority, different);
+        tokio::pin!(conflicting);
+        assert!(futures_util::poll!(&mut conflicting).is_pending());
+        let stops = writer.stops();
+        let cancellation = stops.append_cancel(CancelInputV1::new(operation, Uuid::new_v4())?);
+        tokio::pin!(cancellation);
+        assert!(futures_util::poll!(&mut cancellation).is_pending());
+        assert!(pause.is_paused());
+        drop(pause);
+        let stop = cancellation.await.map_err(|failure| failure.error())?;
+        assert!(stop.incomplete());
+        assert!(stop.named_reservation().is_none());
+        let snapshot = stops.recovery_status(operation).await?.unwrap();
+        assert!(snapshot.incomplete());
+        assert_eq!(snapshot.pending_arms(), 0);
+        let stopped_job = writer.load(operation).await?.unwrap();
+        assert_eq!(stopped_job.head().revision(), creation_head.revision() + 1);
+        acknowledgement.await?;
+        assert!(matches!(conflicting.await, Err(JournalError::Conflict)));
         let owned_job = writer.load(operation).await?.unwrap();
         assert_eq!(
             owned_job.head().revision(),
             stopped_job.head().revision() + 1
         );
+        assert!(equal(
+            &owned_job.broker_checkpoint_v3().unwrap().commands(),
+            &stopped_job.broker_checkpoint_v3().unwrap().commands(),
+        )?);
         let retained = writer.load_legacy_named_admission(operation).await?;
         assert!(equal(
             retained.import_creation().unwrap().owned().unwrap(),
@@ -1454,20 +1477,6 @@ mod tests {
         writer
             .acknowledge_legacy_named_import_creation(&plan, &digest, &authority, owned.clone())
             .await?;
-        let mut different = serde_json::to_value(&owned)?;
-        different["handle"]["id"] = json!("a".repeat(64));
-        different["observation"]["id"] = json!("a".repeat(64));
-        assert!(matches!(
-            writer
-                .acknowledge_legacy_named_import_creation(
-                    &plan,
-                    &digest,
-                    &authority,
-                    serde_json::from_value(different)?,
-                )
-                .await,
-            Err(JournalError::Conflict)
-        ));
         assert_eq!(
             writer.load(operation).await?.unwrap().head(),
             owned_job.head()

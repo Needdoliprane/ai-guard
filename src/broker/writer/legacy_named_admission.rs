@@ -1,7 +1,10 @@
 //! The first confirmed pending write is the only authority to issue a new
 //! named admission. A loaded pending request authorizes reconciliation only.
 
-use super::{BrokerCheckpointV2, BrokerCheckpointV3, JournalError, JournalResult, WriterClient};
+use super::{
+    BrokerCheckpointV2, BrokerCheckpointV3, JournalError, JournalResult, WriterCallFailure,
+    WriterClient,
+};
 use crate::{
     broker::{
         checkpoint::{
@@ -244,20 +247,31 @@ impl WriterClient {
         binding: &RuntimeAuthority,
         owned: OwnedContainerSnapshot,
     ) -> JournalResult<()> {
-        let job = self.load_named_job(plan).await?;
-        let retained = retained_admission(&job)?;
-        if retained.archive_digest() != Some(archive_digest) {
-            return Err(JournalError::Conflict);
-        }
-        let preparation = retained.import_creation().ok_or(JournalError::Conflict)?;
-        let acknowledged = retained.clone().with_import_owned(binding, owned)?;
-        if preparation.owned().is_none() {
+        for _ in 0..16 {
+            let job = self.load_named_job(plan).await?;
+            let retained = retained_admission(&job)?;
+            if retained.archive_digest() != Some(archive_digest) {
+                return Err(JournalError::Conflict);
+            }
+            let preparation = retained.import_creation().ok_or(JournalError::Conflict)?;
+            let acknowledged = retained.clone().with_import_owned(binding, owned.clone())?;
+            if preparation.owned().is_some() {
+                return Ok(());
+            }
             let current = super::lifecycle(&job)?;
             let next = with_admission(&current, acknowledged)?;
-            self.advance_lifecycle(job.operation_id(), job.head().clone(), next)
-                .await?;
+            // STOP can advance the head between this read and the CAS. Rebuild
+            // from the latest prefix with the same inspected snapshot.
+            match self
+                .advance_lifecycle_diagnosed(job.operation_id(), job.head().clone(), next)
+                .await
+            {
+                Ok(_) => return Ok(()),
+                Err(WriterCallFailure::Actor(JournalError::Conflict)) => continue,
+                Err(failure) => return Err(failure.journal_error()),
+            }
         }
-        Ok(())
+        Err(JournalError::Conflict)
     }
 
     pub(in crate::broker) async fn record_legacy_named_import_arm(
