@@ -2068,11 +2068,7 @@ pub(crate) fn reopen_legacy_named_archive(
 
 /// Persist the supplied collection once; any interrupted publication requires
 /// reconciliation of the existing archive and its checkpoint.
-#[allow(
-    dead_code,
-    reason = "the named broker preparation caller is a separate G04 integration"
-)]
-pub(super) fn retain_legacy_named_archive(
+pub(crate) fn retain_legacy_named_archive(
     config: &crate::control_fs::Directory,
     operation: Uuid,
     material: &LegacyConfirmedLaunchSpecV1,

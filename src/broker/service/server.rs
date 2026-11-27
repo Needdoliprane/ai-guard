@@ -72,6 +72,9 @@ mod retained_audit;
 #[path = "checkpoint_source.rs"]
 mod checkpoint_source;
 
+#[path = "legacy_named_launch.rs"]
+mod legacy_named_launch;
+
 /// Proposed owned broker-supervision publisher, selected only by a presence
 /// file naming its exact profile. It shares the publication owner above.
 #[path = "owned_presence.rs"]

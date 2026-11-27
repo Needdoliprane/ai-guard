@@ -88,10 +88,11 @@ pub(super) struct Registry {
         std::sync::OnceLock<std::sync::Arc<crate::broker::relay_owner::RelayRegistry>>,
 }
 
-/// A source obtained through the exact profile that produced the initial
-/// intention. The caller can record Initial before collecting project data.
+/// The configured source of one initial intention. Initial can be recorded
+/// before opening the source directory or collecting project data.
 pub(super) struct LegacyNamedSource {
-    source: AuthorizedSource,
+    source_path: PathBuf,
+    source_roots: Vec<PathBuf>,
     identity_hash: String,
     manifest_hash: String,
     registry_file: PrivateFile,
@@ -101,12 +102,8 @@ pub(super) struct LegacyNamedSource {
 }
 
 impl LegacyNamedSource {
-    /// Collect through the pinned source with the retained credential and
-    /// presence parents supplied by the broker.
-    #[allow(
-        dead_code,
-        reason = "the private named admission caller will collect after Initial"
-    )]
+    /// Open the exact source, verify its physical identity, and collect
+    /// through that descriptor with the broker's retained control exclusions.
     pub(super) fn collect(
         self,
         control_parents: &[Directory],
@@ -119,8 +116,9 @@ impl LegacyNamedSource {
             .collect::<Result<Vec<_>>>()
             .map_err(|_| BrokerErrorCodeV1::Conflict)?;
         let exclusions = retained.iter().collect::<Vec<_>>();
-        let workspace = self
-            .source
+        let source = AuthorizedSource::open(&self.source_path, &self.source_roots)
+            .map_err(|_| BrokerErrorCodeV1::Unavailable)?;
+        let workspace = source
             .prepare_named(&self.identity_hash, Limits::default(), &exclusions)
             .map_err(|_| BrokerErrorCodeV1::Unavailable)?
             .ok_or(BrokerErrorCodeV1::Conflict)?;
@@ -130,6 +128,11 @@ impl LegacyNamedSource {
             return Err(BrokerErrorCodeV1::Conflict);
         }
         self.revalidate()?;
+        for parent in control_parents {
+            parent
+                .revalidate()
+                .map_err(|_| BrokerErrorCodeV1::Conflict)?;
+        }
         Ok(workspace)
     }
 
@@ -623,12 +626,7 @@ impl Registry {
         profile: &ControlProfileV1,
         target: SessionLaunchTargetSelectionV1,
     ) -> Result<AuthorizedSource> {
-        let key = (target.launch_target_id(), target.expected_target_revision());
-        let path = self
-            .legacy_named_sources
-            .get(&profile.id)
-            .and_then(|sources| sources.get(&key))
-            .ok_or_else(|| anyhow!("named broker source has no matching target revision"))?;
+        let path = self.legacy_named_source_path(profile, target)?;
         self.source.revalidate()?;
         self.source_directory.revalidate()?;
         let source = AuthorizedSource::open(path, &profile.source_roots)
@@ -638,13 +636,21 @@ impl Registry {
         Ok(source)
     }
 
-    /// Derive the initial intention and pin its authorized source before any
-    /// workspace collection. The caller supplies the authenticated scope and
-    /// the broker's retained control root.
-    #[allow(
-        dead_code,
-        reason = "the named broker preparation caller is a separate G04 integration"
-    )]
+    fn legacy_named_source_path(
+        &self,
+        profile: &ControlProfileV1,
+        target: SessionLaunchTargetSelectionV1,
+    ) -> Result<&Path> {
+        let key = (target.launch_target_id(), target.expected_target_revision());
+        self.legacy_named_sources
+            .get(&profile.id)
+            .and_then(|sources| sources.get(&key))
+            .map(PathBuf::as_path)
+            .ok_or_else(|| anyhow!("named broker source has no matching target revision"))
+    }
+
+    /// Derive the initial intention and retain the configured source selection
+    /// for the authenticated scope and the broker's retained control root.
     pub(super) fn prepare_legacy_named_submission(
         &self,
         scope: &JournalScopeV1,
@@ -696,26 +702,21 @@ impl Registry {
         let target =
             SessionLaunchTargetSelectionV1::new(plan.launch_target_id, plan.target_revision)
                 .map_err(|_| BrokerErrorCodeV1::InvalidInput)?;
-        let source = self
-            .open_legacy_named_source_for_profile(profile, target)
+        let source_path = self
+            .legacy_named_source_path(profile, target)
             .map_err(|_| BrokerErrorCodeV1::Unavailable)?;
-        let identity_hash = source
-            .identity_hash()
-            .map_err(|_| BrokerErrorCodeV1::Unavailable)?;
-        if identity_hash != expected_identity {
-            return Err(BrokerErrorCodeV1::Conflict);
-        }
         let config = Directory::open_existing(&profile.config_dir)
             .map_err(|_| BrokerErrorCodeV1::Unavailable)?;
         let mut options =
-            profile.source_options(&source, launch.timeout_seconds, launch.capture_output);
+            profile.source_options(source_path, launch.timeout_seconds, launch.capture_output);
         options.argv = launch.command.argv.clone();
         let submission =
             PreparedSubmission::from_legacy_named_launch(options, config.clone(), material)
                 .map_err(|_| BrokerErrorCodeV1::InvalidInput)?;
         let source = LegacyNamedSource {
-            source,
-            identity_hash,
+            source_path: source_path.to_owned(),
+            source_roots: profile.source_roots.clone(),
+            identity_hash: expected_identity.to_owned(),
             manifest_hash: launch.workspace_manifest_digest.clone(),
             registry_file: self.source.clone(),
             registry_directory: self.source_directory.clone(),
@@ -789,14 +790,9 @@ impl fmt::Debug for ControlProfileV1 {
     }
 }
 impl ControlProfileV1 {
-    fn source_options(
-        &self,
-        source: &AuthorizedSource,
-        timeout: u32,
-        capture_output: bool,
-    ) -> RunOptions {
+    fn source_options(&self, source: &Path, timeout: u32, capture_output: bool) -> RunOptions {
         RunOptions {
-            project: source.path().to_owned(),
+            project: source.to_owned(),
             config_dir: self.config_dir.clone(),
             gateway: self.gateway.clone(),
             runtime: self.runtime,
@@ -988,7 +984,7 @@ impl SubmitV1 {
             !self.capture_output || profile.allow_capture_output,
             "capture is not enabled in broker profile"
         );
-        let mut options = profile.source_options(source, timeout, self.capture_output);
+        let mut options = profile.source_options(source.path(), timeout, self.capture_output);
         options.secret_env_file = profile.manual_credential_file.clone();
         match &self.execution {
             RequestedExecutionV1::Command { argv } => {
@@ -1078,13 +1074,20 @@ mod tests {
         })
     }
 
-    fn check_named_workspace(
+    async fn check_named_workspace(
         registry: &Registry,
         scope: &JournalScopeV1,
         target_id: Uuid,
         source: &Path,
     ) -> Result<()> {
         use crate::{
+            broker::{
+                journal::{
+                    ControlSecrets, FsExclusions, Journal, JournalError, JournalLimitsV1,
+                    ReserveResult,
+                },
+                writer::WriterClient,
+            },
             control::{
                 LaunchSpecV1, NetworkV1, RestartPolicyV1, RuntimeKindV1, SecurityPresetV1,
                 session_control::LegacyConfirmedPlanV1,
@@ -1094,6 +1097,7 @@ mod tests {
             workspace::{Fingerprint, Manifest, scan_workspace_archive},
         };
         use sha2::{Digest, Sha256};
+        use std::time::Duration;
 
         let file = source.join("tracked.txt");
         let contents = b"prepared contents";
@@ -1194,18 +1198,61 @@ mod tests {
         assert!(options.secret_env_file.is_none());
         assert_eq!(options.argv, material.launch.command.argv);
 
+        let journal_root = Directory::open_or_create(&broker_root.path().join("named-journal"))?;
+        let journal = Journal::open(
+            &journal_root,
+            scope.clone(),
+            &FsExclusions::new(),
+            JournalLimitsV1::default(),
+            ControlSecrets::new(vec![])?,
+        )?;
+        let writer = WriterClient::start(journal, 8, Duration::from_secs(5))?;
+        let operation = material.plan.operation_id;
+        let binding_ref = material.plan.binding_ref;
+        let ReserveResult::New(ticket) =
+            writer.reserve_legacy_named(operation, binding_ref).await?
+        else {
+            panic!("the confirmed fixture must initially own the reservation");
+        };
+        let accepted = writer
+            .accept_prepared(ticket, submission)
+            .await
+            .map_err(|failure| failure.error())?;
+        let ReserveResult::Accepted(replayed) =
+            writer.reserve_legacy_named(operation, binding_ref).await?
+        else {
+            panic!("an exact replay must carry the retained acceptance");
+        };
+        assert_eq!(replayed.head(), accepted.head());
+        assert!(matches!(
+            writer.reserve_legacy_named(operation, Uuid::new_v4()).await,
+            Err(JournalError::Conflict)
+        ));
+        let (rebuilt, _) = prepare(&material)?;
+        assert_eq!(replayed.intent_hash(), rebuilt.intent().intent_hash()?);
+        let mut divergence = material.clone();
+        divergence.source_identity_hash = Some("d".repeat(64));
+        let (divergent, _) = prepare(&divergence)?;
+        assert_ne!(replayed.intent_hash(), divergent.intent().intent_hash()?);
+
         // The initial request survives even when collecting the project
         // would now fail. Decisions use the command confirmed by the gateway.
         std::fs::write(&file, b"changed contents")?;
         for (executable, expected) in [("", Outcome::Deny), ("/usr/bin/whoami", Outcome::Review)] {
             let mut command = material.clone();
             command.launch.command.argv = vec![executable.into()];
+            command.plan.target_revision = 3;
             command.plan.launch_spec_hash = command.launch.spec_hash()?;
-            let (initial, _) = prepare(&command)?;
+            // Revision 3 is configured with a source that cannot be opened.
+            let (initial, source) = prepare(&command)?;
             assert_eq!(
                 evaluate(&Policy::default(), initial.intent().request_data()).outcome,
                 expected
             );
+            assert!(matches!(
+                source.collect(std::slice::from_ref(&excluded)),
+                Err(BrokerErrorCodeV1::Unavailable)
+            ));
         }
         assert!(matches!(
             authorized_source.collect(std::slice::from_ref(&excluded)),
@@ -1251,8 +1298,9 @@ mod tests {
         ));
         material.version = 2;
         material.source_identity_hash = Some("d".repeat(64));
+        let (_, source_with_wrong_identity) = prepare(&material)?;
         assert!(matches!(
-            prepare(&material),
+            source_with_wrong_identity.collect(std::slice::from_ref(&excluded)),
             Err(BrokerErrorCodeV1::Conflict)
         ));
         std::fs::write(&file, b"changed contents")?;
@@ -1262,8 +1310,8 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn registry_v2_resolves_only_the_exact_named_source_revision() -> Result<()> {
+    #[tokio::test]
+    async fn registry_v2_resolves_only_the_exact_named_source_revision() -> Result<()> {
         let temporary = tempfile::Builder::new()
             .permissions(std::fs::Permissions::from_mode(0o700))
             .tempdir()?;
@@ -1318,7 +1366,7 @@ mod tests {
         let retained = registry.open_legacy_named_source(&scope, select(1)?)?;
         assert_eq!(retained.path(), first.as_path());
         retained.revalidate()?;
-        check_named_workspace(&registry, &scope, target_id, &first)?;
+        check_named_workspace(&registry, &scope, target_id, &first).await?;
         assert_eq!(
             registry
                 .open_legacy_named_source(&scope, select(2)?)?
