@@ -194,6 +194,10 @@ impl WriterClient {
         if reserved.state != WorkerStateV1::Reserved || !reserved.quota_held {
             return Err(JournalError::Conflict);
         }
+        let cancellation_domain = format!(
+            "ai-guard:legacy-named-cancel-reservation-operation:v1:{}",
+            job.operation_id()
+        );
         let request = LegacyNamedCancelReservationV1 {
             version: 1,
             binding_ref: retained.plan().binding_ref,
@@ -202,7 +206,7 @@ impl WriterClient {
             mutation: WorkerMutationV1 {
                 version: 1,
                 operation_id: crate::model::bound_event_id(
-                    b"ai-guard:legacy-named-cancel-reservation-operation:v1",
+                    cancellation_domain.as_bytes(),
                     stop.command_id(),
                 ),
                 worker_id: reserved.worker_id.clone(),

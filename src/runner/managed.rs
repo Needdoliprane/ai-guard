@@ -1181,7 +1181,7 @@ mod tests {
             .path()
             .join("sessions")
             .join(format!("{operation}.tar"));
-        OpenOptions::new()
+        fs::OpenOptions::new()
             .append(true)
             .open(&archive_path)?
             .write_all(b"changed bytes")?;
