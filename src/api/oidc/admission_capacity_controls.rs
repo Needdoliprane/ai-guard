@@ -182,6 +182,7 @@ async fn both_rate_classes_share_one_window_with_eight_verified_principal_keys()
         readers.push(issue_session(&fixture, &format!("rate-reader-{index}"), 0).await);
     }
     reset_start_window(oidc);
+    let window_started = freeze_admission_clock(oidc);
     for _ in 0..8 {
         assert_eq!(
             request(&fixture.state, json!({"kind":"login"}), None)
@@ -190,7 +191,6 @@ async fn both_rate_classes_share_one_window_with_eight_verified_principal_keys()
             StatusCode::OK
         );
     }
-    retime_full_anonymous_window(oidc);
     let mut pending = Vec::new();
     for reader in readers.iter().take(8) {
         let (status, reply) = begin(&fixture, reader).await;
@@ -203,11 +203,13 @@ async fn both_rate_classes_share_one_window_with_eight_verified_principal_keys()
         assert_eq!(rate.anonymous, 8, "setup: shared rate window rolled over");
         assert_eq!(rate.authenticated.len(), 8);
         assert_eq!(rate.total(), 16);
-        assert!(
-            rate.started.elapsed() < Duration::from_secs(1),
+        assert_eq!(
+            rate.started, window_started,
             "setup: shared window rolled over"
         );
     }
+    let tick = Duration::from_nanos(1);
+    advance_admission_clock(oidc, Duration::from_secs(1) - tick);
     assert_eq!(
         request(&fixture.state, json!({"kind":"login"}), None)
             .await
@@ -218,6 +220,16 @@ async fn both_rate_classes_share_one_window_with_eight_verified_principal_keys()
         begin(&fixture, &readers[8]).await.0,
         StatusCode::TOO_MANY_REQUESTS
     );
+    advance_admission_clock(oidc, tick);
+    assert_eq!(
+        request(&fixture.state, json!({"kind":"login"}), None)
+            .await
+            .0,
+        StatusCode::OK
+    );
+    let (status, reply) = begin(&fixture, &readers[8]).await;
+    assert_eq!(status, StatusCode::OK);
+    pending.push(intent(&reply));
     for (reader, id) in readers.iter().zip(pending) {
         finish(&fixture, reader, id).await;
     }
@@ -235,6 +247,7 @@ async fn active_owners_preserve_both_slot_partitions_and_principal_four_without_
     }
     let fifth = issue_session(&fixture, "slots-0", 5).await;
     let outside = issue_session(&fixture, "slots-outside", 0).await;
+    freeze_admission_clock(oidc);
     for _ in 0..224 {
         reset_start_window(oidc);
         assert_eq!(
@@ -294,6 +307,63 @@ async fn active_owners_preserve_both_slot_partitions_and_principal_four_without_
     for (reader, id) in readers.iter().zip(pending).skip(1) {
         finish(&fixture, reader, id).await;
     }
+}
+
+#[tokio::test]
+async fn original_native_deadline_gates_http_finish_and_reap() {
+    let fixture = fixture().await;
+    let oidc = fixture.state.oidc.as_ref().unwrap();
+    let reader = ReaderToken {
+        raw: fixture.raw.clone(),
+        binding: fixture.binding.clone(),
+    };
+    let started = freeze_admission_clock(oidc);
+    let (status, reply) = begin(&fixture, &reader).await;
+    assert_eq!(status, StatusCode::OK);
+    let id = intent(&reply);
+    let ttl = Duration::from_secs(15);
+    {
+        let registry = oidc.registry.lock().unwrap();
+        assert_eq!(registry.native[&id].created, started);
+        let pending = registry.sessions[&reader.binding.session_id.to_string()]
+            .pending_refresh
+            .as_ref()
+            .unwrap();
+        assert_eq!(pending.deadline, started + ttl);
+    }
+    let records = oidc.audit.verify().unwrap().records;
+    let tick = Duration::from_nanos(1);
+    advance_admission_clock(oidc, ttl - tick);
+    assert_eq!(
+        request(&fixture.state, json!({"kind":"login"}), None)
+            .await
+            .0,
+        StatusCode::OK
+    );
+    assert_eq!(native_owners(&oidc.registry.lock().unwrap()).count(), 1);
+    assert_eq!(oidc.audit.verify().unwrap().records, records);
+
+    advance_admission_clock(oidc, tick);
+    let (status, _) = request(
+        &fixture.state,
+        json!({"kind":"finish","intent_id":id,"outcome":"cancelled"}),
+        Some(&reader.raw),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(oidc.audit.verify().unwrap().records, records);
+    assert_eq!(
+        request(&fixture.state, json!({"kind":"login"}), None)
+            .await
+            .0,
+        StatusCode::OK
+    );
+    {
+        let registry = oidc.registry.lock().unwrap();
+        assert!(!registry.native.contains_key(&id));
+        assert_eq!(native_owners(&registry).count(), 0);
+    }
+    assert_eq!(oidc.audit.verify().unwrap().records, records + 1);
 }
 
 #[tokio::test]
