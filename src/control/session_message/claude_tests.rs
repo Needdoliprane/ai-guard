@@ -164,6 +164,10 @@ fn unattributed_and_conflicting_results_keep_the_turn_in_flight() {
     foreign["session_id"] = json!(OTHER_SESSION);
     let mut autonomous = result(FIRST_MESSAGE, FIRST_RESULT);
     autonomous["origin"] = json!({"kind": "task-notification"});
+    let mut nested = result(FIRST_MESSAGE, FIRST_RESULT);
+    nested["parent_tool_use_id"] = json!("toolu_example");
+    let mut synthetic = result(FIRST_MESSAGE, FIRST_RESULT);
+    synthetic["isSynthetic"] = json!(true);
     let mut local_command = result(FIRST_MESSAGE, FIRST_RESULT);
     local_command["local_command"] = json!("clear");
     let mut malformed = result(FIRST_MESSAGE, FIRST_RESULT);
@@ -175,6 +179,8 @@ fn unattributed_and_conflicting_results_keep_the_turn_in_flight() {
         conflicting,
         foreign,
         autonomous,
+        nested,
+        synthetic,
         local_command,
         malformed,
         result(SECOND_MESSAGE, FIRST_RESULT),

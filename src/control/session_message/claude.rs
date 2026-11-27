@@ -194,7 +194,13 @@ fn exact_replay(frame: &Value, message_uuid: Uuid, text: &str) -> bool {
 }
 
 fn attributed_result(frame: &Value, message_uuid: Uuid) -> Option<(Uuid, ClaudeTurnOutcomeV1)> {
-    if frame["type"] != "result" || wire_uuid(&frame["user_message_uuid"]) != Some(message_uuid) {
+    if frame["type"] != "result"
+        || !frame["parent_tool_use_id"].is_null()
+        || frame
+            .get("isSynthetic")
+            .is_some_and(|value| value.as_bool() != Some(false))
+        || wire_uuid(&frame["user_message_uuid"]) != Some(message_uuid)
+    {
         return None;
     }
     if let Some(messages) = frame.get("user_message_uuids") {
