@@ -900,27 +900,13 @@ impl<'a> Execution<'a> {
         // Repeating volume creation is safe only through the existing runtime's
         // exact control ownership labels. No external volume is adopted.
         self.generation_current()?;
-        let namespace = worker
-            .attempt
-            .stable_name
-            .strip_prefix("aig-")
-            .and_then(|name| name.split('-').next())
-            .context("worker namespace is missing")?;
-        runtime
-            .create_named_volume_for_generation(
-                &worker.attempt.volume_name,
-                &[
-                    (
-                        "agentsandbox.authority".into(),
-                        worker.launch.authority_id.clone(),
-                    ),
-                    ("agentsandbox.worker".into(), worker.worker_id.clone()),
-                    ("agentsandbox.namespace".into(), namespace.into()),
-                ],
-                self.context.cancel_generation(),
-                self.context.expected_generation(),
-            )
-            .await?;
+        super::create_import_volume(
+            runtime,
+            &worker,
+            self.context.cancel_generation(),
+            self.context.expected_generation(),
+        )
+        .await?;
         let admission = self.admission_receipt().await?;
         let imported = continue_step!(
             self.helper(
