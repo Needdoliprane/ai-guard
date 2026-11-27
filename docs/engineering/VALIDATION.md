@@ -1,5 +1,24 @@
 # Validation courante
 
+## 27 novembre 2026 — commande opérateur et prévol MySQL owned
+
+Le CLI `38b64857` publie puis rejoue le même reçu en format 14/TLS et
+15/mTLS sur MySQL 8.4.13, Docker Desktop ARM64. Les contrôles portent sur les
+comptes, le schéma, les projections, la tête d’audit, la cible voisine et
+la fermeture des ressources de recette. Le reçu privé a pour SHA-256
+`5f9b01012902f8f3fe452dd7ef7c1f6a67f3d07e270487127acb0a5e67f40d4c`.
+[Étapes et limites de la recette](../../tests/e2e/mysql/OWNED_PREPARATION.md#recettes-physiques)
+
+Sur `9d6a01a0` (arbre `0c84c49f`), la compilation du binaire de tests
+avec `mysql-storage` et cinq sélecteurs passent. Avant la lecture des
+fichiers d’authentification, le CLI refuse les schémas déclarés en double,
+la cible divergente et le réemploi du compte de préparation dans un
+profil gateway du même serveur configuré. Le cas nominal lit uniquement
+les fichiers synthétiques de l’opérateur. Manifeste privé
+`b0f78959c67e998303fee676f438e1e17ed21b3158937c2d3ba300b521225370`.
+Les alias, la recette physique du nouveau gel et l’admission MySQL owned
+par le gateway restent à vérifier séparément.
+
 ## 27 novembre 2026 — écriture et fermeture d’une conversation
 
 Le libtest Darwin ARM64 de `b15b974e` (arbre `bf962286`) compile.
