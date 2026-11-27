@@ -141,6 +141,7 @@ impl Service {
             Ok::<_, BrokerErrorCodeV1>((running, submission, source, intent_hash))
         }
         .await;
+        drop(preparation);
         let (running, submission, source, intent_hash) = match preflight {
             Ok(prepared) => prepared,
             Err(error) => {
@@ -188,6 +189,10 @@ impl Service {
             if decision.decision.outcome != Outcome::Allow {
                 return Ok((accepted, decision, None));
             }
+            let preparation = Arc::clone(&self.preparation)
+                .acquire_owned()
+                .await
+                .map_err(|_| BrokerErrorCodeV1::Unavailable)?;
             self.require_starts().await?;
             let cancel = job.cancel.clone();
             let control_material = Arc::clone(&self.material);
