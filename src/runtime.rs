@@ -1064,6 +1064,38 @@ async fn drain_prearmed_transport(child: &mut tokio::process::Child) -> Result<(
     }
 }
 
+/// The local attach transport was joined after a confirmed start callback and
+/// a stop notification. The retained instance still needs independent inspection.
+pub(crate) struct JoinedPrearmedStop {
+    container_id: String,
+}
+impl JoinedPrearmedStop {
+    fn after_join(container_id: &str, started: bool, message: &'static str) -> anyhow::Error {
+        if !started {
+            return anyhow::Error::msg(message);
+        }
+        anyhow::Error::new(Self {
+            container_id: container_id.to_owned(),
+        })
+        .context(message)
+    }
+
+    pub(crate) fn container_id(&self) -> &str {
+        &self.container_id
+    }
+}
+impl std::fmt::Debug for JoinedPrearmedStop {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("JoinedPrearmedStop(<private>)")
+    }
+}
+impl std::fmt::Display for JoinedPrearmedStop {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("joined prearmed transport requires terminal observation")
+    }
+}
+impl std::error::Error for JoinedPrearmedStop {}
+
 /// Cancellation cannot run async finalization. Request a snapshot-verified target stop,
 /// without releasing allocation or destroying evidence; subsequent reconciliation stays mandatory.
 struct InteractiveCancellation {
@@ -2338,7 +2370,11 @@ impl Runtime {
                     stopped = wait_prearmed_stop(&mut stop, stdout_release.as_ref()) => {
                         drain_prearmed_transport(&mut child).await?;
                         stopped?;
-                        bail!("independent stop signalled; owned instance retained for terminal reconciliation");
+                        return Err(JoinedPrearmedStop::after_join(
+                            &instance.target,
+                            observed_start,
+                            "independent stop signalled; owned instance retained for terminal reconciliation",
+                        ));
                     }
                     status = child.wait() => {
                         let status = status?;
@@ -2357,7 +2393,11 @@ impl Runtime {
                 biased;
                 stopped = wait_prearmed_stop(&mut stop, stdout_release.as_ref()) => {
                     stopped?;
-                    bail!("independent stop signalled during observation; terminal reconciliation required");
+                    return Err(JoinedPrearmedStop::after_join(
+                        &instance.target,
+                        observed_start,
+                        "independent stop signalled during observation; terminal reconciliation required",
+                    ));
                 }
                 state = self.execution_inspect(&instance.target, Some(managed)) => state.with_context(|| {
                     RuntimePrestartStageFailure::new(
@@ -2426,7 +2466,11 @@ impl Runtime {
             biased;
             stopped = wait_prearmed_stop(&mut stop, stdout_release.as_ref()) => {
                 stopped?;
-                bail!("independent stop signalled during observation; terminal reconciliation required");
+                Err(JoinedPrearmedStop::after_join(
+                    &instance.target,
+                    true,
+                    "independent stop signalled during observation; terminal reconciliation required",
+                ))
             }
             result = finish => result,
         }

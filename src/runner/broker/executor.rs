@@ -42,8 +42,8 @@ use crate::{
     provider_activity::session::{LiveSession, report_terminal_unconfirmed},
     runner::{AuditClient, CheckpointDataV1, CheckpointPayloadV1, managed},
     runtime::{
-        ContainerObservation, ManagedPrearmedExecution, ManagedRuntime, OwnedContainerSnapshot,
-        PrearmedStartDirective,
+        ContainerObservation, JoinedPrearmedStop, ManagedPrearmedExecution, ManagedRuntime,
+        OwnedContainerSnapshot, PrearmedStartDirective,
     },
     workspace::{self, Limits},
 };
@@ -476,7 +476,12 @@ impl<'a> Execution<'a> {
                     self.mutate(WorkerTransitionV1::CancelReserved).await?;
                 }
                 Some(WorkerStateV1::Running | WorkerStateV1::Stopping) => {
-                    Box::pin(self.reconcile_cancelled_worker()).await?;
+                    boxed_execution_phase(|| {
+                        self.reconcile_retained_worker_terminal(
+                            cancelled::WorkerTerminalSource::DurableCancellation,
+                        )
+                    })
+                    .await?;
                 }
                 Some(WorkerStateV1::Terminal) => {
                     if draft.run.plan.managed.as_ref().is_some_and(|managed| {
@@ -1248,15 +1253,36 @@ impl<'a> Execution<'a> {
                         started,
                     )
                 })
-                .await?
+                .await
             } else {
                 self.generation_current()?;
                 boxed_execution_phase(|| {
                     runtime.execute_prearmed_retained(&spec, None, 1024 * 1024, callback, started)
                 })
-                .await?
+                .await
             };
-            (retained, true)
+            match retained {
+                Ok(retained) => (retained, true),
+                Err(error) => {
+                    let Some(interruption) = error.downcast_ref::<JoinedPrearmedStop>() else {
+                        return Err(error);
+                    };
+                    if let Some(session) = activity.as_mut() {
+                        session.begin_producer_drain();
+                    }
+                    let source = cancelled::WorkerTerminalSource::JoinedPrearmedStop {
+                        runtime,
+                        interruption,
+                    };
+                    if boxed_execution_phase(|| self.reconcile_retained_worker_terminal(source))
+                        .await
+                        .is_err()
+                    {
+                        return Err(error);
+                    }
+                    return Ok(ControlFlow::Continue(()));
+                }
+            }
         };
         let retained = match retained {
             crate::runtime::ManagedPrearmedOutcome::Executed(retained) => retained,

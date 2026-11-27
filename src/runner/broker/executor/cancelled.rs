@@ -1,12 +1,33 @@
-//! Observation-only convergence after durable cancellation. No runtime start,
-//! helper, adoption, cleanup or enforcer retirement can originate here.
+//! Observation-only convergence for an owned worker's terminal.
 use super::*;
 
+pub(super) enum WorkerTerminalSource<'a> {
+    DurableCancellation,
+    JoinedPrearmedStop {
+        runtime: &'a ManagedRuntime,
+        interruption: &'a crate::runtime::JoinedPrearmedStop,
+    },
+}
+
 impl Execution<'_> {
-    pub(super) async fn reconcile_cancelled_worker(&self) -> Result<()> {
+    pub(super) async fn reconcile_retained_worker_terminal(
+        &self,
+        source: WorkerTerminalSource<'_>,
+    ) -> Result<()> {
         self.stage(LocalFailurePhaseV1::Worker);
         let (_, draft) = self.load().await?;
-        ensure!(draft.cancelled(), "durable cancellation is missing");
+        match &source {
+            WorkerTerminalSource::DurableCancellation => {
+                ensure!(draft.cancelled(), "durable cancellation is missing");
+            }
+            WorkerTerminalSource::JoinedPrearmedStop { .. } => {
+                self.generation_current()?;
+                ensure!(
+                    !draft.cancelled(),
+                    "durable cancellation owns reconciliation"
+                );
+            }
+        }
         let worker = draft.worker()?;
         ensure!(
             matches!(
@@ -14,7 +35,7 @@ impl Execution<'_> {
                 WorkerStateV1::Running | WorkerStateV1::Stopping
             ) && worker.quota_held
                 && !worker.allocation_inconsistent,
-            "cancelled worker has no reconcilable running allocation"
+            "worker has no reconcilable running allocation"
         );
         let checkpoint = draft
             .run
@@ -117,11 +138,28 @@ impl Execution<'_> {
             "historical worker start is invalid"
         );
 
-        // Reopen only the retained authority. No missing-binding bootstrap or
-        // lookup-by-name path is reachable from this observation.
-        let runtime =
-            ManagedRuntime::reopen_with_runtime(binding.clone(), self.context.runtime().clone())
+        let reopened;
+        let runtime = match source {
+            WorkerTerminalSource::DurableCancellation => {
+                reopened = ManagedRuntime::reopen_with_runtime(
+                    binding.clone(),
+                    self.context.runtime().clone(),
+                )
                 .await?;
+                &reopened
+            }
+            WorkerTerminalSource::JoinedPrearmedStop {
+                runtime,
+                interruption,
+            } => {
+                ensure!(
+                    runtime.binding() == binding
+                        && interruption.container_id() == owned.handle.id(),
+                    "joined transport differs from the retained worker"
+                );
+                runtime
+            }
+        };
         let terminal = runtime.resume_terminal(&owned.handle).await?;
         terminal.validate_terminal(binding.kind, &owned.observation)?;
         let observed_start = terminal
@@ -133,6 +171,9 @@ impl Execution<'_> {
             "runtime start differs from the centrally observed allocation"
         );
 
+        if !draft.cancelled() {
+            self.generation_current()?;
+        }
         Box::pin(self.save_observed_result(&terminal)).await?;
         let acknowledged = Box::pin(self.mutate(WorkerTransitionV1::Observe {
             observation: managed::observation_dto(worker, &terminal)?,
@@ -143,7 +184,7 @@ impl Execution<'_> {
                 && acknowledged.attempt.attempt_id == worker.attempt.attempt_id
                 && acknowledged.state == WorkerStateV1::Terminal
                 && !acknowledged.quota_held,
-            "cancelled worker terminal is not centrally acknowledged"
+            "worker terminal is not centrally acknowledged"
         );
         Box::pin(self.post_worker_result()).await
     }
