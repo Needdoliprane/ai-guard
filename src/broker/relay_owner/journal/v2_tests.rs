@@ -794,6 +794,56 @@ fn v1_downgrade_after_v2_and_legacy_seventeenth_record_are_refused() {
 }
 
 #[test]
+fn retained_read_is_cold_scoped_and_rejects_tampered_prefix() {
+    let f = Fixture::new();
+    assert!(
+        ChannelJournal::open_retained_read(&f.root, &f.scope, &f.literals)
+            .unwrap()
+            .is_none()
+    );
+
+    let mut journal = f.open();
+    journal.append(f.fact.clone(), &f.literals).unwrap();
+    let mut next = f.fact.clone();
+    next.phase = AttachmentPhase::Unknown;
+    next.error = Some(RelayOwnerError::Unknown);
+    journal.append(next, &f.literals).unwrap();
+    drop(journal);
+    let retained = ChannelJournal::retained_evidence(&f.root, &f.scope, f.fact.job_id, &f.literals)
+        .unwrap()
+        .unwrap();
+    assert_eq!(retained.job_id, f.fact.job_id);
+    assert_eq!(retained.source_profile_id, f.fact.source_profile_id);
+    assert_eq!(retained.source_head_revision, f.fact.source_head_revision);
+    assert_eq!(retained.source_head_hash, f.fact.source_head_hash);
+    assert_eq!(retained.arm_id, f.fact.arm_id);
+    assert_eq!(retained.phase, AttachmentPhase::Unknown);
+    assert!(
+        ChannelJournal::retained_evidence(&f.root, &f.scope, Uuid::new_v4(), &f.literals,)
+            .unwrap()
+            .is_none()
+    );
+
+    let other_scope = JournalScopeV1::new(
+        f.scope.installation_id(),
+        "tenant-other",
+        f.scope.gateway_origin(),
+        f.scope.control_namespace_uuid(),
+        "relay_shared",
+    )
+    .unwrap();
+    assert!(ChannelJournal::open_retained_read(&f.root, &other_scope, &f.literals).is_err());
+
+    let record_path = f._temporary.path().join(CHILD).join(name(1));
+    let mut tampered = std::fs::read(&record_path).unwrap();
+    tampered.push(b' ');
+    std::fs::write(record_path, tampered).unwrap();
+    assert!(
+        ChannelJournal::retained_evidence(&f.root, &f.scope, f.fact.job_id, &f.literals,).is_err()
+    );
+}
+
+#[test]
 fn structurally_valid_legacy_future_cas_stays_unknown_after_core_terminal() {
     let f = Fixture::with_reserved(true);
     let mut future = f.old_close();

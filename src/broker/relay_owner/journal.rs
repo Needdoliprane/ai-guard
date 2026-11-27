@@ -88,6 +88,17 @@ pub(crate) struct ChannelJournal {
     jobs: BTreeMap<Uuid, history::State>,
     poisoned: bool,
 }
+/// The durable assignment facts exposed to recovery. This deliberately omits
+/// worker endpoints, channel IDs, claims, credentials, and runtime state.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RetainedChannelEvidence {
+    pub job_id: Uuid,
+    pub source_profile_id: String,
+    pub source_head_revision: u64,
+    pub source_head_hash: String,
+    pub arm_id: String,
+    pub phase: AttachmentPhase,
+}
 impl ChannelJournal {
     /// Called only while the enclosing tenant Outbox flock and RoleLease are
     /// retained. Both namespaces are serialized by the same tenant IO owner.
@@ -95,6 +106,60 @@ impl ChannelJournal {
         parent: &Directory,
         scope: &JournalScopeV1,
         secrets: &[String],
+    ) -> Result<Self> {
+        Self::open_mode(parent, scope, secrets, true)
+    }
+
+    /// Read an already retained channel journal while the caller still holds
+    /// the tenant Outbox flock and RoleLease. This path never creates or repairs
+    /// a namespace; absent or interrupted state fails closed.
+    pub(crate) fn open_retained_read(
+        parent: &Directory,
+        scope: &JournalScopeV1,
+        secrets: &[String],
+    ) -> Result<Option<Self>> {
+        protect_name(CHILD, secrets)?;
+        protect_name("scope.json", secrets)?;
+        let bytes = super::super::journal::canonical(scope)
+            .map_err(|_| RelayOwnerError::InvalidMaterial)?;
+        protect(&bytes, secrets)?;
+        if parent
+            .persistent_child(CHILD, false)
+            .map_err(|_| RelayOwnerError::InvalidMaterial)?
+            .is_none()
+        {
+            return Ok(None);
+        }
+        Self::open_mode(parent, scope, secrets, false).map(Some)
+    }
+
+    /// Recover only the durable assignment tuple needed to compare against a
+    /// separately verified STOP snapshot. It is not endpoint or runtime proof.
+    pub(crate) fn retained_evidence(
+        parent: &Directory,
+        scope: &JournalScopeV1,
+        job: Uuid,
+        secrets: &[String],
+    ) -> Result<Option<RetainedChannelEvidence>> {
+        let Some(journal) = Self::open_retained_read(parent, scope, secrets)? else {
+            return Ok(None);
+        };
+        let fact = journal.get(job)?;
+        Ok(fact.map(|fact| RetainedChannelEvidence {
+            job_id: fact.job_id,
+            source_profile_id: fact.source_profile_id,
+            source_head_revision: fact.source_head_revision,
+            source_head_hash: fact.source_head_hash,
+            arm_id: fact.arm_id,
+            phase: fact.phase,
+        }))
+    }
+
+    fn open_mode(
+        parent: &Directory,
+        scope: &JournalScopeV1,
+        secrets: &[String],
+        allow_create: bool,
     ) -> Result<Self> {
         protect_name(CHILD, secrets)?;
         protect_name("scope.json", secrets)?;
@@ -106,12 +171,13 @@ impl ChannelJournal {
             .map_err(|_| RelayOwnerError::InvalidMaterial)?;
         let (directory, fresh) = match existing {
             Some(directory) => (directory, false),
-            None => (
+            None if allow_create => (
                 parent
                     .exclusive_child(CHILD)
                     .map_err(|_| RelayOwnerError::InvalidMaterial)?,
                 true,
             ),
+            None => return Err(RelayOwnerError::InvalidMaterial),
         };
         let scope_file = match directory
             .persistent_read("scope.json", MAX_RECORD as u64, &[])
