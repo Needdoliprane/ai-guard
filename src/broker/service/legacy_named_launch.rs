@@ -1,15 +1,22 @@
-//! Private preparation through the Writer and the named broker identity.
+//! Private preparation and admission through the Writer and the named identity.
 use super::super::profile::LegacyNamedSource;
 use super::*;
 use crate::{
-    control::session_control::{
-        LegacyConfirmedLaunchSpecV1, LegacyConfirmedPlanV1, LegacyNamedInitialDecisionV1,
+    broker::presence::LegacyNamedAdmissionOutcome,
+    control::{
+        MutationReceiptV1, WorkerV1,
+        session_control::{
+            LegacyConfirmedLaunchSpecV1, LegacyConfirmedPlanV1, LegacyNamedAdmissionReceiptV1,
+            LegacyNamedInitialDecisionV1,
+        },
     },
     model::Outcome,
     runner::broker::{
-        LegacyNamedWorkspaceArchiveV1, PreparedSubmission, retain_legacy_named_archive,
+        LegacyNamedWorkspaceArchiveV1, PreparedSubmission, reopen_legacy_named_archive,
+        retain_legacy_named_archive,
     },
 };
+use std::fs::File;
 
 #[allow(
     dead_code,
@@ -35,15 +42,55 @@ pub(super) enum LegacyNamedLaunchPreparation {
     reason = "the private named service caller is a separate G04 integration"
 )]
 pub(super) struct PreparedLegacyNamedLaunch {
+    request: AuthorizedRequest,
+    accepted: AcceptedJobV1,
+    material: LegacyConfirmedLaunchSpecV1,
+    archive: (LegacyNamedWorkspaceArchiveV1, Directory),
+    owner: FullOwnerSlot,
+    job: Arc<Job>,
+    running: RunningJob,
+    capacity: OwnedSemaphorePermit,
+}
+
+#[allow(
+    dead_code,
+    reason = "the private named service caller is a separate G04 integration"
+)]
+pub(super) enum LegacyNamedLaunchAdmission {
+    Admitted(Box<AdmittedLegacyNamedLaunch>),
+    Refused(Box<LegacyNamedAdmissionReceiptV1>),
+    Replayed(Box<LegacyNamedAdmissionReceiptV1>),
+}
+
+/// Live reservation and exact reopened archive. The caller retains these
+/// guards when crossing the separate Writer and STOP gates for creation.
+#[allow(
+    dead_code,
+    reason = "the private named service caller is a separate G04 integration"
+)]
+pub(super) struct AdmittedLegacyNamedLaunch {
     pub(super) request: AuthorizedRequest,
     pub(super) accepted: AcceptedJobV1,
-    pub(super) decision: LegacyNamedInitialDecisionV1,
     pub(super) material: LegacyConfirmedLaunchSpecV1,
-    pub(super) archive: (LegacyNamedWorkspaceArchiveV1, Directory),
+    pub(super) reservation: MutationReceiptV1,
+    pub(super) worker: WorkerV1,
+    pub(super) archive: File,
+    pub(super) archive_digest: String,
+    config: Directory,
     pub(super) owner: FullOwnerSlot,
     pub(super) job: Arc<Job>,
     pub(super) running: RunningJob,
     pub(super) capacity: OwnedSemaphorePermit,
+}
+
+impl AdmittedLegacyNamedLaunch {
+    #[allow(
+        dead_code,
+        reason = "the private named service caller is a separate G04 integration"
+    )]
+    pub(super) fn config(&self) -> &Directory {
+        &self.config
+    }
 }
 
 impl Service {
@@ -176,10 +223,7 @@ impl Service {
             let decision = control
                 .legacy_named_initial_decision(writer, &material, (&job.cancel, generation))
                 .await
-                .map_err(|error| match error {
-                    PresenceError::Stopped => BrokerErrorCodeV1::Interrupted,
-                    _ => BrokerErrorCodeV1::NeedsReconciliation,
-                })?;
+                .map_err(named_effect_error)?;
             let accepted = writer
                 .load(operation)
                 .await
@@ -233,7 +277,6 @@ impl Service {
             PreparedLegacyNamedLaunch {
                 request,
                 accepted,
-                decision,
                 material,
                 archive,
                 owner,
@@ -242,6 +285,106 @@ impl Service {
                 capacity,
             },
         )))
+    }
+
+    #[allow(
+        dead_code,
+        reason = "the private named service caller is a separate G04 integration"
+    )]
+    pub(super) async fn admit_prepared_legacy_named_launch(
+        &self,
+        prepared: Box<PreparedLegacyNamedLaunch>,
+    ) -> Result<LegacyNamedLaunchAdmission, BrokerErrorCodeV1> {
+        let PreparedLegacyNamedLaunch {
+            request,
+            accepted,
+            material,
+            archive,
+            owner,
+            job,
+            running,
+            capacity,
+        } = *prepared;
+        let generation = running.generation();
+        let result = async {
+            require_generation(&job.cancel, generation)?;
+            self.require_starts().await?;
+            self.validate_control().await?;
+            let control = request
+                .jobs
+                .named_control
+                .get()
+                .ok_or(BrokerErrorCodeV1::IncompatibleControl)?;
+            let archive_digest = archive
+                .0
+                .digest_for_launch(&material)
+                .map_err(|_| BrokerErrorCodeV1::NeedsReconciliation)?
+                .to_owned();
+            let config = archive.1.clone();
+            require_generation(&job.cancel, generation)?;
+            let writer = &request.writer;
+            let outcome = control
+                .admit_legacy_named(writer, &material, archive, (&job.cancel, generation))
+                .await
+                .map_err(named_effect_error)?;
+            let receipt = match outcome {
+                LegacyNamedAdmissionOutcome::Refused(receipt) => {
+                    return Ok(LegacyNamedLaunchAdmission::Refused(Box::new(receipt)));
+                }
+                LegacyNamedAdmissionOutcome::Accepted(receipt) if receipt.admission.replayed => {
+                    return Ok(LegacyNamedLaunchAdmission::Replayed(Box::new(receipt)));
+                }
+                LegacyNamedAdmissionOutcome::Accepted(receipt) => receipt,
+            };
+
+            // An in-flight POST can finish after STOP. The transport settles
+            // its receipt, and the service gives that generation no handoff.
+            require_generation(&job.cancel, generation)?;
+            let retained = writer
+                .load(accepted.operation_id())
+                .await
+                .map_err(|_| BrokerErrorCodeV1::NeedsReconciliation)?
+                .ok_or(BrokerErrorCodeV1::NeedsReconciliation)?;
+            require_named_intent(&retained, &material.plan, accepted.intent_hash())?;
+            require_live_admission(&retained, &archive_digest, &receipt)?;
+            let worker = receipt
+                .admission
+                .worker
+                .ok_or(BrokerErrorCodeV1::NeedsReconciliation)?;
+            let reservation = receipt.admission.receipt;
+            let cancel = job.cancel.clone();
+            let archive_config = config.clone();
+            let (accepted, archive) = self
+                .filesystem(move || {
+                    require_generation(&cancel, generation)?;
+                    let archive = reopen_legacy_named_archive(&archive_config, &retained)?;
+                    require_generation(&cancel, generation)?;
+                    Ok((retained, archive))
+                })
+                .await?;
+            self.validate_control().await?;
+            self.require_starts().await?;
+            require_generation(&job.cancel, generation)?;
+            Ok(LegacyNamedLaunchAdmission::Admitted(Box::new(
+                AdmittedLegacyNamedLaunch {
+                    request,
+                    accepted,
+                    material,
+                    reservation,
+                    worker,
+                    archive,
+                    archive_digest,
+                    config,
+                    owner,
+                    job: Arc::clone(&job),
+                    running,
+                    capacity,
+                },
+            )))
+        }
+        .await;
+        job.result(result.as_ref().err().copied());
+        result
     }
 
     async fn named_preflight(
@@ -280,10 +423,51 @@ fn require_named_intent(
     }
 }
 
+fn require_live_admission(
+    retained: &AcceptedJobV1,
+    archive_digest: &str,
+    receipt: &LegacyNamedAdmissionReceiptV1,
+) -> Result<(), BrokerErrorCodeV1> {
+    let checkpoint = retained
+        .broker_checkpoint_v3()
+        .ok_or(BrokerErrorCodeV1::NeedsReconciliation)?;
+    if checkpoint
+        .commands()
+        .iter()
+        .any(|command| matches!(command.request(), LocalCommandRequestV1::CancelRequested))
+    {
+        return Err(BrokerErrorCodeV1::Interrupted);
+    }
+    let named = checkpoint
+        .broker()
+        .supervision()
+        .legacy_named_admission()
+        .ok_or(BrokerErrorCodeV1::NeedsReconciliation)?;
+    let saved = named
+        .receipt()
+        .ok_or(BrokerErrorCodeV1::NeedsReconciliation)?;
+    if named.archive_digest() != Some(archive_digest)
+        || named.import_creation().is_some()
+        || named.import_arm().is_some()
+        || canonical(saved).map_err(jobs::journal_error)?
+            != canonical(receipt).map_err(jobs::journal_error)?
+    {
+        return Err(BrokerErrorCodeV1::NeedsReconciliation);
+    }
+    Ok(())
+}
+
 fn require_generation(cancel: &CancelGeneration, generation: u64) -> Result<(), BrokerErrorCodeV1> {
     cancel
         .with_current_generation(generation, || ())
         .map_err(|_| BrokerErrorCodeV1::Interrupted)
+}
+
+fn named_effect_error(error: PresenceError) -> BrokerErrorCodeV1 {
+    match error {
+        PresenceError::Stopped => BrokerErrorCodeV1::Interrupted,
+        _ => BrokerErrorCodeV1::NeedsReconciliation,
+    }
 }
 
 fn plan_error(error: PresenceError) -> BrokerErrorCodeV1 {
