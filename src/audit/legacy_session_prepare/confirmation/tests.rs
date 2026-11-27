@@ -17,9 +17,7 @@ use crate::{
     },
     model::{CommandSpec, DecisionRequest},
     policy::{self, Policy},
-    workload::{
-        AuthenticatedWorkload, WorkloadBindingIssueV1, WorkloadFailureV1, WorkloadSubjectV1,
-    },
+    workload::{AuthenticatedWorkload, WorkloadBindingIssueV1, WorkloadSubjectV1},
 };
 use sha2::{Digest, Sha256};
 use std::{os::unix::fs::PermissionsExt, path::Path};
@@ -413,8 +411,8 @@ async fn confirmed_plan_is_private_and_requires_current_initiator() {
             resolved
                 .release_at(deadline)
                 .unwrap_err()
-                .downcast_ref::<WorkloadFailureV1>(),
-            Some(&WorkloadFailureV1::Unauthorized)
+                .downcast_ref::<ControlFailure>(),
+            Some(&ControlFailure::NotFound)
         );
     }
     assert_eq!(store.head().unwrap(), before);

@@ -101,10 +101,11 @@ struct ResolvedLegacyConfirmedPlan {
 
 impl ResolvedLegacyConfirmedPlan {
     fn release_at(self, now: DateTime<Utc>) -> anyhow::Result<LegacyConfirmedPlanV1> {
-        anyhow::ensure!(now < self.plan.expires_at, ControlFailure::NotFound);
+        // A plan that has lost its authority has the same answer as a missing plan.
         anyhow::ensure!(
-            workload::canonical_control_time(now)? < self.broker_deadline,
-            crate::workload::WorkloadFailureV1::Unauthorized
+            now < self.plan.expires_at
+                && workload::canonical_control_time(now)? < self.broker_deadline,
+            ControlFailure::NotFound
         );
         Ok(self.plan)
     }
