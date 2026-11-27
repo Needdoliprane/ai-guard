@@ -34,16 +34,21 @@ impl LegacyNamedAdmissionCheckpointV1 {
     }
 
     /// Retain the authenticated Store reply at the existing pending operation.
+    /// Reconciliation can return the same receipt with different delivery metadata.
     #[allow(
         dead_code,
         reason = "the private named transport will supply the Store acknowledgement"
     )]
     pub(crate) fn acknowledge(
         mut self,
-        receipt: LegacyNamedAdmissionReceiptV1,
+        mut receipt: LegacyNamedAdmissionReceiptV1,
     ) -> JournalResult<Self> {
-        ensure(self.receipt.is_none())?;
-        self.receipt = Some(receipt);
+        if let Some(previous) = &self.receipt {
+            receipt.admission.replayed = previous.admission.replayed;
+            ensure(equal(previous, &receipt)?)?;
+        } else {
+            self.receipt = Some(receipt);
+        }
         let namespace = uuid(&self.plan.control_namespace_uuid)?;
         self.validate_shape(namespace)?;
         Ok(self)

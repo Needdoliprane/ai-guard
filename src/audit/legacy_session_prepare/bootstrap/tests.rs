@@ -1666,6 +1666,18 @@ fn legacy_named_checkpoint_retains_the_exact_store_admission_after_reopen() {
     assert!(pending.clone().acknowledge(other_receipt).is_err());
     let response = pending.acknowledge(receipt).unwrap();
     let acknowledged = checkpoint(response.clone());
+    let replay = store
+        .read_legacy_named_admission(&broker, &request, None)
+        .unwrap()
+        .unwrap();
+    assert!(replay.admission.replayed);
+    assert!(!response.admission_result().unwrap().replayed);
+    let mut divergent = replay.clone();
+    divergent.audit_hash = "1".repeat(64);
+    assert!(matches!(
+        response.clone().acknowledge(divergent),
+        Err(JournalError::Conflict)
+    ));
     assert!(matches!(
         acknowledged.validate_transition(Some(&decided)),
         Err(JournalError::Conflict)
@@ -1685,14 +1697,16 @@ fn legacy_named_checkpoint_retains_the_exact_store_admission_after_reopen() {
         retained.canonical_bytes().unwrap(),
         acknowledged.canonical_bytes().unwrap()
     );
-    let checkpoint = retained.supervision().legacy_named_admission().unwrap();
-    assert_eq!(checkpoint.plan(), &plan);
+    let named = retained.supervision().legacy_named_admission().unwrap();
+    let reconciled = checkpoint(named.clone().acknowledge(replay).unwrap());
     assert_eq!(
-        checkpoint.admission_result().unwrap().receipt,
-        retained_receipt
+        reconciled.canonical_bytes().unwrap(),
+        acknowledged.canonical_bytes().unwrap()
     );
+    assert_eq!(named.plan(), &plan);
+    assert_eq!(named.admission_result().unwrap().receipt, retained_receipt);
     assert_eq!(
-        checkpoint
+        named
             .admission_result()
             .unwrap()
             .worker
