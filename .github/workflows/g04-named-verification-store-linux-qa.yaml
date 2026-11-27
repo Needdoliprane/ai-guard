@@ -1,0 +1,123 @@
+name: G04 named Import verification Arm Store Linux QA
+
+on:
+  push:
+    branches: [codex/g04-named-verification-store-linux-qa-20261128]
+    paths: [.github/workflows/g04-named-verification-store-linux-qa.yaml]
+
+permissions:
+  contents: read
+
+jobs:
+  named-observation:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      SOURCE_SHA: 2c54cd633d05ce1aadb632cc870b76e86164e2a0
+      SOURCE_TREE: ff1f18b98a0a25170088ed1bd368fd452595e4d7
+      CONTROL_BLOB: 7bcccf79f6dc174195a9c627aad36cb9811a89e6
+      VERIFICATION_ARM_BLOB: 48d759b78e9d70628f3cd7d962c993c9d7473593
+      BOOTSTRAP_TESTS_BLOB: 721204efee613d2000072d002aa7143261deb6c4
+      SUPERVISION_BLOB: 608074b0737134dcacae55ca3fdca345c7f41fe9
+      IDENTITY_BLOB: be8eb8735eb61ba74f91eb8784f9b5277109e4f8
+      CARGO_BUILD_JOBS: '1'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      CARGO_TERM_COLOR: never
+      RUST_MIN_STACK: '8388608'
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          persist-credentials: false
+
+      - name: Build one libtest and verify the exact private verification Arm
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          # The oracle uses an isolated SQLite Store and synthetic runtime facts.
+          # It does not start a runtime, provider, model, or external service.
+          selector=audit::legacy_session_prepare::bootstrap::tests::legacy_named_import_verification_arm_requires_exact_named_terminal_and_authority
+
+          report_not_run() {
+            printf 'test=%s status=NOT_RUN\n' "$selector"
+          }
+
+          if [[ "$(git rev-parse HEAD)" != "$SOURCE_SHA" ||
+                "$(git rev-parse 'HEAD^{tree}')" != "$SOURCE_TREE" ||
+                "$(git rev-parse HEAD:src/control/session_control.rs)" != "$CONTROL_BLOB" ||
+                "$(git rev-parse HEAD:src/audit/legacy_session_prepare/confirmation/admission/verification_arm.rs)" != "$VERIFICATION_ARM_BLOB" ||
+                "$(git rev-parse HEAD:src/audit/legacy_session_prepare/bootstrap/tests.rs)" != "$BOOTSTRAP_TESTS_BLOB" ||
+                "$(git rev-parse HEAD:src/audit/supervision.rs)" != "$SUPERVISION_BLOB" ||
+                "$(git rev-parse HEAD:src/audit/identity.rs)" != "$IDENTITY_BLOB" ]]; then
+            printf 'source=FAIL\n'
+            report_not_run
+            exit 1
+          fi
+          printf 'source=PASS\nsource_sha=%s\nsource_tree=%s\ncontrol_blob=%s\nverification_arm_blob=%s\nbootstrap_tests_blob=%s\nsupervision_blob=%s\nidentity_blob=%s\n' \
+            "$SOURCE_SHA" "$SOURCE_TREE" "$CONTROL_BLOB" "$VERIFICATION_ARM_BLOB" \
+            "$BOOTSTRAP_TESTS_BLOB" "$SUPERVISION_BLOB" "$IDENTITY_BLOB"
+          export AI_GUARD_BUILD_REVISION="$SOURCE_SHA"
+
+          scratch=$(mktemp -d /tmp/aig-g04-verification-arm.XXXXXX)
+          trap 'rm -rf -- "$scratch"' EXIT
+          export TMPDIR="$scratch"
+          export CARGO_TARGET_DIR="$scratch/target"
+          build_json="$scratch/build.jsonl"
+
+          if ! cargo fetch --locked >"$scratch/fetch.log" 2>&1; then
+            printf 'fetch=FAIL\nbuild=NOT_RUN\n'
+            report_not_run
+            exit 1
+          fi
+          printf 'fetch=PASS\n'
+
+          if cargo test --locked --offline -j1 --no-default-features --lib --no-run \
+              --message-format=json >"$build_json" 2>"$scratch/build.stderr"; then
+            printf 'build=PASS\n'
+          else
+            rc=$?
+            printf 'build=FAIL\nbuild_exit=%s\n' "$rc"
+            jq -Rr 'fromjson? | objects
+              | select(.reason == "compiler-message" and .message.level == "error")
+              | .message.code.code // empty | strings | select(test("^E[0-9]{4}$"))
+              | "compiler_error=" + .' "$build_json" 2>/dev/null | sort -u || true
+            report_not_run
+            exit 1
+          fi
+
+          if ! libtest=$(jq -ers '[.[] | select(.reason == "compiler-artifact"
+              and .target.name == "agentsandbox" and .target.kind == ["lib"]
+              and .profile.test == true and (.executable | type) == "string") | .executable]
+              | unique | select(length == 1) | .[0]' "$build_json" 2>/dev/null) ||
+              [[ "$libtest" != "$CARGO_TARGET_DIR"/debug/deps/agentsandbox-* ||
+                 ! -f "$libtest" || ! -x "$libtest" || -L "$libtest" ]]; then
+            printf 'libtest=FAIL\n'
+            report_not_run
+            exit 1
+          fi
+          checksum=$(sha256sum -- "$libtest")
+          libtest_sha=${checksum%% *}
+          if [[ ! "$libtest_sha" =~ ^[0-9a-f]{64}$ ]]; then
+            printf 'libtest=FAIL\n'
+            report_not_run
+            exit 1
+          fi
+          printf 'libtest=PASS\nlibtest_sha256=%s\n' "$libtest_sha"
+
+          log="$scratch/test.log"
+          test_exit=0
+          "$libtest" --exact "$selector" --test-threads=1 --color never >"$log" 2>&1 || test_exit=$?
+          if [[ "$test_exit" == 0 ]] &&
+              [[ "$(grep -Fxc "running 1 test" "$log" || true)" == 1 ]] &&
+              [[ "$(grep -Fxc "test $selector ... ok" "$log" || true)" == 1 ]] &&
+              [[ "$(grep -Ec '^test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; [0-9]+ filtered out; finished in [0-9]+([.][0-9]+)?s$' "$log" || true)" == 1 ]]; then
+            printf 'test=%s status=PASS\ntest_exit=0\ntest_pass_count=1\ntest_fail_count=0\n' "$selector"
+          else
+            printf 'test=%s status=FAIL\ntest_exit=%s\n' "$selector" "$test_exit"
+            rg -o 'panicked at src/[A-Za-z0-9_./-]+[.]rs:[0-9]+:[0-9]+' "$log" || true
+            exit 1
+          fi
