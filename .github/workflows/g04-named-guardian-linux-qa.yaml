@@ -13,8 +13,8 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
-      SOURCE_SHA: 483fc2bfa51a5e4d7a989f07072895c29cb3cb0a
-      SOURCE_TREE: 61f078c59b18cb4174432ba8ab5f881018b2e8a7
+      SOURCE_SHA: 2a4f6b53880d63ab919eaf1a10bed7ca8d1bba87
+      SOURCE_TREE: 87f12cfcc2f938035e5f8d40178d385c565f9ed8
       CARGO_BUILD_JOBS: '1'
       CARGO_INCREMENTAL: '0'
       CARGO_PROFILE_DEV_DEBUG: '0'
