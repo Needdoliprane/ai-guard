@@ -19,10 +19,16 @@ use uuid::Uuid;
 
 const MAX_JSON_DEPTH: usize = 64;
 
-/// A fact reported by the provider on the exact channel. The replay and turn
-/// result are separate facts and convey no independent observation of effect.
+/// Initialization, replay and result are separate client declarations on the
+/// exact channel. The caller owns any independent evidence of effect.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ClaudeObservationV1 {
+    /// `system/init` reported the selected session. Both UUIDs are declarations
+    /// from the client on that channel.
+    InitializationReported {
+        session_id: Uuid,
+        frame_uuid: Uuid,
+    },
     ExactReplay {
         message_uuid: Uuid,
     },
@@ -58,7 +64,8 @@ enum ChannelState {
 /// In-memory codec for one private channel incarnation. Keep it across read
 /// timeouts and discard it when retiring that channel.
 pub struct ClaudeStreamJsonAdapterV1 {
-    session_id: String,
+    session_id: Uuid,
+    initialization_reported: bool,
     state: ChannelState,
 }
 
@@ -67,7 +74,8 @@ impl ClaudeStreamJsonAdapterV1 {
     pub fn new(session_id: Uuid) -> anyhow::Result<Self> {
         invalid(!session_id.is_nil())?;
         Ok(Self {
-            session_id: session_id.to_string(),
+            session_id,
+            initialization_reported: false,
             state: ChannelState::Idle,
         })
     }
@@ -109,16 +117,36 @@ impl ClaudeStreamJsonAdapterV1 {
     }
 
     /// Reconcile one complete JSONL line read from the same owned channel.
-    /// Unrelated, duplicate or unattributed frames emit no fact. A result
-    /// before the exact replay cannot close the turn. The result's own UUID
-    /// identifies that frame, and only `user_message_uuid` links it to input.
+    /// The first matching `system/init` reports initialization independently of
+    /// turn state. Unrelated, duplicate or unattributed frames emit no fact.
+    /// A result before the exact replay cannot close the turn. The result's
+    /// own UUID identifies that frame, and only `user_message_uuid` links it to input.
     pub fn reconcile_line(&mut self, line: &str) -> anyhow::Result<Option<ClaudeObservationV1>> {
         invalid(!matches!(&self.state, ChannelState::DivergentSession))?;
         let frame = decode_line(line)?;
-        let same_session = frame["session_id"].as_str() == Some(self.session_id.as_str());
-        if frame["type"] == "system" && frame["subtype"] == "init" && !same_session {
-            self.state = ChannelState::DivergentSession;
-            return Err(ControlFailure::InvalidRequest.into());
+        let same_session = wire_uuid(&frame["session_id"]) == Some(self.session_id);
+        if frame["type"] == "system" && frame["subtype"] == "init" {
+            if !same_session {
+                self.state = ChannelState::DivergentSession;
+                return Err(ControlFailure::InvalidRequest.into());
+            }
+            let frame_uuid = wire_uuid(&frame["uuid"]).ok_or(ControlFailure::InvalidRequest)?;
+            invalid(
+                frame["parent_tool_use_id"].is_null()
+                    && ["isReplay", "isSynthetic"].into_iter().all(|key| {
+                        frame
+                            .get(key)
+                            .is_none_or(|value| value.as_bool() == Some(false))
+                    }),
+            )?;
+            if self.initialization_reported {
+                return Ok(None);
+            }
+            self.initialization_reported = true;
+            return Ok(Some(ClaudeObservationV1::InitializationReported {
+                session_id: self.session_id,
+                frame_uuid,
+            }));
         }
         if !same_session || !regular_origin(&frame) {
             return Ok(None);

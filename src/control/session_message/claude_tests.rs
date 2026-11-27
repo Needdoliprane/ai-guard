@@ -9,6 +9,7 @@ const FIRST_MESSAGE: &str = "f5af991b-3171-4c92-8484-c6edf4bc6440";
 const SECOND_MESSAGE: &str = "f5af991b-3171-4c92-8484-c6edf4bc6441";
 const FIRST_RESULT: &str = "bb6dd206-23a4-4666-8364-f48f5b0ed912";
 const SECOND_RESULT: &str = "bb6dd206-23a4-4666-8364-f48f5b0ed913";
+const INITIALIZATION: &str = "947a668d-64ea-479f-819a-0b08f20216ef";
 
 fn uuid(text: &str) -> Uuid {
     Uuid::parse_str(text).unwrap()
@@ -39,6 +40,57 @@ fn result(message_uuid: &str, result_uuid: &str) -> Value {
         "user_message_uuid": message_uuid,
         "user_message_uuids": [message_uuid],
     })
+}
+
+#[test]
+fn native_initialization_is_reported_once_and_does_not_acknowledge_the_turn() {
+    let init = json!({
+        "type": "system",
+        "subtype": "init",
+        "session_id": SESSION,
+        "uuid": INITIALIZATION,
+        "model": "fixture-model",
+    });
+    let expected = Some(ClaudeObservationV1::InitializationReported {
+        session_id: uuid(SESSION),
+        frame_uuid: uuid(INITIALIZATION),
+    });
+    let mut idle = ClaudeStreamJsonAdapterV1::new(uuid(SESSION)).unwrap();
+    assert_eq!(idle.reconcile_line(&line(&init)).unwrap(), expected);
+
+    let mut codec = ClaudeStreamJsonAdapterV1::new(uuid(SESSION)).unwrap();
+    codec.issue_turn(uuid(FIRST_MESSAGE), "first").unwrap();
+    let mut hook = init.clone();
+    hook["subtype"] = json!("hook_response");
+    assert_eq!(codec.reconcile_line(&line(&hook)).unwrap(), None);
+    for (field, value) in [
+        ("uuid", json!(Uuid::nil())),
+        ("uuid", json!(INITIALIZATION.to_uppercase())),
+        ("isReplay", json!(true)),
+        ("isSynthetic", json!(true)),
+        ("parent_tool_use_id", json!("toolu_fixture")),
+    ] {
+        let mut invalid = init.clone();
+        invalid[field] = value;
+        assert!(codec.reconcile_line(&line(&invalid)).is_err());
+    }
+    assert_eq!(codec.reconcile_line(&line(&init)).unwrap(), expected);
+    assert_eq!(codec.reconcile_line(&line(&init)).unwrap(), None);
+    assert_eq!(
+        codec
+            .reconcile_line(&line(&result(FIRST_MESSAGE, FIRST_RESULT)))
+            .unwrap(),
+        None
+    );
+    assert!(codec.issue_turn(uuid(SECOND_MESSAGE), "next").is_err());
+    assert_eq!(
+        codec
+            .reconcile_line(&line(&replay(FIRST_MESSAGE, json!("first"))))
+            .unwrap(),
+        Some(ClaudeObservationV1::ExactReplay {
+            message_uuid: uuid(FIRST_MESSAGE),
+        })
+    );
 }
 
 #[test]
@@ -277,6 +329,7 @@ fn divergent_session_init_fences_the_codec() {
         "type": "system",
         "subtype": "init",
         "session_id": OTHER_SESSION,
+        "uuid": INITIALIZATION,
     }));
     assert!(codec.reconcile_line(&foreign_init).is_err());
     assert!(
