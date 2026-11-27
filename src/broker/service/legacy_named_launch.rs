@@ -2,12 +2,14 @@
 use super::super::profile::LegacyNamedSource;
 use super::*;
 use crate::{
+    broker::clock::HostClock,
     broker::presence::LegacyNamedAdmissionOutcome,
     control::{
-        MutationReceiptV1, WorkerV1,
+        ArmSubjectV1, ArmV1, HelperPermissionV1, HelperPurposeV1, MutationReceiptV1,
+        WorkerMutationV1, WorkerStateV1, WorkerTransitionV1, WorkerV1,
         session_control::{
             LegacyConfirmedLaunchSpecV1, LegacyConfirmedPlanV1, LegacyNamedAdmissionReceiptV1,
-            LegacyNamedInitialDecisionV1,
+            LegacyNamedImportArmRequestV1, LegacyNamedInitialDecisionV1,
         },
     },
     model::Outcome,
@@ -105,6 +107,10 @@ pub(super) struct CreatedLegacyNamedImport {
     pub(super) admission: Box<AdmittedLegacyNamedLaunch>,
     pub(super) runtime: ManagedRuntime,
     pub(super) owned: OwnedContainerSnapshot,
+    /// The exact Writer prefix that reserved helper creation. This value is
+    /// available only after the matching Created observation was durably
+    /// acknowledged below; it never grants a runtime or enforcer capability.
+    writer_creation_prefix: crate::broker::checkpoint::LegacyNamedAdmissionCheckpoint,
 }
 
 impl Service {
@@ -488,11 +494,221 @@ impl Service {
                 admission: admitted,
                 runtime,
                 owned,
+                writer_creation_prefix: confirmed.clone(),
             })
         }
         .await;
         job.result(result.as_ref().err().copied());
         result
+    }
+
+    /// Derive the private prospective STOP target for the already-created
+    /// import helper. This is data only: no IPC, Core call, guardian action,
+    /// claim, or start capability is produced here.
+    #[allow(
+        dead_code,
+        reason = "the named Import Arm caller is composed separately"
+    )]
+    pub(super) fn prospective_legacy_named_import_target(
+        &self,
+        created: &CreatedLegacyNamedImport,
+    ) -> Result<crate::broker::enforcer::ProspectiveRegistrationV1, BrokerErrorCodeV1> {
+        let admitted = &created.admission;
+        let generation = admitted.running.generation();
+        require_generation(&admitted.job.cancel, generation)?;
+        if self.stopping.load(Ordering::SeqCst) || self.fenced.load(Ordering::SeqCst) {
+            return Err(BrokerErrorCodeV1::NeedsReconciliation);
+        }
+
+        let retained = &created.writer_creation_prefix;
+        let plan = &admitted.material.plan;
+        let scope = &admitted.request.verified.scope;
+        if plan.binding_ref.is_nil()
+            || plan.operation_id != admitted.accepted.operation_id()
+            || admitted.accepted.scope() != scope
+            || admitted.accepted.intent().legacy_named_plan() != Some(plan)
+            || plan.broker_profile_id != scope.profile_id()
+            || plan.control_namespace_uuid != scope.control_namespace_uuid().to_string()
+            || retained.plan() != plan
+        {
+            return Err(BrokerErrorCodeV1::Conflict);
+        }
+
+        let saved_receipt = retained
+            .receipt()
+            .ok_or(BrokerErrorCodeV1::NeedsReconciliation)?;
+        let saved_worker = saved_receipt
+            .admission
+            .worker
+            .as_ref()
+            .ok_or(BrokerErrorCodeV1::NeedsReconciliation)?;
+        if retained.archive_digest() != Some(admitted.archive_digest.as_str())
+            || !saved_receipt.admission.accepted
+            || saved_receipt.admission.refusal.is_some()
+            || canonical(saved_worker).map_err(jobs::journal_error)?
+                != canonical(&admitted.worker).map_err(jobs::journal_error)?
+            || canonical(&saved_receipt.admission.receipt).map_err(jobs::journal_error)?
+                != canonical(&admitted.reservation).map_err(jobs::journal_error)?
+            || retained.import_arm().is_some()
+        {
+            return Err(BrokerErrorCodeV1::Conflict);
+        }
+        let preparation = retained
+            .import_creation()
+            .ok_or(BrokerErrorCodeV1::NeedsReconciliation)?;
+        if preparation.owned().is_some() {
+            return Err(BrokerErrorCodeV1::Conflict);
+        }
+
+        let parent = &admitted.worker;
+        if parent.state != WorkerStateV1::Reserved
+            || !parent.quota_held
+            || admitted.reservation.worker_id.as_deref() != Some(parent.worker_id.as_str())
+            || admitted.reservation.revision != Some(parent.revision)
+            || parent.admission_operation_id != plan.operation_id.to_string()
+            || parent.launch.session_id != plan.session_id.to_string()
+            || parent.attempt.create_operation_id.is_some()
+            || parent.attempt.start_operation_id.is_some()
+        {
+            return Err(BrokerErrorCodeV1::Conflict);
+        }
+        let policy = preparation.policy();
+        if policy.purpose != HelperPurposeV1::Import
+            || policy.parent_worker_id != parent.worker_id
+            || policy.parent_attempt_id != parent.attempt.attempt_id
+            || policy.parent_spec_hash != parent.spec_hash
+            || policy.session_id != parent.launch.session_id
+            || policy.helper_id != created.owned.handle.operation_id().to_string()
+            || policy.timeout_seconds != 120
+        {
+            return Err(BrokerErrorCodeV1::Conflict);
+        }
+
+        let admission_permission = HelperPermissionV1::Admission {
+            receipt: admitted.reservation.clone(),
+        };
+        if canonical(preparation.permission()).map_err(jobs::journal_error)?
+            != canonical(&admission_permission).map_err(jobs::journal_error)?
+            || created.owned.handle.session_id() != plan.session_id
+            || created.owned.handle.authority_fingerprint()
+                != created.runtime.binding().fingerprint()
+            || created
+                .owned
+                .observation
+                .configuration_fingerprint
+                .is_none()
+            || created.owned.observation.restart_count != Some(0)
+            || created.owned.observation.process.running != Some(false)
+            || !matches!(
+                created.owned.observation.process.status.as_deref(),
+                Some("created" | "configured" | "initialized")
+            )
+            || created.owned.observation.process.started_at.is_some()
+            || created.owned.observation.process.finished_at.is_some()
+            || created.owned.observation.process.exit_code.is_some()
+        {
+            return Err(BrokerErrorCodeV1::Conflict);
+        }
+        retained
+            .require_import_creation_binding(created.runtime.binding())
+            .map_err(jobs::journal_error)?;
+
+        // Prepare is a pure projection from the retained Reserved worker. The
+        // durable Arm will use the projected revision, never a guessed +1.
+        let arm_id = LegacyNamedImportArmRequestV1::operation_id(
+            plan.binding_ref,
+            Uuid::parse_str(&parent.attempt.attempt_id).map_err(|_| BrokerErrorCodeV1::Conflict)?,
+        );
+        let prepare = WorkerMutationV1 {
+            version: 1,
+            operation_id: arm_id.clone(),
+            worker_id: parent.worker_id.clone(),
+            attempt_id: parent.attempt.attempt_id.clone(),
+            expected_revision: parent.revision,
+            transition: WorkerTransitionV1::Prepare,
+        };
+        let prepared = crate::audit::expected_worker_transition(parent, &prepare)
+            .map_err(|_| BrokerErrorCodeV1::NeedsReconciliation)?;
+        if prepared.state != WorkerStateV1::Preparing
+            || prepared.revision
+                != parent
+                    .revision
+                    .checked_add(1)
+                    .ok_or(BrokerErrorCodeV1::Conflict)?
+            || prepared.worker_id != parent.worker_id
+            || prepared.attempt.attempt_id != parent.attempt.attempt_id
+        {
+            return Err(BrokerErrorCodeV1::Conflict);
+        }
+
+        // Reuse the runner's pure normalization of runtime facts, then apply
+        // the helper policy's exact spec identity just as the helper executor
+        // does. `validate_inspection` rejects incomplete or divergent facts.
+        let inspection =
+            crate::runner::broker_helper_observation(parent, policy, &created.owned.observation)
+                .map_err(|_| BrokerErrorCodeV1::NeedsReconciliation)?
+                .inspection;
+        policy
+            .validate_inspection(&inspection)
+            .map_err(|_| BrokerErrorCodeV1::NeedsReconciliation)?;
+
+        let native_clock = crate::broker::clock::NativeHostClock::new()
+            .map_err(|_| BrokerErrorCodeV1::Unavailable)?;
+        let clock = native_clock
+            .sample()
+            .map_err(|_| BrokerErrorCodeV1::Unavailable)?;
+        let deadline = crate::broker::clock::checked_deadline(
+            clock
+                .continuous_ns()
+                .map_err(|_| BrokerErrorCodeV1::Unavailable)?,
+            policy.timeout_seconds,
+        )
+        .map_err(|_| BrokerErrorCodeV1::Unavailable)?;
+        let binding = created.runtime.binding();
+        let arm = ArmV1 {
+            version: 1,
+            operation_id: arm_id,
+            worker_id: parent.worker_id.clone(),
+            attempt_id: parent.attempt.attempt_id.clone(),
+            expected_revision: prepared.revision,
+            intent_hash: admitted.accepted.intent_hash().to_owned(),
+            subject: ArmSubjectV1::Helper {
+                helper_id: policy.helper_id.clone(),
+                purpose: HelperPurposeV1::Import,
+                policy_version: policy.version,
+                permission: Box::new(admission_permission),
+            },
+            inspection,
+            authority_binding_hash: binding.fingerprint(),
+            configuration_fingerprint_version: created
+                .owned
+                .observation
+                .configuration_fingerprint_version
+                .ok_or(BrokerErrorCodeV1::NeedsReconciliation)?,
+            configuration_fingerprint: created
+                .owned
+                .observation
+                .configuration_fingerprint
+                .clone()
+                .ok_or(BrokerErrorCodeV1::NeedsReconciliation)?,
+            clock,
+            timeout_seconds: policy.timeout_seconds,
+            deadline_ns_decimal: deadline.to_string(),
+        };
+        arm.validate()
+            .and_then(|_| arm.validate_for_parent(&prepared))
+            .map_err(|_| BrokerErrorCodeV1::NeedsReconciliation)?;
+
+        let target = crate::broker::enforcer::ProspectiveRegistrationV1::new(
+            hex::encode(Sha256::digest(scope.gateway_origin().as_bytes())),
+            scope.tenant_id().to_owned(),
+            arm,
+            binding.clone(),
+            created.owned.clone(),
+        )
+        .map_err(|_| BrokerErrorCodeV1::NeedsReconciliation)?;
+        require_generation(&admitted.job.cancel, generation)?;
+        Ok(target)
     }
 
     /// Settle a lost creation result from the original Writer intent. The

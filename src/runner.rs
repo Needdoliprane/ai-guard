@@ -30,6 +30,16 @@ pub(crate) fn relay_worker_inspection(
 ) -> anyhow::Result<crate::control::RuntimeInspectionV1> {
     managed::inspection(worker, observed)
 }
+/// Pure normalization of one already-owned broker helper observation. This
+/// projects runtime facts into the exact helper-policy inspection used by
+/// the runner; it does not authorize or start the helper.
+pub(crate) fn broker_helper_observation(
+    worker: &crate::control::WorkerV1,
+    policy: &crate::control::HelperExecutionPolicyV1,
+    observed: &crate::runtime::ContainerObservation,
+) -> anyhow::Result<crate::control::RuntimeObservationV1> {
+    managed::broker_helper_observation(worker, policy, observed)
+}
 pub(crate) mod relay_admission;
 // Consumed by the broker executor egress hook of the next slice.
 #[allow(dead_code)]
