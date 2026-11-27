@@ -908,11 +908,18 @@ mod tests {
                 Err(JournalError::Conflict)
             ));
 
-            writer
+            let stop_id = Uuid::new_v4();
+            let stop = writer
                 .stops()
-                .append_cancel(CancelInputV1::new(operation, Uuid::new_v4())?)
+                .append_cancel(CancelInputV1::new(operation, stop_id)?)
                 .await
                 .map_err(|failure| failure.error())?;
+            assert!(stop.incomplete());
+            assert!(stop.named_reservation().is_none());
+            assert!(stop.stops().is_empty());
+            let snapshot = writer.stops().recovery_status(operation).await?.unwrap();
+            assert!(snapshot.incomplete());
+            assert_eq!(snapshot.pending_arms(), 1);
             let (retained, receipt) = writer
                 .load_legacy_named_import_arm(operation)
                 .await?
@@ -930,6 +937,16 @@ mod tests {
             writer
                 .acknowledge_legacy_named_import_arm(operation, &retained, arm_result.clone())
                 .await?;
+            let replayed_stop = writer
+                .stops()
+                .cancel_stop_projection(operation, stop_id)
+                .await?
+                .unwrap();
+            assert!(replayed_stop.incomplete());
+            assert!(replayed_stop.named_reservation().is_none());
+            let snapshot = writer.stops().recovery_status(operation).await?.unwrap();
+            assert!(snapshot.incomplete());
+            assert_eq!(snapshot.pending_arms(), 0);
             let acknowledged = writer.load(operation).await?.unwrap();
             let (retained, receipt) = writer
                 .load_legacy_named_import_arm(operation)
