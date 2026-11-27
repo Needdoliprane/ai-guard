@@ -1093,6 +1093,7 @@ async fn legacy_named_admission_route_replays_the_committed_receipt_after_reopen
     use tower::ServiceExt;
 
     const RUNNER: &str = "synthetic-bootstrap-runner-identity-fixture";
+    const OTHER_BROKER: &str = "synthetic-bootstrap-other-broker-identity-fixture";
     let make_router = |store| {
         gateway_router(
             GatewayState::for_tenants(
@@ -1119,6 +1120,34 @@ async fn legacy_named_admission_route_replays_the_committed_receipt_after_reopen
     let f = Fixture::new();
     let (store, _) = f.provision(f.create().unwrap()).unwrap();
     let (request, _) = f.confirmed_request(&store);
+    let broker_id = Uuid::new_v4().to_string();
+    let incarnation_id = Uuid::new_v4().to_string();
+    let credential_id = Uuid::new_v4().to_string();
+    store
+        .issue_workload_binding(&WorkloadBindingIssueV1 {
+            operation_id: Uuid::new_v4().to_string(),
+            credential_id: credential_id.clone(),
+            subject: WorkloadSubjectV1::Broker {
+                broker_id: broker_id.clone(),
+                incarnation_id: incarnation_id.clone(),
+            },
+            sha256_digest: hex::encode(Sha256::digest(OTHER_BROKER)),
+            ..f.credential.clone()
+        })
+        .unwrap();
+    store
+        .mutate_broker_grant(&BrokerGrantMutationV1 {
+            operation_id: Uuid::new_v4().to_string(),
+            broker_id,
+            incarnation_id,
+            credential_id,
+            authorities: vec![BrokerAuthorityV1 {
+                authority_id: Uuid::new_v4().to_string(),
+                runtime_kind: BrokerRuntimeKindV1::Docker,
+            }],
+            ..f.grant.clone()
+        })
+        .unwrap();
     let store = Arc::new(store);
     let app = make_router(Arc::clone(&store));
     let path = format!(
@@ -1155,25 +1184,15 @@ async fn legacy_named_admission_route_replays_the_committed_receipt_after_reopen
     let error: Value =
         serde_json::from_slice(&to_bytes(response.into_body(), 65_536).await.unwrap()).unwrap();
     assert_eq!(error["error"]["code"], "named_admission_receipt_not_found");
-    let mut unrelated = request.clone();
-    unrelated.binding_ref = Uuid::new_v4();
-    let foreign = format!(
-        "/control/api/v1/control/session-confirmations/{}/admission/reconcile",
-        unrelated.binding_ref
-    );
     let response = app
         .clone()
-        .oneshot(post(
-            &foreign,
-            BROKER_TOKEN,
-            serde_json::to_vec(&unrelated).unwrap(),
-        ))
+        .oneshot(post(&reconciliation, OTHER_BROKER, body.clone()))
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
-    let error: Value =
+    let missing_before: Value =
         serde_json::from_slice(&to_bytes(response.into_body(), 65_536).await.unwrap()).unwrap();
-    assert_eq!(error["error"]["code"], "worker_not_found");
+    assert_eq!(missing_before["code"], "worker_not_found");
     assert_eq!(store.head().unwrap(), before);
     assert_eq!(
         store
@@ -1184,6 +1203,7 @@ async fn legacy_named_admission_route_replays_the_committed_receipt_after_reopen
     );
 
     let response = app
+        .clone()
         .oneshot(post(&private, BROKER_TOKEN, body.clone()))
         .await
         .unwrap();
@@ -1198,6 +1218,14 @@ async fn legacy_named_admission_route_replays_the_committed_receipt_after_reopen
     assert_eq!(receipt.grant.as_ref().unwrap().audit_seq, before + 2);
     assert_eq!(receipt.audit_seq, before + 3);
     assert_eq!(store.integrity().unwrap().head_hash, receipt.audit_hash);
+    let response = app
+        .oneshot(post(&reconciliation, OTHER_BROKER, body.clone()))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let missing_after: Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), 65_536).await.unwrap()).unwrap();
+    assert_eq!(missing_after, missing_before);
     drop(store);
 
     let reopened = Arc::new(f.reopen());
