@@ -273,7 +273,7 @@ impl Store {
             payload,
             capacity::Class::OrdinaryWrite,
             &clock,
-            Utc::now(),
+            chrono::Utc::now(),
         )?;
         tx.execute(
             "INSERT INTO legacy_session_prepare_meta(singleton,genesis_seq,genesis_hash) VALUES(1,?1,?2)",
@@ -340,7 +340,7 @@ impl Store {
             payload,
             capacity::Class::OrdinaryWrite,
             &clock,
-            Utc::now(),
+            chrono::Utc::now(),
         )?;
         let version = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
         validate_target_event(&tx, version, &stored)?;
