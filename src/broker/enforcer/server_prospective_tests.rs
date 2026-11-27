@@ -8,7 +8,9 @@ use crate::broker::{clock::checked_deadline, discovery::load_endpoint};
 use crate::control::{
     ArmReceiptV1, ArmSubjectV1, ArmV1, NetworkV1, RestartPolicyV1, RuntimeInspectionV1,
     RuntimeKindV1, SecurityPresetV1,
-    session_control::{LegacyConfirmedPlanV1, LegacyNamedImportArmRequestV1},
+    session_control::{
+        LegacyConfirmedPlanV1, LegacyNamedImportArmRequestV1, LegacyNamedImportClaimRequestV1,
+    },
 };
 use serde_json::json;
 use std::{
@@ -91,6 +93,29 @@ async fn rpc(root: &Directory, request: Request) -> Response {
         .await
         .unwrap();
     read_frame(&mut stream, MAX_FRAME, WAIT).await.unwrap()
+}
+async fn rpc_without_reading_reply(root: &Directory, request: Request) {
+    let endpoint = load_endpoint(root).unwrap().unwrap();
+    let endpoints = root.persistent_child("endpoints", false).unwrap().unwrap();
+    let mut stream = endpoint.connect_checked(&endpoints).await.unwrap();
+    let challenge: Challenge = read_frame(&mut stream, 1024, WAIT).await.unwrap();
+    assert_eq!(challenge.epoch, endpoint.epoch());
+    write_frame(
+        &mut stream,
+        &Authentication {
+            proof: proof(&capability(root, false).unwrap(), &challenge),
+        },
+        1024,
+        WAIT,
+    )
+    .await
+    .unwrap();
+    write_frame(&mut stream, &request, MAX_FRAME, WAIT)
+        .await
+        .unwrap();
+    // Deliberately drop the authenticated connection after the request is
+    // written. The caller observes the durable effect through the fixture,
+    // then retries the identical request on a new authenticated connection.
 }
 async fn reserve(root: &Directory, registration: &RegistrationV1) -> ProspectiveReservationV1 {
     match rpc(
@@ -217,6 +242,13 @@ pub(super) fn named_import_registration(root: &Path) -> (RegistrationV1, NamedIm
 }
 
 fn named_import_from(base: RegistrationV1) -> (RegistrationV1, NamedImportArmBirthV1) {
+    let (registration, birth, _) = named_import_from_with_plan(base);
+    (registration, birth)
+}
+
+fn named_import_from_with_plan(
+    base: RegistrationV1,
+) -> (RegistrationV1, NamedImportArmBirthV1, LegacyConfirmedPlanV1) {
     let scope = JournalScopeV1::new(
         Uuid::new_v4(),
         &base.tenant_id,
@@ -277,7 +309,7 @@ fn named_import_from(base: RegistrationV1) -> (RegistrationV1, NamedImportArmBir
         worker_id: arm.worker_id.clone(),
         attempt_id: arm.attempt_id.clone(),
         input_hash: arm.input_hash().unwrap(),
-        control_namespace_uuid: plan.control_namespace_uuid,
+        control_namespace_uuid: plan.control_namespace_uuid.clone(),
         audit_seq: 2,
         audit_hash: "3".repeat(64),
     };
@@ -290,7 +322,123 @@ fn named_import_from(base: RegistrationV1) -> (RegistrationV1, NamedImportArmBir
         base.owned,
     )
     .unwrap();
-    (registration, birth)
+    (registration, birth, plan)
+}
+
+async fn named_prepare_request(
+    native: &Arc<State>,
+    registration: &RegistrationV1,
+    plan: &LegacyConfirmedPlanV1,
+    reservation: &ProspectiveReservationV1,
+    custody_nonce: Uuid,
+    original_exchange_nonce: Uuid,
+) -> NamedImportPrepareV1 {
+    let arm_id = Uuid::parse_str(&registration.arm.operation_id).unwrap();
+    let helper_id = match &registration.arm.subject {
+        ArmSubjectV1::Helper {
+            helper_id,
+            purpose: crate::control::HelperPurposeV1::Import,
+            permission,
+            ..
+        } if matches!(
+            permission.as_ref(),
+            crate::control::HelperPermissionV1::Admission { .. }
+        ) =>
+        {
+            helper_id.clone()
+        }
+        _ => panic!("fixture must retain its exact Import helper Arm"),
+    };
+    let claim = LegacyNamedImportClaimRequestV1 {
+        version: 1,
+        binding_ref: plan.binding_ref,
+        namespace: plan.control_namespace_uuid.clone(),
+        claim: crate::control::HelperStartClaimV1 {
+            version: 1,
+            operation_id: LegacyNamedImportClaimRequestV1::operation_id(plan.binding_ref, arm_id),
+            helper_id,
+            emitter_id: Uuid::new_v4().to_string(),
+            arm_receipt: registration.receipt.clone(),
+            clock_check: native.clock.sample().unwrap(),
+        },
+    };
+    let mut request = NamedImportPrepareV1 {
+        reservation: reservation.clone(),
+        registration_hash: registration.digest().unwrap(),
+        generation: reservation.cancel_generation,
+        custody_nonce,
+        original_exchange_nonce,
+        claim,
+        receipt: crate::control::MutationReceiptV1 {
+            operation_id: String::new(),
+            worker_id: None,
+            revision: None,
+            input_hash: String::new(),
+            audit_seq: 0,
+            audit_hash: String::new(),
+        },
+    };
+    request.receipt = crate::control::MutationReceiptV1 {
+        operation_id: request.claim.claim.operation_id.clone(),
+        worker_id: Some(registration.arm.worker_id.clone()),
+        revision: None,
+        input_hash: request.claim.input_hash().unwrap(),
+        audit_seq: registration.receipt.audit_seq + 1,
+        audit_hash: "9".repeat(64),
+    };
+    request
+}
+
+async fn reserve_bind_named(
+    root: &Directory,
+    registration: &RegistrationV1,
+    birth: &NamedImportArmBirthV1,
+    custody_nonce: Uuid,
+) -> (ProspectiveReservationV1, Uuid) {
+    let reservation = match rpc(
+        root,
+        Request::ReserveNamedProspective {
+            prospective: Box::new(registration.prospective().unwrap()),
+            generation: 0,
+            custody_nonce,
+            birth: Box::new(birth.clone()),
+        },
+    )
+    .await
+    {
+        Response::ProspectiveReserved { reservation } => reservation,
+        _ => panic!("named reserve must retain its exact prospective target"),
+    };
+    let original_exchange_nonce = match rpc(
+        root,
+        Request::BeginNamedProspectiveArmExchange {
+            reservation: reservation.clone(),
+            generation: 0,
+            custody_nonce,
+        },
+    )
+    .await
+    {
+        Response::ProspectiveArmExchange {
+            original_exchange_nonce: Some(nonce),
+        } => nonce,
+        _ => panic!("named arm exchange must issue one nonce"),
+    };
+    assert!(matches!(
+        rpc(
+            root,
+            Request::BindNamedProspective {
+                reservation: reservation.clone(),
+                registration: Box::new(registration.clone()),
+                generation: 0,
+                original_exchange_nonce,
+                custody_nonce,
+            },
+        )
+        .await,
+        Response::Registered { value, replayed: false } if value.phase == SlotPhaseV1::Ready
+    ));
+    (reservation, original_exchange_nonce)
 }
 
 async fn exercise(mode: &str, parent: &Directory) {
@@ -873,6 +1021,190 @@ async fn exercise(mode: &str, parent: &Directory) {
         server.abort();
         return;
     }
+    if mode.starts_with("named_prepare_") {
+        // The only runtime is the existing software fixture. The Prepare and
+        // STOP assertions travel through the authenticated private endpoints;
+        // the fixture does not start a container or invoke an external engine.
+        let runtime = crate::runtime::Runtime::with_program(
+            crate::runtime::RuntimeKind::Docker,
+            &parent.path().join("engine"),
+        )
+        .unwrap();
+        let managed = ManagedRuntime::connect_docker_with_runtime(
+            Uuid::new_v4(),
+            "unix:///fixture/docker.sock",
+            runtime,
+        )
+        .await
+        .unwrap();
+        let (mut registration, birth, plan) =
+            named_import_from_with_plan(registration_with_authority(managed.binding().clone()));
+        if mode == "named_prepare_expired" {
+            let clock = native.clock.sample().unwrap();
+            registration.arm.timeout_seconds = 1;
+            registration.arm.clock = clock;
+            registration.arm.deadline_ns_decimal =
+                checked_deadline(registration.arm.clock.continuous_ns().unwrap(), 1)
+                    .unwrap()
+                    .to_string();
+            registration.receipt.input_hash = registration.arm.input_hash().unwrap();
+            registration.validate().unwrap();
+        }
+        let custody_nonce = Uuid::new_v4();
+        let (reservation, original_exchange_nonce) =
+            reserve_bind_named(&root, &registration, &birth, custody_nonce).await;
+        let pending = native
+            .pending(&reservation, LegacyProspectiveRailV1::Named(custody_nonce))
+            .unwrap();
+        assert!(pending.runtime_installed.load(Ordering::SeqCst));
+
+        let prepare = named_prepare_request(
+            &native,
+            &registration,
+            &plan,
+            &reservation,
+            custody_nonce,
+            original_exchange_nonce,
+        )
+        .await;
+
+        if mode == "named_prepare_stop_first" {
+            let facts = pending
+                .named_stop_anchor
+                .as_ref()
+                .unwrap()
+                .fixture_stop_facts(&pending.prospective);
+            let endpoint = NamedImportStopEndpoint::pin(&root, None).unwrap();
+            let key = capability(&root, false).unwrap();
+            endpoint.exchange(&facts, &key, || Ok(())).await.unwrap();
+            assert!(pending.state.lock().unwrap().stop_reserved);
+            expect_error(
+                rpc(
+                    &root,
+                    Request::PrepareNamedImport {
+                        request: Box::new(prepare),
+                    },
+                )
+                .await,
+                EnforcerError::NotReady,
+            );
+            let bound = pending
+                .state
+                .lock()
+                .unwrap()
+                .bound
+                .as_ref()
+                .unwrap()
+                .clone();
+            assert!(!bound.state.lock().unwrap().prepared_once);
+            let key = pending.fixture_exit_key();
+            wait_for(|| native.owners.keyed_finished(key)).await;
+            server.abort();
+            return;
+        }
+
+        if mode == "named_prepare_expired" {
+            let deadline = registration.arm.deadline_ns_decimal.parse::<u64>().unwrap();
+            wait_for(|| native.clock.sample().unwrap().continuous_ns().unwrap() >= deadline).await;
+            expect_error(
+                rpc(
+                    &root,
+                    Request::PrepareNamedImport {
+                        request: Box::new(prepare),
+                    },
+                )
+                .await,
+                EnforcerError::NotReady,
+            );
+            let bound = pending
+                .state
+                .lock()
+                .unwrap()
+                .bound
+                .as_ref()
+                .unwrap()
+                .clone();
+            assert!(!bound.state.lock().unwrap().prepared_once);
+            let key = pending.fixture_exit_key();
+            wait_for(|| native.owners.keyed_finished(key)).await;
+            server.abort();
+            return;
+        }
+
+        assert_eq!(mode, "named_prepare_success");
+        let valid_wire = serde_json::to_value(&prepare).unwrap();
+        let mut invalid: NamedImportPrepareV1 = serde_json::from_value(valid_wire.clone()).unwrap();
+        invalid.receipt.audit_hash = "a".repeat(64);
+        expect_error(
+            rpc(
+                &root,
+                Request::PrepareNamedImport {
+                    request: Box::new(invalid),
+                },
+            )
+            .await,
+            EnforcerError::Conflict,
+        );
+        assert!(
+            !pending
+                .state
+                .lock()
+                .unwrap()
+                .bound
+                .as_ref()
+                .unwrap()
+                .state
+                .lock()
+                .unwrap()
+                .prepared_once
+        );
+
+        // Model the caller losing the ACK after the guardian commits the
+        // one-shot Prepare. The second connection sends byte-equivalent input.
+        let dropped_request: Request = serde_json::from_value(json!({
+            "kind": "prepare_named_import",
+            "request": valid_wire.clone(),
+        }))
+        .unwrap();
+        let retry: Request = serde_json::from_value(json!({
+            "kind": "prepare_named_import",
+            "request": valid_wire,
+        }))
+        .unwrap();
+        rpc_without_reading_reply(&root, dropped_request).await;
+        wait_for(|| {
+            pending
+                .state
+                .lock()
+                .unwrap()
+                .bound
+                .as_ref()
+                .is_some_and(|actor| actor.state.lock().unwrap().prepared_once)
+        })
+        .await;
+        expect_error(rpc(&root, retry).await, EnforcerError::AlreadyPrepared);
+
+        // A successful Prepare never owns or delays STOP. The exact original
+        // guardian still accepts the separately authenticated STOP command.
+        let facts = pending
+            .named_stop_anchor
+            .as_ref()
+            .unwrap()
+            .fixture_stop_facts(&pending.prospective);
+        let endpoint = NamedImportStopEndpoint::pin(&root, None).unwrap();
+        let key = capability(&root, false).unwrap();
+        endpoint.exchange(&facts, &key, || Ok(())).await.unwrap();
+        let guarded = pending.state.lock().unwrap();
+        assert!(guarded.stop_reserved);
+        let bound = guarded.bound.as_ref().unwrap();
+        assert!(bound.stop.load(Ordering::SeqCst));
+        assert!(bound.state.lock().unwrap().prepared_once);
+        drop(guarded);
+        let key = pending.fixture_exit_key();
+        wait_for(|| native.owners.keyed_finished(key)).await;
+        server.abort();
+        return;
+    }
     if mode == "deadline" {
         let mut expiring = first;
         let clock = native.clock.sample().unwrap();
@@ -1281,7 +1613,7 @@ fn run_child(mode: &str) {
         .permissions(fs::Permissions::from_mode(0o700))
         .tempdir_in(private_tmp)
         .unwrap();
-    if mode == "named_reconnect" {
+    if mode == "named_reconnect" || mode.starts_with("named_prepare_") {
         let source = temp.path().join("engine.rs");
         let program = temp.path().join("engine");
         fs::write(
@@ -1355,6 +1687,12 @@ fn lost_begin_and_absent_replay_never_recreate_original() {
 #[test]
 fn named_guardian_custody_survives_authenticated_reconnect() {
     run_child("named_reconnect");
+}
+#[test]
+fn named_import_prepare_receipt_replay_and_stop_are_one_shot() {
+    run_child("named_prepare_success");
+    run_child("named_prepare_stop_first");
+    run_child("named_prepare_expired");
 }
 #[test]
 fn bind_keeps_actual_thread_runtime_key_and_failure_custody() {
