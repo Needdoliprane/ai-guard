@@ -282,13 +282,6 @@ fn require_launch_scope(
     Ok(())
 }
 
-fn initial_decision_request_id(binding_ref: Uuid) -> String {
-    crate::audit::session_prepare::bound_event_id(
-        b"ai-guard:legacy-named-initial-policy-request:v1",
-        binding_ref,
-    )
-}
-
 fn decode_initial_decision(
     presence: &PreparedPresence,
     material: &LegacyConfirmedLaunchSpecV1,
@@ -313,7 +306,6 @@ fn decode_initial_decision(
     if ignored
         || result.replayed != (status == StatusCode::OK)
         || result.binding_ref != material.plan.binding_ref
-        || request.request_id != initial_decision_request_id(material.plan.binding_ref)
         || request.command != material.launch.command
         || request.profile != material.launch.profile
         || request.session_id.as_deref() != Some(material.launch.session_id.as_str())
@@ -577,7 +569,7 @@ mod tests {
         let (_fixture, presence, material) = launch_material();
         let binding_ref = material.plan.binding_ref;
         let request = DecisionRequest {
-            request_id: initial_decision_request_id(binding_ref),
+            request_id: LegacyNamedInitialDecisionV1::request_id(binding_ref),
             profile: material.launch.profile.clone(),
             command: material.launch.command.clone(),
             project_id: None,
