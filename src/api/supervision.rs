@@ -156,14 +156,14 @@ async fn reserve(
     let request = parse_json(body)?;
     validate_before_policy(&s, &request)?;
     let operation_id = request.admission.operation_id.clone();
+    let session_id = request.admission.launch.session_id.clone();
     let replay = tenant
         .blocking(false, move |tenant| {
-            Ok(tenant
+            tenant
                 .store
                 .sqlite_api()?
-                .worker_operation(&operation_id)
-                .map_err(control_error)?
-                .is_some())
+                .manual_admission_replay(&operation_id, &session_id)
+                .map_err(control_error)
         })
         .await?;
     let (decision, jev) = if replay {

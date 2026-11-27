@@ -317,13 +317,27 @@ fn legacy_session_prepare_capability_is_explicit_and_survives_reopen() {
     assert!(upgraded.integrity().unwrap().valid);
 }
 
-#[test]
-fn legacy_session_target_is_provisioned_and_replayed_by_offline_control() {
+#[tokio::test]
+async fn legacy_local_confirmation_survives_reopen_without_admission() {
     use agentsandbox::{
+        api::{GatewayState, TenantGateway, gateway_router},
         broker_registry::{BrokerAuthorityV1, BrokerGrantMutationV1, BrokerRuntimeKindV1},
+        control::{
+            AdmissionV1, DecisionPhaseV1, DecisionReceiptV1, LaunchSpecV1, SupervisedAdmissionV1,
+            SupervisionProtocolV1,
+        },
+        model::DecisionRequest,
+        policy::{self, Policy},
         workload::{WorkloadBindingIssueV1, WorkloadSubjectV1},
     };
+    use axum::{
+        Router,
+        body::{Body, to_bytes},
+        http::{Request, StatusCode},
+    };
+    use std::sync::Arc;
     use std::{io::Write, os::unix::fs::OpenOptionsExt};
+    use tower::ServiceExt;
 
     let files = support::private_tempdir();
     let path = files.path().join("tenant.sqlite");
@@ -335,7 +349,13 @@ fn legacy_session_target_is_provisioned_and_replayed_by_offline_control() {
     store
         .enable_legacy_session_prepare_v1(&files.path().join("before-prepare.sqlite"))
         .unwrap();
-    let (_, membership) = preparation(&[HumanCapabilityV1::LaunchSession]);
+    let (mut provision, membership) = preparation(&[HumanCapabilityV1::LaunchSession]);
+    let credential = generate_local_credential().unwrap();
+    let IdentityChangeV1::Credential { binding, .. } = &mut provision.mutations[1].change else {
+        panic!("the fixture must retain its local credential");
+    };
+    binding.sha256_digest = hex::encode(Sha256::digest(credential.as_bytes()));
+    store.provision_local_human(&provision).unwrap();
     let broker_id = Uuid::new_v4();
     let incarnation_id = Uuid::new_v4();
     let credential_id = Uuid::new_v4();
@@ -442,6 +462,201 @@ fn legacy_session_target_is_provisioned_and_replayed_by_offline_control() {
     assert!(reopened.integrity().unwrap().valid);
     assert_eq!(reopened.head().unwrap(), before + 1);
     assert!(reopened.workers().unwrap().is_empty());
+
+    async fn call(
+        router: &Router,
+        path: &str,
+        credential: &str,
+        selected: Option<(&str, &serde_json::Value)>,
+    ) -> (StatusCode, serde_json::Value) {
+        let mut request = Request::builder()
+            .uri(path)
+            .header("authorization", format!("Bearer {credential}"));
+        let body = if let Some((context, input)) = selected {
+            request = request
+                .method("POST")
+                .header("x-aiguard-context", context)
+                .header("content-type", "application/json");
+            Body::from(serde_json::to_vec(input).unwrap())
+        } else {
+            Body::empty()
+        };
+        let response = router
+            .clone()
+            .oneshot(request.body(body).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), 65_536).await.unwrap();
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
+        )
+    }
+    let make_router = |store: Arc<Store>| {
+        gateway_router(
+            GatewayState::for_tenants(
+                vec![TenantGateway {
+                    tenant_id: "tenant-a".into(),
+                    store,
+                    runner_token: "synthetic-g04-runner".repeat(3),
+                    viewer_token: "synthetic-g04-viewer".repeat(3),
+                }],
+                agentsandbox::policy::Policy::default(),
+                None,
+                Redactor::new(vec![]),
+            )
+            .unwrap(),
+        )
+    };
+    let reopened = Arc::new(reopened);
+    let router = make_router(reopened.clone());
+    let (status, who) = call(&router, "/api/v1/human/identity", &credential, None).await;
+    assert_eq!(status, StatusCode::OK);
+    let context = who["contexts"][0]["id"].as_str().unwrap();
+    let prepare_op = Uuid::new_v4();
+    let prepared = serde_json::json!({
+        "version": 1, "operation_id": prepare_op, "launch_target_id": target_id, "expected_target_revision": 1,
+        "expires_at": (chrono::Utc::now() + chrono::Duration::minutes(2)).to_rfc3339(),
+    });
+    let (status, prepare_receipt) = call(
+        &router,
+        "/api/v1/human/legacy/sessions/prepare",
+        &credential,
+        Some((context, &prepared)),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the local Legacy Prepare route must retain the fixed target"
+    );
+    let confirm = serde_json::json!({
+        "version": 1, "operation_id": Uuid::new_v4(), "launch_target_id": target_id, "expected_target_revision": 1,
+        "preparation_operation_id": prepare_op, "preparation_input_hash": prepare_receipt["input_hash"],
+    });
+    let (status, receipt) = call(
+        &router,
+        "/api/v1/human/legacy/sessions/confirm",
+        &credential,
+        Some((context, &confirm)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(receipt["replayed"], false);
+    let session_id = receipt["session_id"].as_str().unwrap().to_owned();
+    let binding_ref = receipt["binding_ref"].as_str().unwrap();
+    assert!(Uuid::parse_str(binding_ref).is_ok());
+    let mut launch: LaunchSpecV1 =
+        serde_json::from_value(input["target"]["launch"].clone()).unwrap();
+    launch.session_id = session_id.clone();
+    let decision_request = DecisionRequest {
+        request_id: Uuid::new_v4().to_string(),
+        profile: launch.profile.clone(),
+        command: launch.command.clone(),
+        project_id: None,
+        sandbox_id: Some(session_id.clone()),
+        agent_id: None,
+        session_id: Some(session_id.clone()),
+        correlation_id: None,
+        trace_id: None,
+        human_approved: false,
+        approval_hash: None,
+        execution_mode: None,
+        provider_resolution: None,
+    };
+    let decision = reopened
+        .decision(
+            &decision_request,
+            Some((
+                policy::evaluate(&Policy::default(), &decision_request),
+                serde_json::Value::Null,
+            )),
+        )
+        .unwrap()
+        .unwrap();
+    let manual = SupervisedAdmissionV1 {
+        version: 1,
+        protocol: SupervisionProtocolV1::BrokerSupervisionV1,
+        intent_hash: "d".repeat(64),
+        admission: AdmissionV1 {
+            version: 1,
+            operation_id: Uuid::new_v4().to_string(),
+            launch,
+            receipt: DecisionReceiptV1 {
+                version: 1,
+                request_id: decision_request.request_id.clone(),
+                request_hash: policy::request_hash(&decision_request),
+                phase: DecisionPhaseV1::Initial,
+                audit_seq: decision.seq,
+                audit_hash: decision.hash,
+            },
+            decision_request,
+        },
+    };
+    manual.validate().unwrap();
+    let head = reopened.head().unwrap();
+    for (path, payload) in [
+        (
+            "/control/api/v1/workers/reservations",
+            serde_json::to_vec(&manual.admission).unwrap(),
+        ),
+        (
+            "/control/api/v1/workers/supervised-reservations",
+            serde_json::to_vec(&manual).unwrap(),
+        ),
+    ] {
+        let request = Request::post(path)
+            .header(
+                "authorization",
+                format!("Bearer {}", "synthetic-g04-runner".repeat(3)),
+            )
+            .header("content-type", "application/json")
+            .body(Body::from(payload))
+            .unwrap();
+        let response = router.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+    }
+    assert_eq!(reopened.head().unwrap(), head);
+    drop((router, reopened));
+    let reopened = Arc::new(
+        Store::open_existing_for_tenant(&path, "tenant-a", Redactor::new(vec![]), 1000).unwrap(),
+    );
+    let router = make_router(reopened.clone());
+    let (status, who) = call(&router, "/api/v1/human/identity", &credential, None).await;
+    assert_eq!(status, StatusCode::OK);
+    let head = reopened.head().unwrap();
+    let context = who["contexts"][0]["id"].as_str().unwrap();
+    let (status, replay) = call(
+        &router,
+        "/api/v1/human/legacy/sessions/confirm",
+        &credential,
+        Some((context, &confirm)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(replay["binding_ref"], binding_ref);
+    assert_eq!(replay["audit_hash"], receipt["audit_hash"]);
+    assert_eq!(replay["replayed"], true);
+    assert!(reopened.workers().unwrap().is_empty());
+    assert_eq!(
+        reopened
+            .worker_quota(&agentsandbox::control::QuotaPolicyV1::default())
+            .unwrap()
+            .held_workers,
+        0
+    );
+    assert!(
+        reopened
+            .identity_resource_grant(&ResourceRefV1 {
+                kind: ResourceKindV1::Session,
+                resource_id: session_id
+            })
+            .unwrap()
+            .is_none()
+    );
+    assert!(reopened.integrity().unwrap().valid);
+    assert_eq!(reopened.head().unwrap(), head);
 }
 
 /// A broad property: the downcast store also fails the schema checks of format 9.

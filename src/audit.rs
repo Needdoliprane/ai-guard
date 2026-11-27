@@ -199,7 +199,7 @@ pub(crate) mod identity;
 pub(crate) mod identity_markers;
 mod kubernetes_admission;
 pub(crate) mod kubernetes_session;
-mod legacy_session_prepare;
+pub(crate) mod legacy_session_prepare;
 mod metadata;
 mod review_access;
 mod review_authority;

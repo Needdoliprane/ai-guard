@@ -1037,6 +1037,13 @@ impl Store {
         };
         require_v3(&tx, access)?;
         let namespace = namespace(&tx)?;
+        if let Input::Admission(request) = &input {
+            super::legacy_session_prepare::protect_manual(
+                &tx,
+                &request.admission.operation_id,
+                &request.admission.launch.session_id,
+            )?;
+        }
         if let Some((stored, record)) = load_record(&tx, input.operation_id())? {
             admission_codec::require_replay(&record, &input, &input_hash)?;
             self.commit_checked(tx)?;

@@ -1399,14 +1399,14 @@ async fn reserve_worker(
     // Replays are checked inside the same durable operation. They do not make
     // another external policy call or grant a new start permission.
     let operation_id = admission.operation_id.clone();
+    let session_id = admission.launch.session_id.clone();
     let replay = tenant
         .blocking(false, move |tenant| {
-            Ok(tenant
+            tenant
                 .store
                 .sqlite_api()?
-                .worker_operation(&operation_id)
-                .map_err(control_error)?
-                .is_some())
+                .manual_admission_replay(&operation_id, &session_id)
+                .map_err(control_error)
         })
         .await?;
     let (decision, jev) = if replay {

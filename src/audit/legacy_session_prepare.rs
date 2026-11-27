@@ -7,6 +7,10 @@ use crate::{
 };
 use uuid::Uuid;
 
+mod confirmation;
+pub(crate) use confirmation::LegacySessionLocalProof;
+pub(super) use confirmation::{REFERENCE_KINDS, protect_manual, validate_reference_event};
+
 pub(super) const GENESIS_KIND: &str = "control.legacy_session_prepare.genesis";
 pub(super) const TARGET_KIND: &str = "control.legacy_session_prepare.target";
 const PROTOCOL: &str = "legacy_session_prepare_v1";

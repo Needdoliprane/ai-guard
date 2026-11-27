@@ -32,6 +32,10 @@ pub enum HumanCommand {
     Apply(ApplyArgs),
     /// Provision a fixed Legacy session target with the control stopped.
     ProvisionLegacySessionTarget(LegacySessionTargetArgs),
+    /// Retain a preparation for a fixed target as a locally authenticated human.
+    PrepareLegacySession(LegacySessionRequestArgs),
+    /// Confirm the exact retained Legacy preparation for later broker admission.
+    ConfirmLegacySession(LegacySessionRequestArgs),
     /// Display authenticated identity and the contexts offered by the control.
     Identity(ConnectionArgs),
     /// Read one authorized resource page, or list contexts when none is selected.
@@ -141,6 +145,15 @@ pub struct LegacySessionTargetArgs {
     /// Private JSON containing the exact target and its expected previous revision.
     #[arg(long)]
     pub target_file: PathBuf,
+}
+
+#[derive(Args)]
+pub struct LegacySessionRequestArgs {
+    #[command(flatten)]
+    pub context: ContextArgs,
+    /// Private JSON containing a typed request and its stable operation ID.
+    #[arg(long)]
+    pub request_file: PathBuf,
 }
 
 #[derive(Args)]
@@ -260,6 +273,8 @@ pub async fn execute(args: HumanArgs) -> Result<()> {
         HumanCommand::ProvisionLegacySessionTarget(args) => {
             offline::provision_legacy_session_target(args)
         }
+        HumanCommand::PrepareLegacySession(args) => http::prepare_legacy_session(args).await,
+        HumanCommand::ConfirmLegacySession(args) => http::confirm_legacy_session(args).await,
         HumanCommand::Identity(args) => http::identity(args).await,
         HumanCommand::Resources(args) => http::resources(args).await,
         HumanCommand::Events(args) => http::events(args).await,

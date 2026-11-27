@@ -1,5 +1,11 @@
-use super::{ConnectionArgs, EventsArgs, ResourcesArgs, SelectionArgs, View};
+use super::{
+    ConnectionArgs, EventsArgs, LegacySessionRequestArgs, ResourcesArgs, SelectionArgs, View,
+};
 use crate::{
+    control::session_control::{
+        LegacySessionConfirmationReceiptV1, SessionLaunchPrepareRequestV1, SessionLaunchRequestV1,
+        SessionPrepareReceiptV1, canonical_uuid,
+    },
     control_fs::{PrivateFile, absolute_path},
     identity::{
         HumanEventItemV1, HumanIdentityV1, HumanPageV1, HumanReadViewV1, HumanResourceItemV1,
@@ -283,6 +289,36 @@ impl Client {
             })?;
             request = request.header("X-AiGuard-Context", value);
         }
+        self.read_json(request).await
+    }
+
+    async fn post_legacy_session<T: DeserializeOwned>(
+        &self,
+        path: &'static str,
+        context: &str,
+        input: &impl serde::Serialize,
+    ) -> Result<T> {
+        self.revalidate()?;
+        validate_opaque(context)?;
+        let context = header::HeaderValue::from_str(context)
+            .map_err(|_| anyhow::anyhow!("invalid Legacy session context"))?;
+        let mut url = self.origin.clone();
+        url.set_path(path);
+        let request = self
+            .http
+            .post(url)
+            .header(header::AUTHORIZATION, self.authorization.clone())
+            .header(header::ACCEPT, "application/json")
+            .header(header::CACHE_CONTROL, "no-store")
+            .header("X-AiGuard-Context", context)
+            .json(input);
+        self.read_json(request).await.map(|(value, _)| value)
+    }
+
+    async fn read_json<T: DeserializeOwned>(
+        &self,
+        request: reqwest::RequestBuilder,
+    ) -> Result<(T, usize)> {
         let response = request.send().await.map_err(|_| {
             anyhow::anyhow!("human request failed: connection, TLS or timeout; retain the selected context and retry explicitly")
         })?;
@@ -349,6 +385,72 @@ impl Client {
             .map_err(|_| anyhow::anyhow!("human endpoint returned an invalid typed response"))?;
         Ok((value, bytes.len()))
     }
+}
+
+fn legacy_request<T: DeserializeOwned>(path: &std::path::Path) -> Result<T> {
+    let file = PrivateFile::open(&absolute_path(path)?, 4096)?;
+    ensure!(
+        file.bytes()
+            .iter()
+            .copied()
+            .find(|byte| !byte.is_ascii_whitespace())
+            == Some(b'{'),
+        "invalid Legacy session request file"
+    );
+    let input = serde_json::from_slice(file.bytes())
+        .map_err(|_| anyhow::anyhow!("invalid Legacy session request file"))?;
+    file.revalidate()?;
+    Ok(input)
+}
+
+pub(super) async fn prepare_legacy_session(args: LegacySessionRequestArgs) -> Result<()> {
+    let input: SessionLaunchPrepareRequestV1 = legacy_request(&args.request_file)?;
+    input.validate()?;
+    let client = Client::new(&args.context.connection)?;
+    let receipt: SessionPrepareReceiptV1 = client
+        .post_legacy_session(
+            "/api/v1/human/legacy/sessions/prepare",
+            &args.context.context,
+            &input,
+        )
+        .await?;
+    ensure!(
+        receipt.version == 1
+            && receipt.operation_id == input.operation_id
+            && receipt.launch_target_id == input.launch_target_id
+            && receipt.target_revision == input.expected_target_revision
+            && receipt.input_hash == input.input_hash()?
+            && receipt.expires_at == input.expires_at
+            && receipt.audit_seq > 0,
+        "Legacy preparation receipt does not identify the requested intent"
+    );
+    canonical_uuid(&receipt.preparation_id)?;
+    crate::control::hash(&receipt.audit_hash)?;
+    client.print_json(&client.sanitized(&receipt)?)
+}
+
+pub(super) async fn confirm_legacy_session(args: LegacySessionRequestArgs) -> Result<()> {
+    let input: SessionLaunchRequestV1 = legacy_request(&args.request_file)?;
+    input.validate()?;
+    let client = Client::new(&args.context.connection)?;
+    let receipt: LegacySessionConfirmationReceiptV1 = client
+        .post_legacy_session(
+            "/api/v1/human/legacy/sessions/confirm",
+            &args.context.context,
+            &input,
+        )
+        .await?;
+    ensure!(
+        receipt.version == 1
+            && receipt.operation_id == input.operation_id
+            && receipt.preparation_operation_id == input.preparation_operation_id
+            && receipt.audit_seq > 0,
+        "Legacy confirmation receipt does not identify the requested intent"
+    );
+    canonical_uuid(&receipt.binding_ref)?;
+    canonical_uuid(&receipt.session_id)?;
+    crate::control::hash(&receipt.audit_hash)?;
+    client.print_json(&client.sanitized(&receipt)?)
 }
 
 pub(super) fn build_http(origin: &Url, trust: &ClientTrust) -> Result<reqwest::Client> {

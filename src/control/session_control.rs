@@ -105,6 +105,21 @@ pub struct SessionPrepareReceiptV1 {
     pub replayed: bool,
 }
 
+/// A retained Legacy confirmation for broker admission. No runtime authority
+/// or session grant is conveyed by this receipt.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LegacySessionConfirmationReceiptV1 {
+    pub version: u32,
+    pub operation_id: Uuid,
+    pub preparation_operation_id: Uuid,
+    pub binding_ref: String,
+    pub session_id: String,
+    pub audit_seq: i64,
+    pub audit_hash: String,
+    pub replayed: bool,
+}
+
 /// The exact launch commit of one retained preparation. It names the launch
 /// operation (the idempotency key), the opaque target and its expected server
 /// revision, and the preparation it consumes by reference and exact fingerprint.

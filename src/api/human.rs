@@ -1393,9 +1393,102 @@ async fn session_conversation(
     .await
 }
 
+async fn legacy_session_write<T, R>(
+    state: GatewayState,
+    request: Request,
+    invalid: fn() -> (StatusCode, Json<Value>),
+    failure: fn(anyhow::Error) -> (StatusCode, Json<Value>),
+    apply: for<'a> fn(
+        &crate::audit::Store,
+        crate::audit::legacy_session_prepare::LegacySessionLocalProof<'a>,
+        T,
+    ) -> anyhow::Result<R>,
+) -> ApiResult<Json<R>>
+where
+    T: DeserializeOwned + Send + 'static,
+    R: Serialize + Send + 'static,
+{
+    if state.owned_human.is_some() {
+        return Err(super::human_sources::unavailable());
+    }
+    let (mut parts, body) = request.into_parts();
+    if super::oidc::human_bearer(&parts.headers)
+        .is_some_and(|token| !crate::identity::local_credential_format(token))
+    {
+        return Err(super::human_sources::unavailable());
+    }
+    let proof = VerifiedHuman::from_request_parts(&mut parts, &state).await?;
+    let HumanProofSource::Local(source) = proof.source else {
+        return Err(super::human_sources::unavailable());
+    };
+    let headers = parts.headers.clone();
+    let (_, input) = delegated_change_body(Request::from_parts(parts, body), 4096, invalid).await?;
+    let selected = headers.clone();
+    run_human(&state, &proof, Some(&headers), move |state, proof| {
+        let (context, tenant, scope) = selected_context(&state, &proof, &selected)?;
+        if state.tenants.get(source).map(|tenant| &tenant.tenant_id) != Some(&tenant.tenant_id) {
+            return Err(super::human_sources::unavailable());
+        }
+        let result = apply(
+            tenant.store.sqlite_api()?,
+            crate::audit::legacy_session_prepare::LegacySessionLocalProof {
+                scope: &scope,
+                digest: &proof.digest,
+                credential_id: &proof.credential.credential_id,
+                credential_revision: proof.credential.revision,
+                context_expires_at: &context.expires_at,
+            },
+            input,
+        )
+        .map_err(failure)?;
+        let value = serde_json::to_value(&result).map_err(|error| store_failure(error.into()))?;
+        if proof.redactor.value_unclipped(&value) != value {
+            return Err(super::human_sources::unavailable());
+        }
+        Ok(Json(result))
+    })
+    .await
+}
+
+async fn legacy_session_prepare(
+    State(state): State<GatewayState>,
+    request: Request,
+) -> ApiResult<Json<crate::control::session_control::SessionPrepareReceiptV1>> {
+    legacy_session_write(
+        state,
+        request,
+        invalid_session_prepare_request,
+        session_prepare_failure,
+        crate::audit::Store::legacy_session_prepare_local,
+    )
+    .await
+}
+
+async fn legacy_session_confirm(
+    State(state): State<GatewayState>,
+    request: Request,
+) -> ApiResult<Json<crate::control::session_control::LegacySessionConfirmationReceiptV1>> {
+    legacy_session_write(
+        state,
+        request,
+        invalid_session_launch_request,
+        session_launch_failure,
+        crate::audit::Store::legacy_session_confirm_local,
+    )
+    .await
+}
+
 pub(super) fn routes() -> Router<GatewayState> {
     Router::new()
         .route("/human/identity", get(identity))
+        .route(
+            "/human/legacy/sessions/prepare",
+            post(legacy_session_prepare),
+        )
+        .route(
+            "/human/legacy/sessions/confirm",
+            post(legacy_session_confirm),
+        )
         .route(
             "/human/owned/sessions/prepare",
             post(session_launch_prepare).layer(axum::extract::DefaultBodyLimit::max(

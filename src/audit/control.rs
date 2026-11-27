@@ -329,6 +329,10 @@ pub(super) fn validate(db: &Connection) -> anyhow::Result<()> {
             super::legacy_session_prepare::validate_target_event(db, version, &stored)?;
             continue;
         }
+        if super::legacy_session_prepare::REFERENCE_KINDS.contains(&stored.event.kind.as_str()) {
+            super::legacy_session_prepare::validate_reference_event(db, version, &stored)?;
+            continue;
+        }
         if stored.event.kind.starts_with("control.session_message.") {
             anyhow::ensure!(
                 super::session_prepare::format_admits(version),
@@ -905,6 +909,11 @@ impl Store {
             .map_err(|_| anyhow::anyhow!("audit lock poisoned"))?;
         let tx = self.begin_checked(&mut db)?;
         require_control(&tx)?;
+        super::legacy_session_prepare::protect_manual(
+            &tx,
+            &admission.operation_id,
+            &admission.launch.session_id,
+        )?;
         if let Some((stored, old)) = load_operation(&tx, &admission.operation_id)? {
             conflict(old.input_hash == input_hash && old.action == "admit")?;
             self.commit_checked(tx)?;
@@ -1089,6 +1098,16 @@ impl Store {
         Ok(())
     }
     pub fn worker_operation(&self, id: &str) -> anyhow::Result<Option<MutationReceiptV1>> {
+        self.worker_operation_impl(id, None)
+    }
+    pub(crate) fn manual_admission_replay(&self, id: &str, session: &str) -> anyhow::Result<bool> {
+        Ok(self.worker_operation_impl(id, Some(session))?.is_some())
+    }
+    fn worker_operation_impl(
+        &self,
+        id: &str,
+        manual_session: Option<&str>,
+    ) -> anyhow::Result<Option<MutationReceiptV1>> {
         uuid(id)?;
         let mut db = self
             .db
@@ -1096,6 +1115,9 @@ impl Store {
             .map_err(|_| anyhow::anyhow!("audit lock poisoned"))?;
         let tx = self.begin_checked(&mut db)?;
         require_control(&tx)?;
+        if let Some(session) = manual_session {
+            super::legacy_session_prepare::protect_manual(&tx, id, session)?;
+        }
         let result = supervision::operation_receipt(&tx, id)?;
         self.commit_checked(tx)?;
         Ok(result)
