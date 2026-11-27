@@ -1051,19 +1051,8 @@ async fn exercise(mode: &str, parent: &Directory) {
         )
         .await
         .unwrap();
-        let (mut registration, birth, plan) =
+        let (registration, birth, plan) =
             named_import_from_with_plan(registration_with_authority(managed.binding().clone()));
-        if mode == "named_prepare_expired" {
-            let clock = native.clock.sample().unwrap();
-            registration.arm.timeout_seconds = 5;
-            registration.arm.clock = clock;
-            registration.arm.deadline_ns_decimal =
-                checked_deadline(registration.arm.clock.continuous_ns().unwrap(), 5)
-                    .unwrap()
-                    .to_string();
-            registration.receipt.input_hash = registration.arm.input_hash().unwrap();
-            registration.validate().unwrap();
-        }
         let custody_nonce = Uuid::new_v4();
         let (reservation, original_exchange_nonce) =
             reserve_bind_named(&root, &registration, &birth, custody_nonce).await;
@@ -1117,23 +1106,24 @@ async fn exercise(mode: &str, parent: &Directory) {
         }
 
         if mode == "named_prepare_expired" {
-            let deadline = registration
-                .arm
-                .deadline_ns_decimal
-                .parse::<u128>()
+            // Keep the actual 120-second helper Arm and its receipt. Sample
+            // the exact deadline at the guarded operation without a wall
+            // clock wait or changing the live actor's clock.
+            let mut at_deadline = native.clock.sample().unwrap();
+            at_deadline
+                .continuous_ns_decimal
+                .clone_from(&registration.arm.deadline_ns_decimal);
+            let actor = native
+                .actor(registration.arm_id(), &prepare.registration_hash)
                 .unwrap();
-            assert!(prepare.claim.claim.clock_check.continuous_ns().unwrap() < deadline);
-            wait_for(|| native.clock.sample().unwrap().continuous_ns().unwrap() >= deadline).await;
-            expect_error(
-                rpc(
-                    &root,
-                    Request::PrepareNamedImport {
-                        request: Box::new(prepare),
-                    },
-                )
-                .await,
-                EnforcerError::NotReady,
-            );
+            assert!(!actor.stop.load(Ordering::SeqCst));
+            assert!(matches!(
+                native.prepare_named_import(&prepare, || Ok(at_deadline)),
+                Err(EnforcerError::NotReady)
+            ));
+            let status = actor.snapshot().unwrap();
+            assert_eq!(status.phase, SlotPhaseV1::Ready);
+            assert!(!status.prepared_once);
             let key = pending.fixture_exit_key();
             wait_for(|| native.owners.keyed_finished(key)).await;
             server.abort();

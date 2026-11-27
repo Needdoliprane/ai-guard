@@ -315,6 +315,7 @@ impl State {
     pub(super) fn prepare_named_import(
         &self,
         request: &NamedImportPrepareV1,
+        sample_clock: impl FnOnce() -> crate::broker::clock::ClockResult<HostClockSampleV1>,
     ) -> EnforcerResult<Response> {
         let pending = self.pending(
             &request.reservation,
@@ -368,7 +369,7 @@ impl State {
         if status.prepared_once {
             return Err(EnforcerError::AlreadyPrepared);
         }
-        let current = self.clock.sample().map_err(|_| EnforcerError::Unhealthy)?;
+        let current = sample_clock().map_err(|_| EnforcerError::Unhealthy)?;
         actor
             .registration
             .arm
