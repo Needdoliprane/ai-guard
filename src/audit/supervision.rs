@@ -1,7 +1,7 @@
 //! Audited supervision on explicitly admitted Store transactions. No automatic migration.
 use super::*;
 use crate::audit::{
-    legacy_session_prepare::{LEGACY_NAMED_ARM_KIND, LegacyNamedArmV1},
+    legacy_session_prepare::{LEGACY_NAMED_ARM_KIND, LegacyNamedArmV1, LegacyNamedCancelV1},
     supervision_admission::{self as admission_codec, Binding, receipt_for},
     supervision_genesis,
 };
@@ -80,6 +80,7 @@ pub(crate) enum Input {
     Bind(Box<BindLegacyIntentV1>),
     Arm(Box<ArmV1>),
     LegacyNamedArm(Box<LegacyNamedArmV1>),
+    LegacyNamedCancel(Box<LegacyNamedCancelV1>),
     WorkerClaim(Box<ArmedStartClaimV1>),
     HelperClaim(Box<HelperStartClaimV1>),
     HelperObservation(Box<HelperObservationV1>),
@@ -112,6 +113,7 @@ impl Input {
             Self::Bind(r) => &r.operation_id,
             Self::Arm(r) => &r.operation_id,
             Self::LegacyNamedArm(r) => &r.arm.operation_id,
+            Self::LegacyNamedCancel(r) => &r.request.mutation.operation_id,
             Self::WorkerClaim(r) => &r.operation_id,
             Self::HelperClaim(r) => &r.operation_id,
             Self::HelperObservation(r) => &r.operation_id,
@@ -126,6 +128,7 @@ impl Input {
             Self::Arm(_) => "arm",
             // The existing snapshot index includes this state transition.
             Self::LegacyNamedArm(_) => "prepare",
+            Self::LegacyNamedCancel(_) => "cancel_reserved",
             Self::WorkerClaim(_) => "armed_start_claim",
             Self::HelperClaim(_) => "helper_start_claim",
             Self::HelperObservation(_) => "helper_observe",
@@ -146,6 +149,7 @@ impl Input {
             Self::Bind(r) => r.input_hash(),
             Self::Arm(r) => r.input_hash(),
             Self::LegacyNamedArm(r) => r.input_hash(),
+            Self::LegacyNamedCancel(r) => r.input_hash(),
             Self::WorkerClaim(r) => r.input_hash(),
             Self::HelperClaim(r) => r.input_hash(),
             Self::HelperObservation(r) => r.input_hash(),
@@ -163,6 +167,7 @@ impl Input {
             Self::Bind(r) => Some(&r.worker_id),
             Self::Arm(r) => Some(&r.worker_id),
             Self::LegacyNamedArm(r) => Some(&r.arm.worker_id),
+            Self::LegacyNamedCancel(r) => Some(&r.request.mutation.worker_id),
             Self::WorkerClaim(r) => Some(&r.worker_id),
             Self::HelperClaim(r) => Some(&r.arm_receipt.worker_id),
             Self::HelperObservation(r) => Some(&r.arm_receipt.worker_id),
@@ -759,6 +764,16 @@ impl Replay {
                 worker_transition::replay_record(parent, prepared)?;
                 let worker = prepared.worker.as_ref().ok_or(ControlFailure::Conflict)?;
                 self.record_arm(db, stored, worker, &request.arm, true)?;
+            }
+            Input::LegacyNamedCancel(cancel) => {
+                let parent = self.parent(workers, &cancel.request.mutation.worker_id)?;
+                let transition = record
+                    .worker_record
+                    .as_ref()
+                    .ok_or(ControlFailure::Conflict)?;
+                legacy_session_prepare::validate_legacy_named_cancel(
+                    db, stored, cancel, parent, transition,
+                )?;
             }
             Input::HelperClaim(request) => {
                 invalid(record.worker_record.is_none())?;

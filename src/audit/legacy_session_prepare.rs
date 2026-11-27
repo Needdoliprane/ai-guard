@@ -10,12 +10,14 @@ use uuid::Uuid;
 #[cfg(test)]
 pub(super) mod bootstrap;
 mod confirmation;
+#[cfg(test)]
+pub(super) use confirmation::LegacyNamedCancelReservationV1;
 pub(super) use confirmation::{
     ADMITTED, LEGACY_NAMED_ARM_KIND, REFERENCE_KINDS, legacy_named_arm_predecessor, protect_manual,
     protect_manual_at, session_is_fenced, validate_admission_initiator,
-    validate_named_arm_initiator, validate_reference_event,
+    validate_legacy_named_cancel, validate_named_arm_initiator, validate_reference_event,
 };
-pub(crate) use confirmation::{LegacyNamedArmV1, LegacySessionLocalProof};
+pub(crate) use confirmation::{LegacyNamedArmV1, LegacyNamedCancelV1, LegacySessionLocalProof};
 
 pub(super) const GENESIS_KIND: &str = "control.legacy_session_prepare.genesis";
 pub(super) const TARGET_KIND: &str = "control.legacy_session_prepare.target";

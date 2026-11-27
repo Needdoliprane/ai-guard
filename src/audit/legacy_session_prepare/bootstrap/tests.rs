@@ -712,6 +712,141 @@ fn legacy_named_reservation_refuses_generic_prepare_and_stays_cancellable() {
 }
 
 #[test]
+fn legacy_named_cancel_releases_an_unarmed_reservation_after_revocation() {
+    let f = Fixture::new();
+    let (store, _) = f.provision(f.create().unwrap()).unwrap();
+    let (request, mut credential) = f.confirmed_request(&store);
+    let Some(AuthenticatedWorkload::Broker(broker)) =
+        store.authenticate_workload_token(BROKER_TOKEN).unwrap()
+    else {
+        panic!("fixture broker identity");
+    };
+    let policy = Policy::default();
+    let quota = QuotaPolicyV1::default();
+    let accepted = store
+        .admit_legacy_named(
+            &broker,
+            &request,
+            &policy,
+            policy::evaluate(&policy, &request.admission.admission.decision_request),
+            Value::Null,
+            &quota,
+        )
+        .unwrap()
+        .admission;
+    let reserved = accepted.worker.unwrap();
+    let cancel = LegacyNamedCancelReservationV1 {
+        version: 1,
+        binding_ref: request.binding_ref,
+        namespace: store
+            .supervision_state()
+            .unwrap()
+            .control_namespace_uuid
+            .unwrap(),
+        admission: accepted.receipt,
+        mutation: WorkerMutationV1 {
+            version: 1,
+            operation_id: Uuid::new_v4().to_string(),
+            worker_id: reserved.worker_id.clone(),
+            attempt_id: reserved.attempt.attempt_id.clone(),
+            expected_revision: reserved.revision,
+            transition: WorkerTransitionV1::CancelReserved,
+        },
+    };
+    credential.active = false;
+    credential.revision += 1;
+    let revoked = store
+        .mutate_identity(&IdentityMutationV1 {
+            version: 1,
+            actor: f.operator.clone(),
+            operation_id: Uuid::new_v4().to_string(),
+            change: IdentityChangeV1::Credential {
+                expected_revision: 1,
+                binding: credential,
+            },
+        })
+        .unwrap();
+    drop(store);
+
+    let store = f.reopen();
+    assert!(!store.supervision_state().unwrap().active);
+    let mut wrong_receipt = cancel.clone();
+    wrong_receipt.admission.audit_hash = "f".repeat(64);
+    assert_eq!(
+        store
+            .cancel_legacy_named_reservation(&broker, &wrong_receipt)
+            .unwrap_err()
+            .downcast_ref::<ControlFailure>(),
+        Some(&ControlFailure::Conflict)
+    );
+    let mut wrong_attempt = cancel.clone();
+    wrong_attempt.mutation.attempt_id = Uuid::new_v4().to_string();
+    assert!(
+        store
+            .cancel_legacy_named_reservation(&broker, &wrong_attempt)
+            .is_err()
+    );
+    let mut wrong_namespace = cancel.clone();
+    wrong_namespace.namespace = Uuid::new_v4().to_string();
+    assert!(
+        store
+            .cancel_legacy_named_reservation(&broker, &wrong_namespace)
+            .is_err()
+    );
+    *store.named_control_commit_observation.lock().unwrap() =
+        Some(crate::broker_registry::parse_time(DEADLINE).unwrap());
+    assert_eq!(
+        store
+            .cancel_legacy_named_reservation(&broker, &cancel)
+            .unwrap_err()
+            .downcast_ref::<WorkloadFailureV1>(),
+        Some(&WorkloadFailureV1::Unauthorized)
+    );
+    assert_eq!(store.integrity().unwrap().head_hash, revoked.audit_hash);
+    assert_eq!(store.worker_quota(&quota).unwrap().held_workers, 1);
+    assert!(
+        store
+            .worker_operation(&cancel.mutation.operation_id)
+            .unwrap()
+            .is_none()
+    );
+
+    let committed = store
+        .cancel_legacy_named_reservation(&broker, &cancel)
+        .unwrap();
+    assert!(committed.disposition.is_none());
+    assert_eq!(committed.worker.state, WorkerStateV1::Cancelled);
+    assert_eq!(committed.worker.revision, reserved.revision + 1);
+    assert_eq!(committed.receipt.input_hash, cancel.input_hash().unwrap());
+    assert_eq!(committed.receipt.audit_seq, revoked.audit_seq + 1);
+    assert_eq!(store.worker_quota(&quota).unwrap().held_workers, 0);
+    drop(store);
+
+    let reopened = f.reopen();
+    let replay = reopened
+        .cancel_legacy_named_reservation(&broker, &cancel)
+        .unwrap();
+    assert!(replay.disposition.is_none());
+    assert_eq!(replay.receipt, committed.receipt);
+    assert!(
+        reopened
+            .cancel_legacy_named_reservation(&broker, &wrong_receipt)
+            .is_err()
+    );
+    let mut other_operation = cancel.clone();
+    other_operation.mutation.operation_id = Uuid::new_v4().to_string();
+    assert!(
+        reopened
+            .cancel_legacy_named_reservation(&broker, &other_operation)
+            .is_err()
+    );
+    let integrity = reopened.integrity().unwrap();
+    assert!(integrity.valid);
+    assert_eq!(integrity.head_hash, committed.receipt.audit_hash);
+    assert_eq!(reopened.worker_quota(&quota).unwrap().held_workers, 0);
+}
+
+#[test]
 fn legacy_named_import_arm_preserves_its_prefix_and_closes_manual_claims() {
     let f = Fixture::new();
     let (store, _) = f.provision(f.create().unwrap()).unwrap();
@@ -762,7 +897,7 @@ fn legacy_named_import_arm_preserves_its_prefix_and_closes_manual_claims() {
             purpose: HelperPurposeV1::Import,
             policy_version: 1,
             permission: Box::new(HelperPermissionV1::Admission {
-                receipt: committed.admission.receipt,
+                receipt: committed.admission.receipt.clone(),
             }),
         },
         inspection: RuntimeInspectionV1 {
@@ -858,6 +993,27 @@ fn legacy_named_import_arm_preserves_its_prefix_and_closes_manual_claims() {
     assert_eq!(prepared.state, WorkerStateV1::Preparing);
     assert_eq!(prepared.revision, parent.revision + 1);
     assert!(prepared.quota_held);
+    let named_cancel = LegacyNamedCancelReservationV1 {
+        version: 1,
+        binding_ref: request.binding_ref,
+        namespace: namespace.clone(),
+        admission: committed.admission.receipt,
+        mutation: WorkerMutationV1 {
+            version: 1,
+            worker_id: prepared.worker_id.clone(),
+            attempt_id: prepared.attempt.attempt_id.clone(),
+            operation_id: Uuid::new_v4().to_string(),
+            expected_revision: prepared.revision,
+            transition: WorkerTransitionV1::CancelReserved,
+        },
+    };
+    assert_eq!(
+        store
+            .cancel_legacy_named_reservation(&broker, &named_cancel)
+            .unwrap_err()
+            .downcast_ref::<ControlFailure>(),
+        Some(&ControlFailure::Conflict)
+    );
     let generic_cancel = WorkerMutationV1 {
         version: 1,
         worker_id: prepared.worker_id.clone(),

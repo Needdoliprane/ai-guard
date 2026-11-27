@@ -11,7 +11,7 @@ use crate::{
 };
 use anyhow::{Context, Result};
 
-fn validate_identity(mutation: &WorkerMutationV1) -> Result<()> {
+pub(super) fn validate_identity(mutation: &WorkerMutationV1) -> Result<()> {
     invalid(mutation.version == 1 && mutation.expected_revision > 0)?;
     uuid(&mutation.operation_id)?;
     uuid(&mutation.worker_id)?;
