@@ -143,6 +143,32 @@ pub(crate) struct LegacyConfirmedPlanV1 {
     pub expires_at: chrono::DateTime<chrono::Utc>,
 }
 
+impl LegacyConfirmedPlanV1 {
+    /// Derive the policy input that the broker and Store must bind to this launch.
+    pub(crate) fn initial_decision_request(
+        &self,
+        launch: &LaunchSpecV1,
+    ) -> anyhow::Result<DecisionRequest> {
+        launch.validate()?;
+        launch.validate_supervised()?;
+        Ok(DecisionRequest {
+            request_id: LegacyNamedInitialDecisionV1::request_id(self.binding_ref),
+            profile: launch.profile.clone(),
+            command: launch.command.clone(),
+            project_id: None,
+            sandbox_id: None,
+            agent_id: None,
+            session_id: Some(self.session_id.to_string()),
+            correlation_id: Some(self.binding_ref.to_string()),
+            trace_id: None,
+            human_approved: false,
+            approval_hash: None,
+            execution_mode: None,
+            provider_resolution: launch.provider_resolution.clone(),
+        })
+    }
+}
+
 /// Private projection of the exact sandbox launch prepared for this broker.
 /// This carries no host source locator, credential or runtime permission.
 #[derive(Serialize, Deserialize)]

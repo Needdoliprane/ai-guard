@@ -29,29 +29,6 @@ fn decision_id(binding_ref: Uuid) -> String {
     key("ai-guard:legacy-named-initial-policy-event:v1", binding_ref)
 }
 
-fn request_for(
-    plan: &LegacyConfirmedPlanV1,
-    launch: &LaunchSpecV1,
-) -> anyhow::Result<DecisionRequest> {
-    launch.validate()?;
-    launch.validate_supervised()?;
-    Ok(DecisionRequest {
-        request_id: LegacyNamedInitialDecisionV1::request_id(plan.binding_ref),
-        profile: launch.profile.clone(),
-        command: launch.command.clone(),
-        project_id: None,
-        sandbox_id: None,
-        agent_id: None,
-        session_id: Some(plan.session_id.to_string()),
-        correlation_id: Some(plan.binding_ref.to_string()),
-        trace_id: None,
-        human_approved: false,
-        approval_hash: None,
-        execution_mode: None,
-        provider_resolution: launch.provider_resolution.clone(),
-    })
-}
-
 fn read_origin(
     stored: &StoredEvent,
     plan: &LegacyConfirmedPlanV1,
@@ -126,7 +103,7 @@ pub(super) fn require_admission_decision(
     let hash = &admission.receipt.request_hash;
     let source = receipt_source(tx, &admission.receipt)?;
     let stored = if source.event.data.get(LEGACY_NAMED_ORIGIN).is_some() {
-        let expected = request_for(&resolved.plan, &resolved.launch)?;
+        let expected = resolved.plan.initial_decision_request(&resolved.launch)?;
         conflict(hash == &policy::request_hash(&expected))?;
         let stored = lookup_named_decision(tx, resolved.plan.binding_ref, &expected, hash)?
             .ok_or(ControlFailure::InvalidRequest)?;
@@ -150,7 +127,7 @@ pub(super) fn validate_historical_admission(
     if source.event.data.get(LEGACY_NAMED_ORIGIN).is_none() {
         return Ok(());
     }
-    let expected = request_for(plan, &admission.launch)?;
+    let expected = plan.initial_decision_request(&admission.launch)?;
     let hash = policy::request_hash(&expected);
     conflict(admission.receipt.request_hash == hash)?;
     let stored = lookup_named_decision(db, plan.binding_ref, &expected, &hash)?
@@ -235,7 +212,7 @@ impl Store {
         Self::require_legacy_named_admission_format(&tx)?;
         let clock = workload::capture_control_time(&tx)?;
         let resolved = self.resolve_legacy_confirmed_plan(&tx, broker, binding_ref, &clock)?;
-        let request = request_for(&resolved.plan, &resolved.launch)?;
+        let request = resolved.plan.initial_decision_request(&resolved.launch)?;
         let hash = decision_codec::validate_request(&request, &self.redactor)?;
         let value = serde_json::to_value(&request)?;
         crate::control::invalid(

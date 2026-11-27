@@ -302,19 +302,14 @@ fn decode_initial_decision(
         serde_ignored::deserialize(value, |_| ignored = true)
             .map_err(|_| PresenceError::Protocol)?;
     result.validate().map_err(|_| PresenceError::Protocol)?;
-    let request = &result.request;
+    let expected = material
+        .plan
+        .initial_decision_request(&material.launch)
+        .map_err(|_| PresenceError::Protocol)?;
     if ignored
         || result.replayed != (status == StatusCode::OK)
         || result.binding_ref != material.plan.binding_ref
-        || request.command != material.launch.command
-        || request.profile != material.launch.profile
-        || request.session_id.as_deref() != Some(material.launch.session_id.as_str())
-        || request.project_id.is_some()
-        || request.sandbox_id.is_some()
-        || request.agent_id.is_some()
-        || request.trace_id.is_some()
-        || request.execution_mode.is_some()
-        || request.provider_resolution != material.launch.provider_resolution
+        || result.receipt.request_hash != crate::policy::request_hash(&expected)
     {
         return Err(PresenceError::Protocol);
     }
