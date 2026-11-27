@@ -17,7 +17,11 @@ mod admission;
 #[cfg(test)]
 mod tests;
 
-pub(in crate::audit) use admission::{ADMITTED, validate_admission_initiator};
+pub(crate) use admission::LegacyNamedArmV1;
+pub(in crate::audit) use admission::{
+    ADMITTED, LEGACY_NAMED_ARM_KIND, legacy_named_arm_predecessor, validate_admission_initiator,
+    validate_named_arm_initiator,
+};
 
 const PREPARED: &str = "control.legacy_session_prepare.prepared";
 const CONFIRMED: &str = "control.legacy_session_prepare.confirmed";

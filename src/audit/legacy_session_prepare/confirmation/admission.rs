@@ -13,7 +13,12 @@ use crate::{
     workload::WorkloadFailureV1,
 };
 
+mod arm;
 mod execution;
+pub(crate) use arm::LegacyNamedArmV1;
+pub(in crate::audit) use arm::{
+    LEGACY_NAMED_ARM_KIND, legacy_named_arm_predecessor, validate_named_arm_initiator,
+};
 
 pub(in crate::audit) const ADMITTED: &str = "control.legacy_session_prepare.admission";
 

@@ -355,6 +355,18 @@ pub(super) fn authorization_revision_before(db: &Connection, seq: i64) -> anyhow
 }
 
 impl Projection {
+    pub(super) fn require_resource_at(
+        &self,
+        expected: &ResourceGrantV1,
+        before_seq: i64,
+    ) -> anyhow::Result<()> {
+        invalid(
+            self.resources
+                .get(&expected.resource.key()?)
+                .is_some_and(|(grant, seq)| grant == expected && *seq < before_seq),
+        )
+    }
+
     pub(super) fn require_local_launch_at(
         &self,
         principal: &PrincipalRefV1,
@@ -418,18 +430,29 @@ pub(super) fn validate(db: &Connection) -> anyhow::Result<()> {
     let mut projection = Projection::default();
     let mut statement = db.prepare(
         "SELECT seq,received_at,prev_hash,hash,payload FROM events \
-         WHERE kind GLOB 'control.identity.*' OR kind=?1 ORDER BY seq",
+         WHERE kind GLOB 'control.identity.*' OR kind IN (?1,?2) ORDER BY seq",
     )?;
     let mut seen_genesis = false;
     let mut seen_human_access = false;
     let mut seen_broker_access = false;
     let mut seen_worker_access = false;
     let mut seen_rights_access = false;
-    for row in statement.query_map([legacy_session_prepare::ADMITTED], row_event)? {
+    for row in statement.query_map(
+        [
+            legacy_session_prepare::ADMITTED,
+            legacy_session_prepare::LEGACY_NAMED_ARM_KIND,
+        ],
+        row_event,
+    )? {
         let stored = row?;
         if stored.event.kind == legacy_session_prepare::ADMITTED {
             invalid(seen_rights_access && legacy_session_prepare::format_admits(version))?;
             legacy_session_prepare::validate_admission_initiator(db, &stored, &projection)?;
+            continue;
+        }
+        if stored.event.kind == legacy_session_prepare::LEGACY_NAMED_ARM_KIND {
+            invalid(seen_rights_access && legacy_session_prepare::format_admits(version))?;
+            legacy_session_prepare::validate_named_arm_initiator(db, &stored, &projection)?;
             continue;
         }
         if stored.event.kind == "control.identity.genesis" {

@@ -1,11 +1,14 @@
 use super::*;
 use crate::{
+    audit::{supervision_admission, worker_transition},
     broker_registry::BrokerAuthorityV1,
     control::{
-        AdmissionRefusalV1, AdmissionV1, ControlFailure, DecisionPhaseV1, DecisionReceiptV1,
-        LaunchSpecV1, NetworkV1, QuotaPolicyV1, RestartPolicyV1, SecurityPresetV1,
+        AdmissionRefusalV1, AdmissionV1, ArmReceiptV1, ArmSubjectV1, ArmV1, ControlFailure,
+        DecisionPhaseV1, DecisionReceiptV1, HelperPermissionV1, HelperPurposeV1,
+        HelperStartClaimV1, HostClockMethodV1, HostClockSampleV1, LaunchSpecV1, NetworkV1,
+        QuotaPolicyV1, RestartPolicyV1, RuntimeInspectionV1, SecurityPresetV1,
         SupervisedAdmissionV1, SupervisionProtocolV1, WorkerMutationV1, WorkerStateV1,
-        WorkerTransitionV1, WorkerV1,
+        WorkerTransitionV1, WorkerV1, helper_execution_policy_v1,
         session_control::{
             LegacyNamedSupervisedAdmissionV1, LegacySessionTargetV1, SessionLaunchPrepareRequestV1,
             SessionLaunchRequestV1, SessionLaunchTargetRecordV1,
@@ -707,6 +710,228 @@ fn legacy_named_reservation_refuses_generic_prepare_and_stays_cancellable() {
     let integrity = reopened.integrity().unwrap();
     assert!(integrity.valid);
     assert_eq!(integrity.head_hash, cancelled.receipt.audit_hash);
+}
+
+#[test]
+fn legacy_named_import_arm_preserves_its_prefix_and_closes_manual_claims() {
+    let f = Fixture::new();
+    let (store, _) = f.provision(f.create().unwrap()).unwrap();
+    let (request, mut credential) = f.confirmed_request(&store);
+    let Some(AuthenticatedWorkload::Broker(broker)) =
+        store.authenticate_workload_token(BROKER_TOKEN).unwrap()
+    else {
+        panic!("fixture broker identity");
+    };
+    let policy = Policy::default();
+    let quota = QuotaPolicyV1::default();
+    let committed = store
+        .admit_legacy_named(
+            &broker,
+            &request,
+            &policy,
+            policy::evaluate(&policy, &request.admission.admission.decision_request),
+            Value::Null,
+            &quota,
+        )
+        .unwrap();
+    let parent = committed.admission.worker.unwrap();
+    let helper_id = Uuid::new_v4();
+    let helper = helper_execution_policy_v1(&parent, HelperPurposeV1::Import, helper_id).unwrap();
+    let namespace = store
+        .supervision_state()
+        .unwrap()
+        .control_namespace_uuid
+        .unwrap();
+    let clock = HostClockSampleV1 {
+        version: 1,
+        method: HostClockMethodV1::DarwinMachContinuousV1,
+        boot_id: Uuid::new_v4().to_string(),
+        continuous_ns_decimal: "100000000000".into(),
+        observed_utc: None,
+    };
+    // The inspection describes a synthetic Created helper. No runtime
+    // observation, execution authority or cancellation proof is exercised.
+    let arm = ArmV1 {
+        version: 1,
+        operation_id: Uuid::new_v4().to_string(),
+        worker_id: parent.worker_id.clone(),
+        attempt_id: parent.attempt.attempt_id.clone(),
+        expected_revision: parent.revision + 1,
+        intent_hash: request.admission.intent_hash,
+        subject: ArmSubjectV1::Helper {
+            helper_id: helper_id.to_string(),
+            purpose: HelperPurposeV1::Import,
+            policy_version: 1,
+            permission: Box::new(HelperPermissionV1::Admission {
+                receipt: committed.admission.receipt,
+            }),
+        },
+        inspection: RuntimeInspectionV1 {
+            authority_id: helper.authority_id.clone(),
+            runtime_kind: helper.runtime_kind,
+            container_id: "d".repeat(64),
+            stable_name: helper.stable_name.clone(),
+            volume_name: helper.volume_name.clone(),
+            image_id: helper.image_id.clone(),
+            spec_hash: helper.spec_hash().unwrap(),
+            cpu_millis: helper.cpu_millis,
+            memory_bytes: helper.memory_bytes,
+            pids_limit: helper.pids_limit,
+            network: helper.network,
+            security_preset: helper.security_preset,
+            restart_policy: helper.restart_policy,
+        },
+        authority_binding_hash: "a".repeat(64),
+        configuration_fingerprint_version: 2,
+        configuration_fingerprint: "b".repeat(64),
+        clock: clock.clone(),
+        timeout_seconds: 120,
+        deadline_ns_decimal: "220000000000".into(),
+    };
+    let mutation = WorkerMutationV1 {
+        version: 1,
+        operation_id: arm.operation_id.clone(),
+        worker_id: parent.worker_id.clone(),
+        attempt_id: parent.attempt.attempt_id.clone(),
+        expected_revision: parent.revision,
+        transition: WorkerTransitionV1::Prepare,
+    };
+    let staged = {
+        let mut db = store.db.lock().unwrap();
+        let tx = store.begin_checked(&mut db).unwrap();
+        let control_time = workload::capture_control_time(&tx).unwrap();
+        store
+            .require_legacy_named_execution(
+                &tx,
+                &broker,
+                request.binding_ref,
+                &namespace,
+                &parent,
+                &control_time,
+            )
+            .unwrap();
+        let proof = LegacyNamedArmV1 {
+            version: 1,
+            binding_ref: request.binding_ref,
+            admission_fact_seq: committed.audit_seq,
+            admission_fact_hash: committed.audit_hash,
+            namespace: namespace.clone(),
+            session_id: parent.launch.session_id.clone(),
+            authorization_revision: identity::authorization_revision(&tx).unwrap(),
+            authorized_at: control_time.at(),
+            arm: arm.clone(),
+        };
+        let inner = worker_transition::build_record(
+            parent.clone(),
+            &mutation,
+            worker_transition::validate_input(&mutation, &store.redactor).unwrap(),
+        )
+        .unwrap();
+        let record = |proof| {
+            supervision_admission::Record::new(
+                supervision_admission::Input::LegacyNamedArm(Box::new(proof)),
+                Some(inner.clone()),
+            )
+        };
+        let mut wrong_namespace = proof.clone();
+        wrong_namespace.namespace = Uuid::new_v4().to_string();
+        {
+            let save_before = audit_head(&tx).unwrap();
+            assert!(
+                legacy_named_arm_predecessor(&tx, &wrong_namespace, &parent, save_before.0 + 1)
+                    .is_err()
+            );
+            assert_eq!(audit_head(&tx).unwrap(), save_before);
+        }
+        let staged = store
+            .persist_supervision_record(&tx, &record(proof))
+            .unwrap();
+        store.validate_supervision_write(&tx).unwrap();
+        store.commit_checked(tx).unwrap();
+        staged
+    };
+    let receipt = ArmReceiptV1 {
+        version: 1,
+        arm_id: arm.operation_id.clone(),
+        worker_id: arm.worker_id.clone(),
+        attempt_id: arm.attempt_id.clone(),
+        input_hash: arm.input_hash().unwrap(),
+        control_namespace_uuid: namespace,
+        audit_seq: staged.seq,
+        audit_hash: staged.hash.clone(),
+    };
+    let claim = HelperStartClaimV1 {
+        version: 1,
+        operation_id: Uuid::new_v4().to_string(),
+        helper_id: helper_id.to_string(),
+        emitter_id: Uuid::new_v4().to_string(),
+        arm_receipt: receipt,
+        clock_check: HostClockSampleV1 {
+            continuous_ns_decimal: "100000000001".into(),
+            ..clock
+        },
+    };
+    assert!(store.execution_arm(&arm.operation_id).unwrap().is_none());
+    assert_eq!(
+        store
+            .claim_helper_start(&claim)
+            .unwrap_err()
+            .downcast_ref::<ControlFailure>(),
+        Some(&ControlFailure::Conflict)
+    );
+    assert!(
+        store
+            .worker_operation(&claim.operation_id)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(store.head().unwrap(), staged.seq);
+    let prepared = store.worker(&parent.worker_id).unwrap().unwrap();
+    assert_eq!(prepared.state, WorkerStateV1::Preparing);
+    assert_eq!(prepared.revision, parent.revision + 1);
+    assert!(prepared.quota_held);
+    let generic_cancel = WorkerMutationV1 {
+        operation_id: Uuid::new_v4().to_string(),
+        expected_revision: prepared.revision,
+        transition: WorkerTransitionV1::CancelReserved,
+        ..mutation
+    };
+    assert_eq!(
+        store
+            .mutate_worker(&generic_cancel)
+            .unwrap_err()
+            .downcast_ref::<ControlFailure>(),
+        Some(&ControlFailure::Conflict)
+    );
+    assert_eq!(store.head().unwrap(), staged.seq);
+    assert_eq!(store.worker_quota(&quota).unwrap().held_workers, 1);
+
+    credential.active = false;
+    credential.revision += 1;
+    let revoked = store
+        .mutate_identity(&IdentityMutationV1 {
+            version: 1,
+            operation_id: Uuid::new_v4().to_string(),
+            actor: f.operator.clone(),
+            change: IdentityChangeV1::Credential {
+                expected_revision: 1,
+                binding: credential,
+            },
+        })
+        .unwrap();
+    drop(store);
+
+    let reopened = f.reopen();
+    let retained = reopened
+        .worker_operation(&arm.operation_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(retained.audit_seq, staged.seq);
+    assert_eq!(retained.audit_hash, staged.hash);
+    assert!(reopened.execution_arm(&arm.operation_id).unwrap().is_none());
+    assert!(reopened.integrity().unwrap().valid);
+    assert_eq!(reopened.head().unwrap(), revoked.audit_seq);
+    assert_eq!(reopened.worker_quota(&quota).unwrap().held_workers, 1);
 }
 
 #[test]

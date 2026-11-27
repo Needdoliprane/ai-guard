@@ -1,6 +1,7 @@
 //! Audited supervision on explicitly admitted Store transactions. No automatic migration.
 use super::*;
 use crate::audit::{
+    legacy_session_prepare::{LEGACY_NAMED_ARM_KIND, LegacyNamedArmV1},
     supervision_admission::{self as admission_codec, Binding, receipt_for},
     supervision_genesis,
 };
@@ -78,6 +79,7 @@ pub(crate) enum Input {
     Admission(Box<SupervisedAdmissionV1>),
     Bind(Box<BindLegacyIntentV1>),
     Arm(Box<ArmV1>),
+    LegacyNamedArm(Box<LegacyNamedArmV1>),
     WorkerClaim(Box<ArmedStartClaimV1>),
     HelperClaim(Box<HelperStartClaimV1>),
     HelperObservation(Box<HelperObservationV1>),
@@ -100,6 +102,7 @@ pub(super) fn worker_snapshot(stored: &StoredEvent) -> anyhow::Result<Option<Wor
 struct ArmEntry {
     request: ArmV1,
     receipt: ArmReceiptV1,
+    legacy_named: bool,
 }
 
 impl Input {
@@ -108,6 +111,7 @@ impl Input {
             Self::Admission(r) => &r.admission.operation_id,
             Self::Bind(r) => &r.operation_id,
             Self::Arm(r) => &r.operation_id,
+            Self::LegacyNamedArm(r) => &r.arm.operation_id,
             Self::WorkerClaim(r) => &r.operation_id,
             Self::HelperClaim(r) => &r.operation_id,
             Self::HelperObservation(r) => &r.operation_id,
@@ -120,6 +124,8 @@ impl Input {
             Self::Admission(_) => admission_codec::ACTION,
             Self::Bind(_) => "bind_intent",
             Self::Arm(_) => "arm",
+            // The existing snapshot index includes this state transition.
+            Self::LegacyNamedArm(_) => "prepare",
             Self::WorkerClaim(_) => "armed_start_claim",
             Self::HelperClaim(_) => "helper_start_claim",
             Self::HelperObservation(_) => "helper_observe",
@@ -130,6 +136,7 @@ impl Input {
     pub(in crate::audit) fn kind(&self) -> &'static str {
         match self {
             Self::Arm(_) => "control.execution.arm",
+            Self::LegacyNamedArm(_) => LEGACY_NAMED_ARM_KIND,
             _ => admission_codec::KIND,
         }
     }
@@ -138,6 +145,7 @@ impl Input {
             Self::Admission(r) => r.input_hash(),
             Self::Bind(r) => r.input_hash(),
             Self::Arm(r) => r.input_hash(),
+            Self::LegacyNamedArm(r) => r.input_hash(),
             Self::WorkerClaim(r) => r.input_hash(),
             Self::HelperClaim(r) => r.input_hash(),
             Self::HelperObservation(r) => r.input_hash(),
@@ -154,6 +162,7 @@ impl Input {
                 .map(|w| w.worker_id.as_str()),
             Self::Bind(r) => Some(&r.worker_id),
             Self::Arm(r) => Some(&r.worker_id),
+            Self::LegacyNamedArm(r) => Some(&r.arm.worker_id),
             Self::WorkerClaim(r) => Some(&r.worker_id),
             Self::HelperClaim(r) => Some(&r.arm_receipt.worker_id),
             Self::HelperObservation(r) => Some(&r.arm_receipt.worker_id),
@@ -183,7 +192,7 @@ fn load_record(db: &Connection, id: &str) -> anyhow::Result<Option<(StoredEvent,
         .map(|stored: StoredEvent| {
             conflict(matches!(
                 stored.event.kind.as_str(),
-                "control.execution.arm" | "control.supervision.transition"
+                "control.execution.arm" | LEGACY_NAMED_ARM_KIND | "control.supervision.transition"
             ))?;
             let record: Record = serde_json::from_value(stored.event.data.clone())?;
             invalid(record.version == 2 && record.input.kind() == stored.event.kind)?;
@@ -230,21 +239,34 @@ fn arm_entry(db: &Connection, id: &str) -> anyhow::Result<Option<ArmEntry>> {
     let Some((stored, record)) = load_record(db, id)? else {
         return Ok(None);
     };
-    let Input::Arm(request) = record.input else {
-        return Err(ControlFailure::Conflict.into());
+    let (request, legacy_named) = match record.input {
+        Input::Arm(request) => (*request, false),
+        Input::LegacyNamedArm(request) => (request.arm, true),
+        _ => return Err(ControlFailure::Conflict.into()),
     };
-    let request = *request;
-    let receipt = ArmReceiptV1 {
+    let receipt = arm_receipt(&request, &namespace(db)?, &stored)?;
+    Ok(Some(ArmEntry {
+        request,
+        receipt,
+        legacy_named,
+    }))
+}
+
+fn arm_receipt(
+    request: &ArmV1,
+    namespace: &str,
+    stored: &StoredEvent,
+) -> anyhow::Result<ArmReceiptV1> {
+    Ok(ArmReceiptV1 {
         version: 1,
         arm_id: request.operation_id.clone(),
         worker_id: request.worker_id.clone(),
         attempt_id: request.attempt_id.clone(),
         input_hash: request.input_hash()?,
-        control_namespace_uuid: namespace(db)?,
+        control_namespace_uuid: namespace.into(),
         audit_seq: stored.seq,
-        audit_hash: stored.hash,
-    };
-    Ok(Some(ArmEntry { request, receipt }))
+        audit_hash: stored.hash.clone(),
+    })
 }
 fn same_receipt(left: &MutationReceiptV1, right: &MutationReceiptV1) -> anyhow::Result<()> {
     invalid(serde_json::to_value(left)? == serde_json::to_value(right)?)
@@ -513,6 +535,11 @@ impl Replay {
         invalid(serde_json::to_value(given)? == serde_json::to_value(&entry.receipt)?)?;
         Ok(entry)
     }
+    fn checked_manual_arm(&self, given: &ArmReceiptV1) -> anyhow::Result<&ArmEntry> {
+        let entry = self.checked_arm(given)?;
+        conflict(!entry.legacy_named)?;
+        Ok(entry)
+    }
     fn permission(
         &self,
         db: &Connection,
@@ -582,6 +609,53 @@ impl Replay {
         }
         Ok(())
     }
+    fn record_arm(
+        &mut self,
+        db: &Connection,
+        stored: &StoredEvent,
+        parent: &WorkerV1,
+        request: &ArmV1,
+        legacy_named: bool,
+    ) -> anyhow::Result<()> {
+        self.bound(parent, &request.intent_hash)?;
+        request.validate_for_parent(parent)?;
+        self.permission(db, parent, request, stored.seq)?;
+        let subject_key = request.subject_key()?;
+        conflict(
+            !self.arms.contains_key(&request.operation_id)
+                && !self.arms.values().any(|entry| {
+                    entry
+                        .request
+                        .subject_key()
+                        .is_ok_and(|key| key == subject_key)
+                }),
+        )?;
+        let receipt = arm_receipt(request, &self.namespace, stored)?;
+        self.expected
+            .get_mut("execution_arms")
+            .context("missing table")?
+            .insert(
+                request.operation_id.clone(),
+                vec![
+                    sql_text(&request.operation_id),
+                    sql_text(&request.worker_id),
+                    sql_text(&request.attempt_id),
+                    sql_text(subject_key),
+                    sql_text(&receipt.input_hash),
+                    sql_text(serde_json::to_string(request)?),
+                    rusqlite::types::Value::Integer(stored.seq),
+                ],
+            );
+        self.arms.insert(
+            request.operation_id.clone(),
+            ArmEntry {
+                request: request.clone(),
+                receipt,
+                legacy_named,
+            },
+        );
+        Ok(())
+    }
     pub(super) fn apply(
         &mut self,
         db: &Connection,
@@ -605,7 +679,7 @@ impl Replay {
             }
             Input::WorkerClaim(request) => {
                 let parent = self.parent(workers, &request.worker_id)?;
-                let entry = self.checked_arm(&request.arm_receipt)?;
+                let entry = self.checked_manual_arm(&request.arm_receipt)?;
                 self.bound(parent, &entry.request.intent_hash)?;
                 request.validate_for_arm(&entry.request)?;
                 entry.request.validate_for_parent(parent)?;
@@ -660,49 +734,32 @@ impl Replay {
                     &parent.launch.session_id,
                     stored.seq,
                 )?;
-                self.bound(parent, &request.intent_hash)?;
-                request.validate_for_parent(parent)?;
-                self.permission(db, parent, request, stored.seq)?;
-                conflict(
-                    !self.arms.contains_key(&request.operation_id)
-                        && !self
-                            .arms
-                            .values()
-                            .any(|a| a.request.subject_key().ok() == request.subject_key().ok()),
+                self.record_arm(db, stored, parent, request, false)?;
+            }
+            Input::LegacyNamedArm(request) => {
+                let parent = self.parent(workers, &request.arm.worker_id)?;
+                legacy_session_prepare::legacy_named_arm_predecessor(
+                    db, request, parent, stored.seq,
                 )?;
-                let entry = ArmEntry {
-                    request: request.as_ref().clone(),
-                    receipt: ArmReceiptV1 {
-                        version: 1,
-                        arm_id: request.operation_id.clone(),
-                        worker_id: request.worker_id.clone(),
-                        attempt_id: request.attempt_id.clone(),
-                        input_hash: request.input_hash()?,
-                        control_namespace_uuid: self.namespace.clone(),
-                        audit_seq: stored.seq,
-                        audit_hash: stored.hash.clone(),
-                    },
-                };
-                self.expected
-                    .get_mut("execution_arms")
-                    .context("missing table")?
-                    .insert(
-                        request.operation_id.clone(),
-                        vec![
-                            sql_text(&request.operation_id),
-                            sql_text(&request.worker_id),
-                            sql_text(&request.attempt_id),
-                            sql_text(request.subject_key()?),
-                            sql_text(request.input_hash()?),
-                            sql_text(serde_json::to_string(request)?),
-                            rusqlite::types::Value::Integer(stored.seq),
-                        ],
-                    );
-                self.arms.insert(request.operation_id.clone(), entry);
+                let prepared = record
+                    .worker_record
+                    .as_ref()
+                    .ok_or(ControlFailure::Conflict)?;
+                conflict(
+                    prepared.action == "prepare"
+                        && prepared.operation_id == request.arm.operation_id
+                        && stored.event.session_id.as_deref() == Some(request.session_id.as_str())
+                        && stored.event.coverage == "observed"
+                        && request.authorized_at
+                            <= crate::broker_registry::parse_time(&stored.received_at)?,
+                )?;
+                worker_transition::replay_record(parent, prepared)?;
+                let worker = prepared.worker.as_ref().ok_or(ControlFailure::Conflict)?;
+                self.record_arm(db, stored, worker, &request.arm, true)?;
             }
             Input::HelperClaim(request) => {
                 invalid(record.worker_record.is_none())?;
-                let entry = self.checked_arm(&request.arm_receipt)?;
+                let entry = self.checked_manual_arm(&request.arm_receipt)?;
                 let parent = self.parent(workers, &entry.request.worker_id)?;
                 self.bound(parent, &entry.request.intent_hash)?;
                 request.validate_for_arm(&entry.request)?;
@@ -1078,6 +1135,20 @@ impl Store {
         {
             return Err(ControlFailure::SupervisionInactive.into());
         }
+        let claim_arm = match &input {
+            Input::WorkerClaim(request) => Some(&request.arm_receipt.arm_id),
+            Input::HelperClaim(request) => Some(&request.arm_receipt.arm_id),
+            _ => None,
+        };
+        if let Some(id) = claim_arm {
+            let named: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM worker_mutations m JOIN events e ON e.seq=m.event_seq
+                 WHERE m.operation_id=?1 AND e.kind=?2)",
+                params![id, LEGACY_NAMED_ARM_KIND],
+                |row| row.get(0),
+            )?;
+            conflict(!named)?;
+        }
         let worker_record = build(&tx)?;
         let record = Record::new(input, worker_record);
         let stored = self.persist_supervision_record(&tx, &record)?;
@@ -1196,16 +1267,7 @@ impl Store {
         Ok(ArmResultV1 {
             replayed: saved.replayed,
             arm: arm.as_ref().clone(),
-            receipt: ArmReceiptV1 {
-                version: 1,
-                arm_id: arm.operation_id.clone(),
-                worker_id: arm.worker_id.clone(),
-                attempt_id: arm.attempt_id.clone(),
-                input_hash: arm.input_hash()?,
-                control_namespace_uuid: saved.namespace,
-                audit_seq: saved.stored.seq,
-                audit_hash: saved.stored.hash,
-            },
+            receipt: arm_receipt(arm, &saved.namespace, &saved.stored)?,
         })
     }
     pub fn execution_arm(&self, id: &str) -> anyhow::Result<Option<ArmResultV1>> {
@@ -1237,11 +1299,13 @@ impl Store {
             None => self.begin_checked(&mut db)?,
         };
         require_v3(&tx, access)?;
-        let result = arm_entry(&tx, id)?.map(|entry| ArmResultV1 {
-            replayed: true,
-            arm: entry.request,
-            receipt: entry.receipt,
-        });
+        let result = arm_entry(&tx, id)?
+            .filter(|entry| !entry.legacy_named)
+            .map(|entry| ArmResultV1 {
+                replayed: true,
+                arm: entry.request,
+                receipt: entry.receipt,
+            });
         self.commit_checked(tx)?;
         Ok(result)
     }
