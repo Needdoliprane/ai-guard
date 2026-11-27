@@ -5,7 +5,10 @@ use crate::{
         egress_owner::resolve::{Resolver, ResolverConfigV1, SystemLookup},
         journal::JournalScopeV1,
     },
-    control::EgressLaunchV1,
+    control::{
+        EgressLaunchV1,
+        session_control::{SessionLaunchTargetSelectionV1, canonical_uuid},
+    },
     control_fs::{Directory, PrivateFile, absolute_path},
     provider::AuthPreference,
     runner::RunOptions,
@@ -24,6 +27,7 @@ use std::{
 use uuid::Uuid;
 
 const MAX_CONFIG_BYTES: u64 = 256 * 1024;
+const MAX_LEGACY_NAMED_SOURCES_PER_PROFILE: usize = 100;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -71,6 +75,7 @@ pub(super) struct Registry {
     pub(super) data: RegistryWireV1,
     start_profiles: BTreeMap<String, PrearmedStartProfile>,
     presence_profiles: BTreeMap<String, PathBuf>,
+    legacy_named_sources: BTreeMap<String, LegacyNamedSources>,
     gateway_trust: BTreeMap<String, crate::tls::ClientTrust>,
     relay_profiles: BTreeMap<String, RelayProfileV1>,
     egress_profiles: BTreeMap<String, EgressLaunchV1>,
@@ -147,11 +152,49 @@ struct ControlProfileV2 {
     #[serde(default)]
     presence_file: Option<PathBuf>,
     #[serde(default)]
+    legacy_named_sources: Vec<LegacyNamedSourceV1>,
+    #[serde(default)]
     gateway_ca_bundle_file: Option<PathBuf>,
     #[serde(default)]
     relay: Option<RelayProfileV1>,
     #[serde(default)]
     egress: Option<EgressLaunchV1>,
+}
+
+type LegacyNamedSources = BTreeMap<(Uuid, u64), PathBuf>;
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LegacyNamedSourceV1 {
+    launch_target_id: String,
+    target_revision: u64,
+    source: PathBuf,
+}
+
+impl LegacyNamedSourceV1 {
+    fn resolve(entries: Vec<Self>) -> Result<LegacyNamedSources> {
+        ensure!(
+            entries.len() <= MAX_LEGACY_NAMED_SOURCES_PER_PROFILE,
+            "named broker source count exceeds its bound"
+        );
+        let mut sources = LegacyNamedSources::new();
+        for entry in entries {
+            let target = SessionLaunchTargetSelectionV1::new(
+                canonical_uuid(&entry.launch_target_id)?,
+                entry.target_revision,
+            )?;
+            ensure!(
+                sources
+                    .insert(
+                        (target.launch_target_id(), target.expected_target_revision()),
+                        normalized(&entry.source)?,
+                    )
+                    .is_none(),
+                "duplicate named broker target revision"
+            );
+        }
+        Ok(sources)
+    }
 }
 
 #[derive(Deserialize)]
@@ -256,6 +299,7 @@ impl Registry {
             .map_err(|_| anyhow!("invalid private broker configuration"))?;
         let mut start_profiles = BTreeMap::new();
         let mut presence_profiles = BTreeMap::new();
+        let mut legacy_named_sources = BTreeMap::new();
         let mut gateway_ca_paths = BTreeMap::new();
         let mut relay_profiles = BTreeMap::new();
         let mut egress_profiles = BTreeMap::new();
@@ -273,6 +317,12 @@ impl Registry {
                     .map(Arc::new);
                 let mut profiles = Vec::with_capacity(wire.profiles.len());
                 for mut profile in wire.profiles {
+                    if !profile.legacy_named_sources.is_empty() {
+                        let sources = LegacyNamedSourceV1::resolve(std::mem::take(
+                            &mut profile.legacy_named_sources,
+                        ))?;
+                        legacy_named_sources.insert(profile.id.clone(), sources);
+                    }
                     if let Some(path) = &profile.gateway_ca_bundle_file {
                         gateway_ca_paths.insert(profile.id.clone(), normalized(path)?);
                     }
@@ -345,6 +395,17 @@ impl Registry {
         let mut ids = std::collections::HashSet::new();
         for profile in &mut data.profiles {
             profile.validate(data.installation_id, egress_resolver.as_deref())?;
+            if let Some(sources) = legacy_named_sources.get(&profile.id) {
+                for source in sources.values() {
+                    ensure!(
+                        profile
+                            .source_roots
+                            .iter()
+                            .any(|root| source.starts_with(root)),
+                        "named broker source is outside the profile source roots"
+                    );
+                }
+            }
             if let Some(relay) = relay_profiles.get(&profile.id) {
                 for operation in &relay.workload_operations {
                     for root in profile.source_roots.iter().chain(&profile.export_roots) {
@@ -401,6 +462,7 @@ impl Registry {
             data,
             start_profiles,
             presence_profiles,
+            legacy_named_sources,
             gateway_trust,
             relay_profiles,
             egress_profiles,
@@ -416,6 +478,40 @@ impl Registry {
             .find(|profile| profile.id == id)
             .ok_or_else(|| anyhow!("broker request is not authorized"))
     }
+    /// Retain the local source for the authenticated profile and exact target
+    /// selection. The caller supplies the scope and selection from Prepare.
+    #[allow(
+        dead_code,
+        reason = "the named broker preparation caller is a separate G04 integration"
+    )]
+    pub(super) fn open_legacy_named_source(
+        &self,
+        scope: &JournalScopeV1,
+        target: SessionLaunchTargetSelectionV1,
+    ) -> Result<AuthorizedSource> {
+        let profile = self.profile(scope.profile_id())?;
+        ensure!(
+            scope.installation_id() == self.data.installation_id
+                && scope.tenant_id() == profile.tenant_id
+                && scope.gateway_origin() == profile.gateway
+                && scope.control_namespace_uuid() == profile.control_namespace_uuid,
+            "named broker source scope does not match the operator profile"
+        );
+        let key = (target.launch_target_id(), target.expected_target_revision());
+        let path = self
+            .legacy_named_sources
+            .get(&profile.id)
+            .and_then(|sources| sources.get(&key))
+            .ok_or_else(|| anyhow!("named broker source has no matching target revision"))?;
+        self.source.revalidate()?;
+        self.source_directory.revalidate()?;
+        let source = AuthorizedSource::open(path, &profile.source_roots)
+            .map_err(|_| anyhow!("named broker source is unavailable or unsafe"))?;
+        self.source.revalidate()?;
+        self.source_directory.revalidate()?;
+        Ok(source)
+    }
+
     pub(super) fn start_profile(&self, id: &str) -> PrearmedStartProfile {
         self.start_profiles.get(id).copied().unwrap_or_default()
     }
@@ -724,22 +820,10 @@ mod tests {
     use serde_json::json;
     use std::os::unix::fs::PermissionsExt;
 
-    #[test]
-    fn registry_v2_accepts_explicit_minimal_docker_start_profile() {
-        let temporary = tempfile::Builder::new()
-            .prefix("broker-launch-registry-")
-            .permissions(std::fs::Permissions::from_mode(0o700))
-            .tempdir()
-            .unwrap_or_else(|_| panic!("private registry fixture directory unavailable"));
-        let base = temporary
-            .path()
-            .canonicalize()
-            .unwrap_or_else(|_| panic!("private registry fixture root unavailable"));
-        let directory = Directory::open_existing(&base)
-            .unwrap_or_else(|_| panic!("private registry fixture root unsafe"));
+    fn registry_fixture_v1(base: &Path) -> serde_json::Value {
         // These paths and the loopback/Unix endpoints are data only. Registry
         // parsing must not open a runner token, runtime program or endpoint.
-        let v1 = json!({
+        json!({
             "version": 1,
             "installation_id": "11111111-1111-4111-8111-111111111111",
             "root": base.join("broker-state"),
@@ -767,7 +851,129 @@ mod tests {
                 "export_roots": [base.join("export-not-opened")]
             }],
             "additional_control_secret_files": []
-        });
+        })
+    }
+
+    #[test]
+    fn registry_v2_resolves_only_the_exact_named_source_revision() -> Result<()> {
+        let temporary = tempfile::Builder::new()
+            .permissions(std::fs::Permissions::from_mode(0o700))
+            .tempdir()?;
+        let base = temporary.path().canonicalize()?;
+        let directory = Directory::open_existing(&base)?;
+        let source_root = base.join("source-not-opened");
+        let first = source_root.join("first");
+        let second = source_root.join("second");
+        let alias = source_root.join("alias");
+        std::fs::create_dir_all(&first)?;
+        std::fs::create_dir_all(&second)?;
+        std::os::unix::fs::symlink(&second, &alias)?;
+
+        let load = |wire: &serde_json::Value| -> Result<Registry> {
+            let name = format!("registry-{}.json", Uuid::new_v4());
+            let file = directory.persistent_create(&name, &serde_json::to_vec(wire)?)?;
+            file.persistent_sync()?;
+            directory.sync()?;
+            Registry::load(file.path())
+        };
+        let target_id = Uuid::new_v4();
+        let binding = |target_revision: u64, source: &Path| {
+            json!({
+                "launch_target_id": target_id,
+                "target_revision": target_revision,
+                "source": source,
+            })
+        };
+        let scope = JournalScopeV1::new(
+            "11111111-1111-4111-8111-111111111111".parse()?,
+            "tenant-launch-profile-test",
+            "http://127.0.0.1:8787",
+            "22222222-2222-4222-8222-222222222222".parse()?,
+            "strict-docker",
+        )?;
+        let select = |revision| SessionLaunchTargetSelectionV1::new(target_id, revision);
+        let mut wire = registry_fixture_v1(&base);
+        assert!(
+            load(&wire)?
+                .open_legacy_named_source(&scope, select(1)?)
+                .is_err()
+        );
+        wire["profiles"][0]["legacy_named_sources"] = json!([binding(1, &first)]);
+        assert!(load(&wire).is_err());
+        wire["version"] = json!(2);
+        wire["profiles"][0]["prearmed_start_profile"] = json!({"version": 1, "mode": "legacy"});
+        wire["profiles"][0]["legacy_named_sources"] =
+            json!([binding(1, &first), binding(2, &second), binding(3, &alias),]);
+        let registry = load(&wire)?;
+        let retained = registry.open_legacy_named_source(&scope, select(1)?)?;
+        assert_eq!(retained.path(), first.as_path());
+        retained.revalidate()?;
+        assert_eq!(
+            registry
+                .open_legacy_named_source(&scope, select(2)?)?
+                .path(),
+            second.as_path()
+        );
+        assert!(
+            registry
+                .open_legacy_named_source(&scope, select(3)?)
+                .is_err()
+        );
+        assert!(
+            registry
+                .open_legacy_named_source(&scope, select(4)?)
+                .is_err()
+        );
+        let foreign = JournalScopeV1::new(
+            scope.installation_id(),
+            scope.tenant_id(),
+            scope.gateway_origin(),
+            Uuid::new_v4(),
+            scope.profile_id(),
+        )?;
+        assert!(
+            registry
+                .open_legacy_named_source(&foreign, select(1)?)
+                .is_err()
+        );
+
+        wire["profiles"][0]["legacy_named_sources"] =
+            json!([binding(1, &first), binding(1, &second)]);
+        assert!(load(&wire).is_err());
+        wire["profiles"][0]["legacy_named_sources"] = json!([binding(1, &base.join("outside"))]);
+        assert!(load(&wire).is_err());
+        wire["profiles"][0]["legacy_named_sources"] = json!([binding(u64::MAX, &first)]);
+        assert!(load(&wire).is_err());
+        wire["profiles"][0]["legacy_named_sources"] = serde_json::Value::Array(
+            (1..=101)
+                .map(|revision| binding(revision, &first))
+                .collect(),
+        );
+        assert!(load(&wire).is_err());
+
+        std::fs::write(registry.source.path(), b"{}")?;
+        assert!(
+            registry
+                .open_legacy_named_source(&scope, select(1)?)
+                .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn registry_v2_accepts_explicit_minimal_docker_start_profile() {
+        let temporary = tempfile::Builder::new()
+            .prefix("broker-launch-registry-")
+            .permissions(std::fs::Permissions::from_mode(0o700))
+            .tempdir()
+            .unwrap_or_else(|_| panic!("private registry fixture directory unavailable"));
+        let base = temporary
+            .path()
+            .canonicalize()
+            .unwrap_or_else(|_| panic!("private registry fixture root unavailable"));
+        let directory = Directory::open_existing(&base)
+            .unwrap_or_else(|_| panic!("private registry fixture root unsafe"));
+        let v1 = registry_fixture_v1(&base);
         let v1_bytes = serde_json::to_vec(&v1).unwrap();
         let v1_file = directory
             .persistent_create("registry-v1.json", &v1_bytes)
