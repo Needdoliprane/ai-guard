@@ -415,6 +415,20 @@ impl LegacyNamedImportClaimRequestV1 {
         self.validate()?;
         content_hash("ai-guard:legacy-named-import-claim:v1", self)
     }
+
+    pub(crate) fn validate_receipt(
+        &self,
+        receipt: &super::MutationReceiptV1,
+    ) -> anyhow::Result<()> {
+        hash(&receipt.audit_hash)?;
+        conflict(
+            receipt.operation_id == self.claim.operation_id
+                && receipt.worker_id.as_deref() == Some(self.claim.arm_receipt.worker_id.as_str())
+                && receipt.revision.is_none()
+                && receipt.audit_seq > self.claim.arm_receipt.audit_seq
+                && receipt.input_hash == self.input_hash()?,
+        )
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
