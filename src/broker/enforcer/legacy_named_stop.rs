@@ -66,7 +66,7 @@ pub(super) struct NamedImportStopAnchorV1 {
 
 /// Receiver for the field-for-field projection from the verified STOP reader.
 /// Decoding carries no authority or proof of journal ancestry by itself.
-#[derive(Deserialize)]
+#[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct NamedImportStopFactsV1 {
     version: u32,
@@ -84,6 +84,12 @@ pub(super) struct NamedImportStopFactsV1 {
     arm_input_hash: String,
     owned_snapshot_hash: String,
     runtime_binding_hash: String,
+}
+
+impl NamedImportStopFactsV1 {
+    pub(super) fn arm_id(&self) -> &str {
+        &self.arm_id
+    }
 }
 
 impl NamedImportStopAnchorV1 {
@@ -189,6 +195,39 @@ impl NamedImportStopAnchorV1 {
             return Err(EnforcerError::Conflict);
         }
         Ok(())
+    }
+
+    #[cfg(test)]
+    pub(super) fn fixture_stop_facts(
+        &self,
+        target: &ProspectiveRegistrationV1,
+    ) -> NamedImportStopFactsV1 {
+        let command_id = Uuid::new_v4();
+        let cancel = LocalCommandV1::new(
+            self.birth.operation_id,
+            &target.arm().intent_hash,
+            command_id,
+            LocalCommandRequestV1::CancelRequested,
+        )
+        .unwrap();
+        NamedImportStopFactsV1 {
+            version: 1,
+            scope: self.birth.scope.clone(),
+            operation_id: self.birth.operation_id,
+            binding_ref: self.birth.binding_ref,
+            arm_pending_head: self.birth.arm_pending_head.clone(),
+            command_id,
+            command_input_hash: cancel.input_hash().to_owned(),
+            stop_head: RevisionRefV1::new(
+                self.birth.arm_pending_head.revision() + 1,
+                &"f".repeat(64),
+            )
+            .unwrap(),
+            arm_id: target.arm_id().to_owned(),
+            arm_input_hash: self.arm_input_hash.clone(),
+            owned_snapshot_hash: self.owned_snapshot_hash.clone(),
+            runtime_binding_hash: self.runtime_binding_hash.clone(),
+        }
     }
 }
 

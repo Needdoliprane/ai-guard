@@ -830,6 +830,36 @@ async fn exercise(mode: &str, parent: &Directory) {
         let calls = fs::read_to_string(parent.path().join("log")).unwrap();
         assert_eq!(calls.lines().count(), 2);
         assert!(calls.lines().all(|line| line.starts_with("info ")));
+        let facts = pending
+            .named_stop_anchor
+            .as_ref()
+            .unwrap()
+            .fixture_stop_facts(&pending.prospective);
+        let mut wrong = serde_json::to_value(&facts).unwrap();
+        wrong["command_input_hash"] = json!("4".repeat(64));
+        assert_eq!(
+            native.latch_named_import_stop(&serde_json::from_value(wrong).unwrap()),
+            Err(EnforcerError::Conflict)
+        );
+        assert!(!pending.state.lock().unwrap().stop_reserved);
+        native.latch_named_import_stop(&facts).unwrap();
+        native.latch_named_import_stop(&facts).unwrap();
+        let retained = native
+            .pending(
+                &pending.reservation,
+                LegacyProspectiveRailV1::Named(custody_a),
+            )
+            .unwrap();
+        assert!(Arc::ptr_eq(&retained, &pending));
+        let guarded = retained.state.lock().unwrap();
+        assert!(guarded.stop_reserved);
+        let bound = guarded.bound.as_ref().unwrap();
+        assert!(bound.stop.load(Ordering::SeqCst));
+        assert_eq!(
+            bound.registration.arm.deadline_ns_decimal,
+            pending.prospective.arm.deadline_ns_decimal
+        );
+        drop(guarded);
         let key = pending.fixture_exit_key();
         wait_for(|| native.owners.keyed_finished(key)).await;
         server.abort();

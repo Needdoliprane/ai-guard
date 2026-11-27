@@ -1,7 +1,7 @@
 //! Legacy native admission. DATA can rediscover an owner, never manufacture
 //! one. Every prospective, bound or restored target consumes this ONE registry.
 //! The real native thread/runtime/key and failure custody survive Bind.
-use super::super::legacy_named_stop::NamedImportStopAnchorV1;
+use super::super::legacy_named_stop::{NamedImportStopAnchorV1, NamedImportStopFactsV1};
 use super::*;
 use lifetime::ActorKey;
 use std::sync::Condvar;
@@ -306,6 +306,32 @@ impl ProspectiveActor {
 }
 
 impl State {
+    /// Latch one verified STOP on the original prospective owner. The
+    /// transport must authenticate the broker's verified journal projection.
+    #[allow(dead_code, reason = "the StopsOnly transport is composed separately")]
+    pub(super) fn latch_named_import_stop(
+        &self,
+        facts: &NamedImportStopFactsV1,
+    ) -> EnforcerResult<()> {
+        let _admission = self
+            .admission
+            .lock()
+            .map_err(|_| EnforcerError::Unhealthy)?;
+        let actor = self
+            .prospective
+            .lock()
+            .map_err(|_| EnforcerError::Unhealthy)?
+            .get(facts.arm_id())
+            .cloned()
+            .ok_or(EnforcerError::NotReady)?;
+        let anchor = actor
+            .named_stop_anchor
+            .as_ref()
+            .ok_or(EnforcerError::Conflict)?;
+        anchor.require_facts(facts, &actor.prospective)?;
+        actor.reserve_stop()
+    }
+
     pub(super) fn owned_active(&self) -> EnforcerResult<Option<u32>> {
         if self.owners.failed() {
             return Ok(None);
