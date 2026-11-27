@@ -444,7 +444,7 @@ fn next_window(
     Ok(window)
 }
 
-fn reserve_anonymous(registry: &mut Registry) -> ApiResult<()> {
+fn reserve_anonymous(oidc: &OidcGateway, registry: &mut Registry) -> ApiResult<()> {
     let anonymous = anonymous_slots(registry);
     let native = native_owners(registry).count();
     let new_sessions = registry.sessions.len()
@@ -461,7 +461,7 @@ fn reserve_anonymous(registry: &mut Registry) -> ApiResult<()> {
     {
         return Err(capacity());
     }
-    registry.rate = Some(next_window(registry, None, None, Instant::now())?);
+    registry.rate = Some(next_window(registry, None, None, oidc.admission_now())?);
     Ok(())
 }
 
@@ -469,7 +469,11 @@ struct NativeStart {
     window: StartWindow,
     tenant: Option<RegistryTenantKey>,
 }
-fn native_start_window(registry: &Registry, session: &Session) -> ApiResult<NativeStart> {
+fn native_start_window(
+    oidc: &OidcGateway,
+    registry: &Registry,
+    session: &Session,
+) -> ApiResult<NativeStart> {
     let owners: Vec<_> = native_owners(registry).collect();
     if owners.len() >= NATIVE_START_SLOTS
         || anonymous_slots(registry) + owners.len() >= VOLATILE_START_SLOTS
@@ -486,7 +490,7 @@ fn native_start_window(registry: &Registry, session: &Session) -> ApiResult<Nati
         .principal
         .key()
         .map_err(|_| credential_invalid())?;
-    let now = Instant::now();
+    let now = oidc.admission_now();
     if let Some(limits) = &registry.tenant_limits {
         if owners
             .iter()
@@ -1387,13 +1391,17 @@ pub(super) fn reap(oidc: &OidcGateway, registry: &mut Registry) -> ApiResult<()>
     registry
         .deliveries
         .retain(|_, entry| entry.created.elapsed() < Duration::from_secs(30));
-    reap_native_at(oidc, registry, Instant::now())?;
+    reap_native_at(oidc, registry, oidc.admission_now())?;
     let expired: Vec<_> = registry
         .native
         .iter()
-        .filter(|(_, entry)| {
-            entry.created.elapsed()
-                >= Duration::from_secs(if entry.previous.is_some() { 15 } else { 300 })
+        .filter(|(_, entry)| match &entry.previous {
+            Some(binding) => {
+                oidc.refresh_now(binding.kind)
+                    .saturating_duration_since(entry.created)
+                    >= Duration::from_secs(15)
+            }
+            None => entry.created.elapsed() >= Duration::from_secs(300),
         })
         .map(|(id, _)| *id)
         .collect();
@@ -1444,10 +1452,9 @@ pub(super) fn reap(oidc: &OidcGateway, registry: &mut Registry) -> ApiResult<()>
         .iter()
         .filter(|(_, session)| {
             session.rotating
-                && session
-                    .pending_refresh
-                    .as_ref()
-                    .is_none_or(|pending| Instant::now() >= pending.deadline)
+                && session.pending_refresh.as_ref().is_none_or(|pending| {
+                    oidc.refresh_now(session.binding.kind) >= pending.deadline
+                })
         })
         .map(|(id, _)| id.clone())
         .collect();
@@ -1546,7 +1553,7 @@ pub(super) async fn start(
             {
                 return Err(conflict());
             }
-            reserve_anonymous(&mut registry)?;
+            reserve_anonymous(&oidc, &mut registry)?;
             // A caller-created correlation cookie is ignored and replaced.
             // The durable intention is created only by install after verification.
             registry.transactions.insert(
@@ -1891,7 +1898,7 @@ fn native_intent_sync(
             let session_id = Uuid::new_v4();
             let mut registry = oidc.registry.lock().map_err(|_| audit_unavailable())?;
             reap(&oidc, &mut registry)?;
-            reserve_anonymous(&mut registry)?;
+            reserve_anonymous(&oidc, &mut registry)?;
             registry.native.insert(
                 intent_id,
                 NativeIntent {
@@ -1948,7 +1955,7 @@ fn native_intent_sync(
             let now = chrono::Utc::now().timestamp();
             let remaining = previous
                 .completion_deadline
-                .and_then(|deadline| deadline.checked_duration_since(Instant::now()))
+                .and_then(|deadline| deadline.checked_duration_since(oidc.admission_now()))
                 .filter(|remaining| remaining.as_secs() > 0)
                 .ok_or_else(credential_invalid)?;
             let expires_at = expiry(now.saturating_add(remaining.as_secs() as i64));
@@ -1982,7 +1989,10 @@ fn native_intent_sync(
             if let Some(binding) = &entry.previous {
                 let raw = bearer.ok_or_else(credential_invalid)?;
                 if Fingerprint::access_token(&raw) != binding.access_fingerprint
-                    || entry.created.elapsed() >= Duration::from_secs(15)
+                    || oidc
+                        .refresh_now(binding.kind)
+                        .saturating_duration_since(entry.created)
+                        >= Duration::from_secs(15)
                 {
                     return Err(credential_invalid());
                 }
@@ -2275,7 +2285,7 @@ fn begin_refresh(
     }
     oidc.active_binding(&session.binding)?;
     let native_window = if kind == SessionKind::NativeCli {
-        Some(native_start_window(&registry, session)?)
+        Some(native_start_window(oidc, &registry, session)?)
     } else {
         None
     };
@@ -2309,7 +2319,7 @@ fn begin_refresh(
     if !pending.inserted {
         return Err(conflict());
     }
-    let created = Instant::now();
+    let created = oidc.refresh_now(kind);
     let deadline = created
         + if kind == SessionKind::NativeCli {
             Duration::from_secs(15)
@@ -2403,7 +2413,7 @@ fn install_rotation(
 ) -> ApiResult<SessionBinding> {
     if operation
         .completion_deadline
-        .is_some_and(|deadline| Instant::now() >= deadline)
+        .is_some_and(|deadline| oidc.refresh_now(operation.binding.kind) >= deadline)
     {
         fail_refresh(oidc, operation, Outcome::Rejected, Reason::Expired)?;
         return Err(credential_invalid());
@@ -2501,11 +2511,11 @@ fn install_rotation(
     // Recheck the retained monotonic deadline at the durable install boundary.
     if operation
         .completion_deadline
-        .is_some_and(|deadline| Instant::now() >= deadline)
+        .is_some_and(|deadline| oidc.refresh_now(operation.binding.kind) >= deadline)
         || session
             .pending_refresh
             .as_ref()
-            .is_some_and(|pending| Instant::now() >= pending.deadline)
+            .is_some_and(|pending| oidc.refresh_now(operation.binding.kind) >= pending.deadline)
     {
         drop(registry);
         fail_refresh(oidc, operation, Outcome::Rejected, Reason::Expired)?;
@@ -2655,7 +2665,10 @@ pub(super) async fn rotate(
             let intent = registry.native.get(&body.intent_id).ok_or_else(conflict)?;
             let previous = intent.previous.as_ref().ok_or_else(conflict)?;
             if intent.action != Action::Refresh
-                || intent.created.elapsed() >= Duration::from_secs(15)
+                || oidc
+                    .refresh_now(previous.kind)
+                    .saturating_duration_since(intent.created)
+                    >= Duration::from_secs(15)
                 || previous.session_id != body.authentication_id
                 || previous.generation != body.generation
                 || previous.access_fingerprint != Fingerprint::access_token(&raw)
