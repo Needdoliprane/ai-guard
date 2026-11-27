@@ -34,9 +34,23 @@ pub(crate) struct LegacyNamedProspectiveReservation {
     expected: u64,
 }
 
+struct LegacyProspectiveEntry {
+    retained: Arc<LocalProspective>,
+    can_remove_before_send: bool,
+}
+
+impl LegacyProspectiveEntry {
+    fn share(&mut self) -> Arc<LocalProspective> {
+        // A second attempt may already have sent and dropped its reference.
+        // The current Arc count alone cannot recover that history.
+        self.can_remove_before_send = false;
+        Arc::clone(&self.retained)
+    }
+}
+
 pub(super) struct LegacyTransport {
     pub(super) recovery_budget: u32,
-    prospective: Mutex<BTreeMap<String, Arc<LocalProspective>>>,
+    prospective: Mutex<BTreeMap<String, LegacyProspectiveEntry>>,
     prearm_write_unknown: AtomicBool,
     // Exists only in the process that actually spawned this genuine fresh
     // child and matched its native epoch/nonce. Reconnection never creates it.
@@ -66,6 +80,31 @@ impl LegacyTransport {
             #[cfg(test)]
             fail_next_bind_before_connect: AtomicBool::new(false),
         }
+    }
+
+    fn remove_unsent_prospective(&self, retained: &Arc<LocalProspective>) -> EnforcerResult<()> {
+        let mut entries = self
+            .prospective
+            .lock()
+            .map_err(|_| EnforcerError::Unhealthy)?;
+        let arm = retained.target.arm_id();
+        let exclusive = entries.get(arm).is_some_and(|entry| {
+            entry.can_remove_before_send
+                && Arc::ptr_eq(&entry.retained, retained)
+                // The map and the failed attempt are the only owners.
+                && Arc::strong_count(retained) == 2
+                && !retained.bound.load(Ordering::SeqCst)
+        });
+        if exclusive
+            && retained
+                .reservation
+                .lock()
+                .map_err(|_| EnforcerError::Unhealthy)?
+                .is_none()
+        {
+            entries.remove(arm);
+        }
+        Ok(())
     }
 }
 impl EnforcerClient {
@@ -233,11 +272,13 @@ impl EnforcerClient {
                 .prospective
                 .lock()
                 .map_err(|_| BeforeSend(EnforcerError::Unhealthy))?;
-            if let Some(old) = map.get(target.arm_id()) {
-                if old.digest != digest || !Arc::ptr_eq(&old.generation.0, &generation.0) {
+            if let Some(old) = map.get_mut(target.arm_id()) {
+                if old.retained.digest != digest
+                    || !Arc::ptr_eq(&old.retained.generation.0, &generation.0)
+                {
                     return Err(BeforeSend(EnforcerError::Conflict));
                 }
-                Arc::clone(old)
+                old.share()
             } else {
                 if map.len() >= self.0.max_slots as usize {
                     return Err(BeforeSend(EnforcerError::Capacity));
@@ -250,31 +291,43 @@ impl EnforcerClient {
                     bound: AtomicBool::new(false),
                     original_exchange_nonce: Mutex::new(None),
                 });
-                map.insert(retained.target.arm_id().into(), Arc::clone(&retained));
+                map.insert(
+                    retained.target.arm_id().into(),
+                    LegacyProspectiveEntry {
+                        retained: Arc::clone(&retained),
+                        can_remove_before_send: named_expected.is_some(),
+                    },
+                );
                 retained
             }
         };
-        // The exact target is retained before capability/factory transport.
-        // Failure or a dropped waiter cannot erase this unknown admission.
-        self.legacy_capabilities().await.map_err(BeforeSend)?;
-        // A fresh reservation can already have lost its local generation
-        // while capabilities was in flight. Keep the post-ACK check for
-        // invalidation after this sample.
-        if !replay_only && retained.generation.current() != expected {
-            return Err(BeforeSend(EnforcerError::NotReady));
+        // Retain the exact target before transport. Only a proven BeforeSend
+        // can release an exclusive named entry.
+        let attempt = async {
+            self.legacy_capabilities().await.map_err(BeforeSend)?;
+            // Generation may have changed during the capabilities request.
+            if !replay_only && retained.generation.current() != expected {
+                return Err(BeforeSend(EnforcerError::NotReady));
+            }
+            self.0
+                .request_reservation(
+                    Request::ReserveProspective {
+                        prospective: Box::new(retained.target.clone()),
+                        generation: expected,
+                        replay_only,
+                    },
+                    REGISTER_TIMEOUT,
+                    named_expected.map(|expected| (&retained.generation, expected)),
+                )
+                .await
         }
-        let (reply, negotiated) = self
-            .0
-            .request_reservation(
-                Request::ReserveProspective {
-                    prospective: Box::new(retained.target.clone()),
-                    generation: expected,
-                    replay_only,
-                },
-                REGISTER_TIMEOUT,
-                named_expected.map(|expected| (&retained.generation, expected)),
-            )
-            .await?;
+        .await;
+        if named_expected.is_some() && matches!(&attempt, Err(BeforeSend(_))) {
+            legacy
+                .remove_unsent_prospective(&retained)
+                .map_err(BeforeSend)?;
+        }
+        let (reply, negotiated) = attempt?;
         let reservation = match reply {
             Response::ProspectiveReserved { reservation } => reservation,
             Response::ProspectiveRefused { code, motif } => {
@@ -330,20 +383,21 @@ impl EnforcerClient {
         target: &ProspectiveRegistrationV1,
         generation: &CancelGeneration,
     ) -> EnforcerResult<Arc<LocalProspective>> {
-        let retained = self
+        let digest = target.digest()?;
+        let mut entries = self
             .legacy_transport()?
             .prospective
             .lock()
-            .map_err(|_| EnforcerError::Unhealthy)?
-            .get(target.arm_id())
-            .cloned()
+            .map_err(|_| EnforcerError::Unhealthy)?;
+        let entry = entries
+            .get_mut(target.arm_id())
             .ok_or(EnforcerError::NotReady)?;
-        if retained.digest != target.digest()?
-            || !Arc::ptr_eq(&retained.generation.0, &generation.0)
+        if entry.retained.digest != digest
+            || !Arc::ptr_eq(&entry.retained.generation.0, &generation.0)
         {
             return Err(EnforcerError::Conflict);
         }
-        Ok(retained)
+        Ok(entry.share())
     }
     pub(crate) async fn legacy_begin_prospective_arm_exchange(
         &self,
@@ -510,17 +564,21 @@ impl EnforcerClient {
         target: &ProspectiveRegistrationV1,
         generation: u64,
     ) -> EnforcerResult<()> {
-        let retained = self
-            .legacy_transport()?
-            .prospective
-            .lock()
-            .map_err(|_| EnforcerError::Unhealthy)?
-            .get(target.arm_id())
-            .cloned()
-            .ok_or(EnforcerError::NotReady)?;
-        if retained.digest != target.digest()? {
-            return Err(EnforcerError::Conflict);
-        }
+        let digest = target.digest()?;
+        let retained = {
+            let mut entries = self
+                .legacy_transport()?
+                .prospective
+                .lock()
+                .map_err(|_| EnforcerError::Unhealthy)?;
+            let entry = entries
+                .get_mut(target.arm_id())
+                .ok_or(EnforcerError::NotReady)?;
+            if entry.retained.digest != digest {
+                return Err(EnforcerError::Conflict);
+            }
+            entry.share()
+        };
         retained
             .original_exchange_nonce
             .lock()
@@ -564,7 +622,7 @@ impl Client {
             .prospective
             .lock()
             .map_err(|_| EnforcerError::Unhealthy)?;
-        match map.get(registration.arm_id()) {
+        match map.get(registration.arm_id()).map(|entry| &entry.retained) {
             Some(retained) if !retained.bound.load(Ordering::SeqCst) => {
                 retained.target.matches_registration(registration)?;
                 Ok(false)
@@ -588,8 +646,8 @@ impl Client {
             .prospective
             .lock()
             .map_err(|_| EnforcerError::Unhealthy)?
-            .get(registration.arm_id())
-            .cloned();
+            .get_mut(registration.arm_id())
+            .map(LegacyProspectiveEntry::share);
         let Some(retained) = retained.filter(|retained| !retained.bound.load(Ordering::SeqCst))
         else {
             // This also constrains an older live daemon: receipt-only generic
@@ -644,6 +702,7 @@ impl Client {
             .map_err(|_| EnforcerError::Unhealthy)?;
         if prospective.values().any(|entry| {
             entry
+                .retained
                 .reservation
                 .lock()
                 .map_or(true, |value| value.is_none())
@@ -658,13 +717,13 @@ impl Client {
     }
     pub(super) fn legacy_bound(&self, arm_id: &str) -> EnforcerResult<()> {
         if let Some(legacy) = &self.legacy
-            && let Some(retained) = legacy
+            && let Some(entry) = legacy
                 .prospective
                 .lock()
                 .map_err(|_| EnforcerError::Unhealthy)?
                 .get(arm_id)
         {
-            retained.bound.store(true, Ordering::SeqCst);
+            entry.retained.bound.store(true, Ordering::SeqCst);
         }
         Ok(())
     }
@@ -705,8 +764,40 @@ async fn named_reservation_retains_stale_ack_without_issuing_stop() -> anyhow::R
     let target = registration(root.path()).prospective()?;
     let generation = CancelGeneration::new();
     let expected = generation.current();
-    let (held, resume) = fixture.pause_reserve_ack();
     let observation = async {
+        let unsent = registration(root.path()).prospective()?;
+        let unsent_generation = CancelGeneration::new();
+        let (held, resume) = fixture.pause_capabilities_reply();
+        let reserve_never_sent = client.legacy_reserve_named_prospective(
+            unsent.clone(),
+            &unsent_generation,
+            unsent_generation.current(),
+        );
+        tokio::pin!(reserve_never_sent);
+        tokio::select! {
+            _ = &mut reserve_never_sent => anyhow::bail!("reservation did not reach the capabilities barrier"),
+            held = tokio::time::timeout(IO_TIMEOUT, held) => held??,
+        }
+        unsent_generation.invalidate();
+        resume.send(()).map_err(|_| EnforcerError::Unavailable)?;
+        let before_send = tokio::time::timeout(REGISTER_TIMEOUT, reserve_never_sent).await?.err();
+        anyhow::ensure!(
+            before_send == Some(LegacyNamedProspectiveFailure::BeforeSend(EnforcerError::NotReady)),
+            "the revoked generation did not stop before the reservation write"
+        );
+        anyhow::ensure!(
+            fixture.reserve_requests() == 0 && fixture.pending_reservation(unsent.arm_id()).is_none(),
+            "the unsent attempt left a native reservation"
+        );
+        let local_slots = {
+            let slots = client.0.slots.lock().map_err(|_| EnforcerError::Unhealthy)?;
+            client.0.legacy_known_slots(&slots)?
+        };
+        anyhow::ensure!(local_slots == 0, "the unsent attempt retained local capacity");
+
+        // The sole slot is available to the next exact request. Once its ACK
+        // exists, invalidation must preserve the reservation for durable STOP.
+        let (held, resume) = fixture.pause_reserve_ack();
         let reserve =
             client.legacy_reserve_named_prospective(target.clone(), &generation, expected);
         tokio::pin!(reserve);
