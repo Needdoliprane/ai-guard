@@ -470,6 +470,33 @@ impl LegacyNamedAdmissionCheckpoint {
             .map(|saved| (saved.request(), saved.receipt()))
     }
 
+    /// Build the evidence for a separate verification Arm from the exact
+    /// acknowledged Import result. Store still checks the current parent.
+    #[allow(dead_code, reason = "the separate verification Arm is composed next")]
+    pub(crate) fn import_verification_permission(&self) -> JournalResult<HelperPermissionV1> {
+        let (request, Some(receipt)) = self
+            .import_observation(LegacyNamedImportObservationPhaseV1::Terminal)
+            .ok_or(JournalError::Conflict)?
+        else {
+            return Err(JournalError::Conflict);
+        };
+        self.validate_import_observation_request(request)?;
+        checked(request.validate_receipt(receipt))?;
+        ensure(request.observation.observation.exit_code == Some(0))?;
+        Ok(HelperPermissionV1::ImportVerification {
+            import_helper_id: request.observation.helper_id.clone(),
+            import_arm: request.observation.arm_receipt.clone(),
+            import_terminal: receipt.clone(),
+            manifest_digest: self
+                .request
+                .admission
+                .admission
+                .launch
+                .workspace_manifest_digest
+                .clone(),
+        })
+    }
+
     /// Persist the exact observation payload before it is submitted to Store.
     /// Reconciliation reuses this identity; it cannot manufacture an Arm or
     /// a launch permission.
@@ -2276,6 +2303,10 @@ mod tests {
                 .is_some()
         );
         assert!(matches!(
+            terminal_first.import_verification_permission(),
+            Err(JournalError::Conflict)
+        ));
+        assert!(matches!(
             terminal_first.with_import_observation(started_request.clone()),
             Err(JournalError::Conflict)
         ));
@@ -2291,6 +2322,41 @@ mod tests {
             audit_seq: claim_receipt.audit_seq + 2,
             audit_hash: "e".repeat(64),
         };
+        let verified_prefix = observation_base
+            .clone()
+            .with_import_observation(terminal_request.clone())?
+            .acknowledge_import_observation(&terminal_request, terminal_receipt.clone())?;
+        let reopened: LegacyNamedAdmissionCheckpoint =
+            serde_json::from_slice(&canonical(&verified_prefix)?)?;
+        assert!(equal(
+            &reopened.import_verification_permission()?,
+            &HelperPermissionV1::ImportVerification {
+                import_helper_id: terminal_request.observation.helper_id.clone(),
+                import_arm: arm_result.receipt.clone(),
+                import_terminal: terminal_receipt.clone(),
+                manifest_digest: accepted
+                    .request()
+                    .admission
+                    .admission
+                    .launch
+                    .workspace_manifest_digest
+                    .clone(),
+            }
+        )?);
+        let mut failed = terminal_request.clone();
+        failed.observation.observation.exit_code = Some(1);
+        let failed_receipt = MutationReceiptV1 {
+            input_hash: failed.input_hash()?,
+            ..terminal_receipt.clone()
+        };
+        let failed_prefix = observation_base
+            .clone()
+            .with_import_observation(failed.clone())?
+            .acknowledge_import_observation(&failed, failed_receipt)?;
+        assert!(matches!(
+            failed_prefix.import_verification_permission(),
+            Err(JournalError::Conflict)
+        ));
         observation_writer
             .acknowledge_legacy_named_import_observation(
                 operation,
