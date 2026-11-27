@@ -56,6 +56,27 @@ async fn software_full3_restores_original_assignments_before_late_issue_two_endp
     }
     after_cleanup(exercise, cleanup)
 }
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn software_full3_existing_reads_original_relay_assignment_without_authorizing_execution()
+-> Result<()> {
+    let mut fixture = Fixture::new_fresh().await?;
+    let exercise = async {
+        let job = fixture.submit("a", 90).await?;
+        fixture.wait_endpoint(job).await?;
+        let before = fixture.history(job, Role::FullA).await?;
+        fixture.assert_no_relay_effects().await?;
+        fixture.restart(Role::FullA).await?;
+        fixture.verify_retained_relay_assignment(job, &before).await
+    }
+    .await;
+    let ticket = fixture.timeout_observation_ticket();
+    let cleanup = fixture.close().await;
+    if let Some(ticket) = ticket {
+        ticket.emit_after_cleanup(cleanup.is_ok());
+    }
+    after_cleanup(exercise, cleanup)
+}
+
 async fn restored_pair(fixture: &mut Fixture) -> Result<()> {
     let first = fixture.submit("a", 90).await?;
     let second = fixture.submit("a", 90).await?;

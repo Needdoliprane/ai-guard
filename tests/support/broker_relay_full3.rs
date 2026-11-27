@@ -1956,20 +1956,28 @@ impl Fixture {
         Ok(())
     }
 
-    pub async fn history(&self, job: Uuid, original_role: Role) -> Result<History> {
-        let status = self.job_status(job).await?;
+    fn confirmed_job_revision(
+        &self,
+        job: Uuid,
+        revision: u64,
+        hash: Option<&str>,
+    ) -> Result<Value> {
         let namespace = self.broker_root.join("journals/a/broker-journal-v1");
         let scopes = std::fs::read_dir(namespace)?.collect::<io::Result<Vec<_>>>()?;
         ensure!(scopes.len() == 1, "fixture requires one real journal scope");
         let job_root = scopes[0].path().join("jobs").join(job.to_string());
-        // Read the immutable revision named by this confirmed IPC response.
-        // A newer writer head can advance without invalidating this snapshot.
-        let revision = status.head_revision.context("confirmed real revision")?;
         let bytes = read_bytes(
             &job_root.join(format!("rev-{revision:020}.json")),
             32 * 1024 * 1024,
         )?;
-        let value = confirmed_checkpoint_value(&bytes, status.head_hash.as_deref())?;
+        confirmed_checkpoint_value(&bytes, hash)
+    }
+
+    pub async fn history(&self, job: Uuid, original_role: Role) -> Result<History> {
+        let status = self.job_status(job).await?;
+        let revision = status.head_revision.context("confirmed real revision")?;
+        // The IPC reply names an immutable revision even if the writer advances.
+        let value = self.confirmed_job_revision(job, revision, status.head_hash.as_deref())?;
         let mut arms = Vec::new();
         collect_operations(&value, "arm", &mut arms);
         let arms: Vec<_> = arms
@@ -2035,20 +2043,13 @@ impl Fixture {
             worker.state == WorkerStateV1::Running && worker.quota_held,
             "history prerequisite requires a real Running worker with quota"
         );
-        let cid = &arm.inspection.container_id;
-        let starts = self
-            .engine
-            .lock()
-            .await
-            .calls
-            .iter()
-            .filter(|call| call.iter().any(|arg| arg == "start") && call.last() == Some(cid))
-            .count();
+        let starts = self.worker_start_count(&arm.inspection.container_id).await;
         ensure!(
             starts == 1,
             "synthetic worker CID must have exactly one actual CLI start"
         );
         let history = History {
+            revision,
             arm,
             binding,
             endpoint,
@@ -2058,6 +2059,77 @@ impl Fixture {
         };
         history.require_live()?;
         Ok(history)
+    }
+    async fn worker_start_count(&self, cid: &str) -> usize {
+        self.engine
+            .lock()
+            .await
+            .calls
+            .iter()
+            .filter(|call| {
+                call.iter().any(|arg| arg == "start")
+                    && call.last().is_some_and(|target| target == cid)
+            })
+            .count()
+    }
+
+    pub async fn verify_retained_relay_assignment(
+        &self,
+        job: Uuid,
+        before: &History,
+    ) -> Result<()> {
+        let command = BrokerCommandV1::RecoveryRelayStatus { operation_id: job };
+        let reply = service::request(&self.broker_root, "a", A_RUNNER, command).await?;
+        let BrokerReplyV1::RecoveryRelayStatus { status } = reply else {
+            bail!("phase=full3_retained_relay category=authorized_read_refused");
+        };
+        ensure!(
+            status.version == 1
+                && status.operation_id == job
+                && status.tenant_id == "tenant-a"
+                && status.state == RecoveryRelayStateV1::ConfirmedRetainedAssignment
+                && status.reason == RecoveryRelayReasonV1::Confirmed
+                && status.arm_id.as_deref() == Some(before.arm.operation_id.as_str()),
+            "phase=full3_retained_relay category=unconfirmed_worker_arm reason={:?}",
+            status.reason
+        );
+        let revision = status
+            .source_head_revision
+            .context("phase=full3_retained_relay category=missing_source_revision")?;
+        let hash = status
+            .source_head_hash
+            .context("phase=full3_retained_relay category=missing_source_hash")?;
+        before.require_live()?;
+        ensure!(
+            revision <= before.revision,
+            "phase=full3_retained_relay category=source_after_pre_restart_head"
+        );
+        self.confirmed_job_revision(job, revision, Some(&hash))?;
+        let foreign = service::request(
+            &self.broker_root,
+            "b",
+            B_RUNNER,
+            BrokerCommandV1::RecoveryRelayStatus { operation_id: job },
+        )
+        .await?;
+        ensure!(
+            matches!(
+                foreign,
+                BrokerReplyV1::Error {
+                    code: BrokerErrorCodeV1::InvalidInput | BrokerErrorCodeV1::NeedsReconciliation,
+                }
+            ),
+            "phase=full3_retained_relay category=foreign_reply"
+        );
+        ensure!(
+            self.worker_start_count(&before.arm.inspection.container_id)
+                .await
+                == before.starts,
+            "phase=full3_retained_relay category=worker_start_repeated"
+        );
+        self.assert_no_relay_effects().await?;
+        println!("phase=full3_retained_relay category=confirmed_no_effects");
+        Ok(())
     }
     pub async fn assert_no_relay_effects(&self) -> Result<()> {
         ensure!(
@@ -2482,6 +2554,7 @@ impl Drop for Fixture {
 /// Read-only observations of real private records, never constructors of authority.
 pub struct History {
     pub endpoint: RelayEndpointV1,
+    revision: u64,
     arm: ArmV1,
     binding: Option<Value>,
     claim: Value,
