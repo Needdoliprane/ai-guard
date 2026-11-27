@@ -99,6 +99,16 @@ pub async fn request(
         }
         _ => None,
     };
+    let expected_relay_operation = match &command {
+        BrokerCommandV1::RecoveryRelayStatus { operation_id } => {
+            ensure!(
+                !operation_id.is_nil(),
+                "invalid recovery-relay-status operation identity"
+            );
+            Some(*operation_id)
+        }
+        _ => None,
+    };
     if let BrokerCommandV1::RecoveryInventory { after, limit } = &command {
         ensure!(
             (1..=100).contains(limit) && after.is_none_or(|id| !id.is_nil()),
@@ -173,6 +183,18 @@ pub async fn request(
             _ => anyhow::bail!(
                 "incompatible broker reply to recovery-status-v2; no V1 fallback was attempted"
             ),
+        }
+    }
+    if let Some(operation) = expected_relay_operation {
+        match &answer.reply {
+            BrokerReplyV1::RecoveryRelayStatus { status } => ensure!(
+                status.version == 1 && status.operation_id == operation,
+                "incompatible or uncorrelated recovery-relay-status reply"
+            ),
+            BrokerReplyV1::Error { code } => {
+                anyhow::bail!("recovery-relay-status refused ({code}); no fallback was attempted")
+            }
+            _ => anyhow::bail!("incompatible broker reply to recovery-relay-status"),
         }
     }
     Ok(answer.reply)

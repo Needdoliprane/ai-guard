@@ -117,6 +117,7 @@ pub struct StopJobSnapshotV1 {
     reader: StopRecoveryReaderV1,
     operation_id: Uuid,
     head: RevisionRefV1,
+    ancestry: Vec<RevisionRefV1>,
     cancel_receipts: Vec<LocalCommandReceiptV1>,
     stops: Vec<RecoveredStopV1>,
     pending_arms: usize,
@@ -179,6 +180,14 @@ impl StopJobSnapshotV1 {
     }
     pub fn incomplete(&self) -> bool {
         self.incomplete
+    }
+    pub(crate) fn confirms_ancestor(&self, revision: u64, hash: &str) -> bool {
+        self.ancestry
+            .iter()
+            .any(|entry| entry.revision() == revision && entry.hash() == hash)
+    }
+    pub(crate) fn revalidate(&self) -> JournalResult<()> {
+        self.reader.check_shared()
     }
 }
 
@@ -423,6 +432,7 @@ impl StopJournal {
             operation_id,
             retirements: recovered.retirements,
             head: recovered.head,
+            ancestry: recovered.chain,
             cancel_receipts,
             stops: recovered.stops,
             pending_arms: recovered.pending_arms,

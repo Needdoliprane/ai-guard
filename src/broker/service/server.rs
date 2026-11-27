@@ -469,6 +469,85 @@ impl Response {
     }
 }
 
+fn recovery_relay_unknown(
+    operation: Uuid,
+    scope: &JournalScopeV1,
+    reason: RecoveryRelayReasonV1,
+) -> Response {
+    Response::reply(BrokerReplyV1::RecoveryRelayStatus {
+        status: RecoveryRelayStatusV1 {
+            version: 1,
+            operation_id: operation,
+            tenant_id: scope.tenant_id().into(),
+            state: RecoveryRelayStateV1::Unknown,
+            reason,
+            arm_id: None,
+            source_head_revision: None,
+            source_head_hash: None,
+        },
+    })
+}
+
+fn recovery_relay_projection(
+    operation: Uuid,
+    scope: &JournalScopeV1,
+    profile_id: &str,
+    evidence: Option<crate::broker::relay_owner::journal::RetainedChannelEvidence>,
+    matching_worker_arms: usize,
+    source_head_is_ancestor: bool,
+) -> Result<RecoveryRelayStatusV1, BrokerErrorCodeV1> {
+    let Some(evidence) = evidence else {
+        return Ok(RecoveryRelayStatusV1 {
+            version: 1,
+            operation_id: operation,
+            tenant_id: scope.tenant_id().into(),
+            state: RecoveryRelayStateV1::Unknown,
+            reason: RecoveryRelayReasonV1::RelayRecordAbsent,
+            arm_id: None,
+            source_head_revision: None,
+            source_head_hash: None,
+        });
+    };
+    if evidence.job_id != operation || evidence.source_profile_id != profile_id {
+        return Err(BrokerErrorCodeV1::NeedsReconciliation);
+    }
+    let (state, reason, arm_id, revision, hash) = if matching_worker_arms != 1 {
+        (
+            RecoveryRelayStateV1::Unknown,
+            RecoveryRelayReasonV1::WorkerArmNotFound,
+            None,
+            None,
+            None,
+        )
+    } else if !source_head_is_ancestor {
+        (
+            RecoveryRelayStateV1::Unknown,
+            RecoveryRelayReasonV1::SourceHeadNotAncestor,
+            None,
+            None,
+            None,
+        )
+    } else {
+        (
+            RecoveryRelayStateV1::ConfirmedRetainedAssignment,
+            RecoveryRelayReasonV1::Confirmed,
+            Some(evidence.arm_id),
+            Some(evidence.source_head_revision),
+            Some(evidence.source_head_hash),
+        )
+    };
+    Ok(RecoveryRelayStatusV1 {
+        version: 1,
+        operation_id: operation,
+        tenant_id: scope.tenant_id().into(),
+        state,
+        reason,
+        arm_id,
+        source_head_revision: revision,
+        source_head_hash: hash,
+    })
+}
+
 /// Prepare all presence protections together before any actor or new helper.
 /// Only normal mode with explicit opt-in calls this; STOP-only never opens it.
 /// Each presence file explicitly selects the legacy or the owned profile; a
@@ -801,18 +880,19 @@ pub async fn serve_selected_owned(
         .iter()
         .map(|profile| (profile.id.clone(), Arc::new(ProfileJobs::new())))
         .collect();
-    if !recovery_only {
-        let relays = crate::broker::relay_owner::RelayRegistry::new(
-            broker_root.clone(),
-            lease.clone(),
-            registry.relay_operations(),
-            material.literals.clone(),
-        );
-        registry
-            .relay_service
-            .set(relays)
-            .map_err(|_| anyhow!("broker relay owner was already initialized"))?;
-    }
+    // RelayRegistry::new retains only the verified root, role lease and
+    // bounded configuration. In recovery-only it enables the read-only
+    // retained assignment query; it performs no filesystem or actor setup.
+    let relays = crate::broker::relay_owner::RelayRegistry::new(
+        broker_root.clone(),
+        lease.clone(),
+        registry.relay_operations(),
+        material.literals.clone(),
+    );
+    registry
+        .relay_service
+        .set(relays)
+        .map_err(|_| anyhow!("broker relay owner was already initialized"))?;
     let service = Arc::new(Service {
         cold_owners: retained_audit::ColdOwners::new(registry.data.max_enforcer_slots as usize)?,
         full_owners: FullOwners::new(registry.data.max_enforcer_slots as usize)?,
@@ -1302,6 +1382,121 @@ impl Service {
         Ok(Response::reply(BrokerReplyV1::RecoveryStatusV2 { status }))
     }
 
+    async fn recovery_relay_status_for_profile(
+        &self,
+        profile: &ControlProfileV1,
+        scope: &JournalScopeV1,
+        operation: Uuid,
+    ) -> Result<Response, BrokerErrorCodeV1> {
+        if operation.is_nil() {
+            return Err(BrokerErrorCodeV1::InvalidInput);
+        }
+        let capabilities = self.profile_writers(&profile.id, scope, false).await?;
+        if !capabilities.is_stop_only() {
+            return Err(BrokerErrorCodeV1::NeedsReconciliation);
+        }
+        let snapshot = capabilities
+            .stops()
+            .recovery_status(operation)
+            .await
+            .map_err(jobs::journal_error)?
+            .ok_or(BrokerErrorCodeV1::InvalidInput)?;
+        if snapshot.operation_id() != operation
+            || canonical(snapshot.scope()).map_err(jobs::journal_error)?
+                != canonical(scope).map_err(jobs::journal_error)?
+        {
+            return Err(BrokerErrorCodeV1::Conflict);
+        }
+        if snapshot.incomplete() {
+            snapshot.revalidate().map_err(jobs::journal_error)?;
+            return Ok(recovery_relay_unknown(
+                operation,
+                scope,
+                RecoveryRelayReasonV1::StopSnapshotIncomplete,
+            ));
+        }
+        snapshot.revalidate().map_err(jobs::journal_error)?;
+        let relays = self
+            .registry
+            .relay_service
+            .get()
+            .ok_or(BrokerErrorCodeV1::NeedsReconciliation)?;
+        let read = relays.read_retained_channel(scope, operation).await;
+        // STOP's retained reader remains open across the relay read. A changed
+        // head or lease invalidates the join rather than returning a stale link.
+        snapshot.revalidate().map_err(jobs::journal_error)?;
+        let current = capabilities
+            .stops()
+            .recovery_status(operation)
+            .await
+            .map_err(jobs::journal_error)?
+            .ok_or(BrokerErrorCodeV1::NeedsReconciliation)?;
+        if current.operation_id() != operation
+            || canonical(current.scope()).map_err(jobs::journal_error)?
+                != canonical(scope).map_err(jobs::journal_error)?
+            || current.head() != snapshot.head()
+        {
+            return Err(BrokerErrorCodeV1::NeedsReconciliation);
+        }
+        current.revalidate().map_err(jobs::journal_error)?;
+        if current.incomplete() {
+            return Ok(recovery_relay_unknown(
+                operation,
+                scope,
+                RecoveryRelayReasonV1::StopSnapshotIncomplete,
+            ));
+        }
+        let evidence = match read {
+            Ok(Some(evidence)) => evidence,
+            Ok(None) => {
+                return Ok(Response::reply(BrokerReplyV1::RecoveryRelayStatus {
+                    status: recovery_relay_projection(
+                        operation,
+                        scope,
+                        &profile.id,
+                        None,
+                        0,
+                        false,
+                    )?,
+                }));
+            }
+            Err(
+                crate::broker::relay_owner::RelayOwnerError::Unknown
+                | crate::broker::relay_owner::RelayOwnerError::Capacity
+                | crate::broker::relay_owner::RelayOwnerError::Unavailable,
+            ) => {
+                return Ok(recovery_relay_unknown(
+                    operation,
+                    scope,
+                    RecoveryRelayReasonV1::RelayReadUnavailable,
+                ));
+            }
+            Err(_) => return Err(BrokerErrorCodeV1::NeedsReconciliation),
+        };
+        let matching_worker_arms = current
+            .stops()
+            .iter()
+            .filter(|stop| {
+                stop.arm().operation_id == evidence.arm_id
+                    && matches!(&stop.arm().subject, crate::control::ArmSubjectV1::Worker)
+            })
+            .count();
+        let source_head_is_ancestor =
+            current.confirms_ancestor(evidence.source_head_revision, &evidence.source_head_hash);
+        let status = recovery_relay_projection(
+            operation,
+            scope,
+            &profile.id,
+            Some(evidence),
+            matching_worker_arms,
+            source_head_is_ancestor,
+        )?;
+        current.revalidate().map_err(jobs::journal_error)?;
+        Ok(Response::reply(BrokerReplyV1::RecoveryRelayStatus {
+            status,
+        }))
+    }
+
     async fn recovery_status_snapshot_for_profile(
         &self,
         profile: &ControlProfileV1,
@@ -1604,6 +1799,7 @@ impl Service {
                 | BrokerCommandV1::List { .. }
                 | BrokerCommandV1::RecoveryStatus { .. }
                 | BrokerCommandV1::RecoveryStatusV2 { .. }
+                | BrokerCommandV1::RecoveryRelayStatus { .. }
                 | BrokerCommandV1::RecoveryInventory { .. }
         );
         let stop_only = matches!(envelope.request, BrokerCommandV1::Cancel { .. });
@@ -1637,6 +1833,11 @@ impl Service {
         if let BrokerCommandV1::RecoveryStatusV2 { operation_id } = &envelope.request {
             return self
                 .recovery_status_v2_for_profile(&profile, &verified.scope, *operation_id)
+                .await;
+        }
+        if let BrokerCommandV1::RecoveryRelayStatus { operation_id } = &envelope.request {
+            return self
+                .recovery_relay_status_for_profile(&profile, &verified.scope, *operation_id)
                 .await;
         }
         if let BrokerCommandV1::RecoveryInventory { after, limit } = &envelope.request {
@@ -1800,6 +2001,7 @@ impl Service {
             BrokerCommandV1::Cancel { .. }
             | BrokerCommandV1::RecoveryStatus { .. }
             | BrokerCommandV1::RecoveryStatusV2 { .. }
+            | BrokerCommandV1::RecoveryRelayStatus { .. }
             | BrokerCommandV1::RecoveryInventory { .. } => Err(BrokerErrorCodeV1::InvalidInput),
             BrokerCommandV1::Resume {
                 operation_id,
@@ -3519,6 +3721,77 @@ impl Service {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod recovery_relay_status_tests {
+    use super::*;
+    use crate::broker::relay_owner::journal::{AttachmentPhase, RetainedChannelEvidence};
+
+    #[test]
+    fn recovery_relay_status_v1_confirms_exact_retained_assignment_and_refuses_divergence() {
+        let operation = Uuid::from_u128(41);
+        let scope = JournalScopeV1::new(
+            Uuid::from_u128(42),
+            "tenant-a",
+            "http://127.0.0.1:9",
+            Uuid::from_u128(43),
+            "profile-a",
+        )
+        .unwrap();
+        let evidence = RetainedChannelEvidence {
+            job_id: operation,
+            source_profile_id: "profile-a".into(),
+            source_head_revision: 7,
+            source_head_hash: "a".repeat(64),
+            arm_id: Uuid::from_u128(44).to_string(),
+            phase: AttachmentPhase::Admitted,
+        };
+        let confirmed = recovery_relay_projection(
+            operation,
+            &scope,
+            "profile-a",
+            Some(evidence.clone()),
+            1,
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            confirmed.state,
+            RecoveryRelayStateV1::ConfirmedRetainedAssignment
+        );
+        assert_eq!(confirmed.reason, RecoveryRelayReasonV1::Confirmed);
+        assert_eq!(confirmed.arm_id.as_deref(), Some(evidence.arm_id.as_str()));
+        assert_eq!(confirmed.source_head_revision, Some(7));
+        assert_eq!(
+            confirmed.source_head_hash.as_deref(),
+            Some(evidence.source_head_hash.as_str())
+        );
+
+        for (matching_arms, ancestral, reason) in [
+            (0, true, RecoveryRelayReasonV1::WorkerArmNotFound),
+            (1, false, RecoveryRelayReasonV1::SourceHeadNotAncestor),
+        ] {
+            let refused = recovery_relay_projection(
+                operation,
+                &scope,
+                "profile-a",
+                Some(evidence.clone()),
+                matching_arms,
+                ancestral,
+            )
+            .unwrap();
+            assert_eq!(refused.state, RecoveryRelayStateV1::Unknown);
+            assert_eq!(refused.reason, reason);
+            assert!(refused.arm_id.is_none());
+            assert!(refused.source_head_revision.is_none());
+            assert!(refused.source_head_hash.is_none());
+        }
+        assert!(matches!(
+            recovery_relay_projection(operation, &scope, "other-profile", Some(evidence), 1, true,),
+            Err(BrokerErrorCodeV1::NeedsReconciliation)
+        ));
     }
 }
 

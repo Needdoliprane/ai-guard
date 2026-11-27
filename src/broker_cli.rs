@@ -100,6 +100,8 @@ enum BrokerCommand {
     /// Read explicit D5 preclaim/retirement metadata; requires V2 support.
     /// Never falls back to the historical diagnostic on an older service.
     RecoveryStatusV2(OperationArgs),
+    /// Compare a durable relay assignment to confirmed STOP history only.
+    RecoveryRelayStatus(OperationArgs),
     /// Discover accepted job UUIDs from confirmed journal metadata, even in STOP-only mode.
     /// No runtime probe or recovery action is performed.
     /// Cold discovery requires a broker explicitly started with serve --recovery-only.
@@ -517,6 +519,15 @@ pub async fn execute(args: BrokerArgs) -> Result<()> {
             )
             .await
         }
+        BrokerCommand::RecoveryRelayStatus(args) => {
+            send(
+                args.connection,
+                BrokerCommandV1::RecoveryRelayStatus {
+                    operation_id: args.operation_id,
+                },
+            )
+            .await
+        }
         BrokerCommand::RecoveryInventory {
             connection,
             after,
@@ -720,6 +731,23 @@ mod tests {
                 _ => panic!("explicit recovery diagnostic selected another command"),
             }
         }
+        let parsed = TestCli::try_parse_from([
+            "broker",
+            "recovery-relay-status",
+            "--root",
+            "/private/fixture",
+            "--profile",
+            "fixture",
+            "--token-file",
+            "/private/token",
+            "--operation-id",
+            "11111111-1111-4111-8111-111111111111",
+        ])
+        .unwrap();
+        assert!(matches!(
+            parsed.args.command,
+            BrokerCommand::RecoveryRelayStatus(_)
+        ));
     }
 
     #[test]

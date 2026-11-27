@@ -50,6 +50,11 @@ pub enum BrokerCommandV1 {
     RecoveryStatusV2 {
         operation_id: Uuid,
     },
+    /// Compare retained relay assignment metadata with a confirmed STOP snapshot.
+    /// This never queries a live endpoint or authorizes restart/execution.
+    RecoveryRelayStatus {
+        operation_id: Uuid,
+    },
     /// Discover accepted job UUIDs from confirmed STOP metadata only.
     RecoveryInventory {
         after: Option<Uuid>,
@@ -398,6 +403,41 @@ pub struct RecoveryStatusV2 {
 }
 
 #[derive(Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RecoveryRelayStateV1 {
+    ConfirmedRetainedAssignment,
+    Unknown,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RecoveryRelayReasonV1 {
+    Confirmed,
+    RelayRecordAbsent,
+    StopSnapshotIncomplete,
+    WorkerArmNotFound,
+    SourceHeadNotAncestor,
+    RelayReadUnavailable,
+}
+
+/// Durable assignment linkage only. It does not claim that a process, endpoint,
+/// channel claim, or runtime is currently live.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecoveryRelayStatusV1 {
+    pub version: u32,
+    pub operation_id: Uuid,
+    pub tenant_id: String,
+    pub state: RecoveryRelayStateV1,
+    pub reason: RecoveryRelayReasonV1,
+    pub arm_id: Option<String>,
+    pub source_head_revision: Option<u64>,
+    pub source_head_hash: Option<String>,
+}
+
+#[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RecoveryPreclaimTargetV2 {
     pub arm_id: String,
@@ -461,6 +501,9 @@ pub enum BrokerReplyV1 {
     },
     RecoveryStatusV2 {
         status: RecoveryStatusV2,
+    },
+    RecoveryRelayStatus {
+        status: RecoveryRelayStatusV1,
     },
     RecoveryInventory {
         inventory: RecoveryInventoryV1,
