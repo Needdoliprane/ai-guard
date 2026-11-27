@@ -900,6 +900,7 @@ fn named_reservation_stop(recovered: &RecoveredJobV1) -> Option<NamedReservation
     if metadata.legacy_managed_seen
         || metadata.intent.legacy_named_plan() != Some(admission.plan())
         || admission.archive_digest().is_none()
+        || admission.import_creation().is_some()
         || admission.import_arm().is_some()
         || admission
             .admission_result()
@@ -1931,15 +1932,12 @@ impl StopRecoveryReaderV1 {
         let mut stops = Vec::new();
         let mut pending_arms = 0_usize;
         if let Some(value) = confirmed.payload.supervised() {
-            if let Some(import) = value
-                .supervision()
-                .legacy_named_admission()
-                .and_then(LegacyNamedAdmissionCheckpoint::import_arm)
-            {
-                // An Import Arm carries Store evidence but no retained native
-                // authority or owned container snapshot for STOP delivery.
-                partial = true;
-                pending_arms += usize::from(import.receipt().is_none());
+            if let Some(named) = value.supervision().legacy_named_admission() {
+                let arm = named.import_arm();
+                // A confirmed creation intent may have run. It and the
+                // named Arm lack a native STOP target in this checkpoint.
+                partial |= named.import_creation().is_some() || arm.is_some();
+                pending_arms += usize::from(arm.is_some_and(|arm| arm.receipt().is_none()));
             }
             for (index, operation) in value.supervision().operations().iter().enumerate() {
                 // WorkerClaim and HelperClaim already require a prior ACKed Arm

@@ -1141,6 +1141,16 @@ mod tests {
             Err(JournalError::Conflict)
         ));
         assert_eq!(writer.load(operation).await?.unwrap().head(), creation_head);
+        let stop = writer
+            .stops()
+            .append_cancel(CancelInputV1::new(operation, Uuid::new_v4())?)
+            .await
+            .map_err(|failure| failure.error())?;
+        assert!(stop.incomplete());
+        assert!(stop.named_reservation().is_none());
+        let snapshot = writer.stops().recovery_status(operation).await?.unwrap();
+        assert!(snapshot.incomplete());
+        assert_eq!(snapshot.pending_arms(), 0);
         Ok(())
     }
 }
