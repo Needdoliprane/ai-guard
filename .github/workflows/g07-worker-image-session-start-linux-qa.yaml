@@ -191,7 +191,7 @@ jobs:
           test_rc=0
           env -u OPENAI_API_KEY -u ANTHROPIC_API_KEY -u CODEX_API_KEY \
             -u CLAUDE_CODE_OAUTH_TOKEN \
-            AI_GUARD_TEST_WORKER_IMAGE="$image_tag" \
+            AI_GUARD_TEST_WORKER_IMAGE="$image_id" \
             AI_GUARD_TEST_DOCKER_BIN="$docker_bin" \
             "$harness" --ignored --exact "$selector" --test-threads=1 \
             --color never --show-output >"$test_log" 2>&1 || test_rc=$?
