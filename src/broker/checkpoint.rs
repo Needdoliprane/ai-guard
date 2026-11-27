@@ -14,8 +14,15 @@ use std::{collections::HashSet, fmt};
 use uuid::Uuid;
 mod legacy_named;
 mod validation;
+#[cfg(test)]
+pub(crate) use legacy_named::LegacyNamedAdmissionCheckpoint as LegacyNamedAdmissionCheckpointV1;
+#[allow(
+    unused_imports,
+    reason = "named orchestration consumes the pending view"
+)]
+pub(crate) use legacy_named::LegacyNamedAdmissionPendingV2;
 pub(crate) use legacy_named::{
-    LegacyNamedAdmissionCheckpointV1, validate_legacy_named_admission_receipt,
+    LegacyNamedAdmissionCheckpoint, validate_legacy_named_admission_receipt,
 };
 
 const MAX_BYTES: usize = 32 * 1024 * 1024;
@@ -78,7 +85,7 @@ pub struct SupervisionCheckpointV1 {
     helpers: Vec<HelperPreparationV1>,
     operations: Vec<SupervisionOperationV1>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    legacy_named_admission: Option<Box<LegacyNamedAdmissionCheckpointV1>>,
+    legacy_named_admission: Option<Box<LegacyNamedAdmissionCheckpoint>>,
 }
 #[derive(Clone, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -168,7 +175,7 @@ strict_record!(SupervisionCheckpointV1 {
     control_namespace_uuid: Uuid,
     helpers: Vec<HelperPreparationV1>,
     operations: Vec<SupervisionOperationV1>,
-    legacy_named_admission: Option<Box<LegacyNamedAdmissionCheckpointV1>>
+    legacy_named_admission: Option<Box<LegacyNamedAdmissionCheckpoint>>
 });
 strict_record!(HelperPreparationV1 { policy: HelperExecutionPolicyV1, permission: HelperPermissionV1, owned: Option<OwnedContainerSnapshot> });
 strict_record!(DecisionAnswerV1 {
@@ -326,7 +333,7 @@ impl SupervisionCheckpointV1 {
     pub fn operations(&self) -> &[SupervisionOperationV1] {
         &self.operations
     }
-    pub(crate) fn legacy_named_admission(&self) -> Option<&LegacyNamedAdmissionCheckpointV1> {
+    pub(crate) fn legacy_named_admission(&self) -> Option<&LegacyNamedAdmissionCheckpoint> {
         self.legacy_named_admission.as_deref()
     }
     #[allow(
@@ -335,7 +342,7 @@ impl SupervisionCheckpointV1 {
     )]
     pub(crate) fn with_legacy_named_admission(
         mut self,
-        admission: LegacyNamedAdmissionCheckpointV1,
+        admission: LegacyNamedAdmissionCheckpoint,
     ) -> JournalResult<Self> {
         if let Some(old) = self.legacy_named_admission() {
             admission.validate_transition(Some(old))?;

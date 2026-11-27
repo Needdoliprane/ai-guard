@@ -404,7 +404,8 @@ impl BrokerCheckpointV2 {
         ensure(self.supervision.control_namespace_uuid == namespace)?;
         let context = self.runner.broker_context();
         ensure(!context.legacy_pending && !context.legacy_import)?;
-        if let Some(plan) = intent.legacy_named_plan() {
+        let named_intent = intent.legacy_named_plan();
+        if let Some(plan) = named_intent {
             ensure(
                 self.supervision.helpers.is_empty()
                     && self.supervision.operations.iter().all(|operation| {
@@ -785,7 +786,8 @@ impl BrokerCheckpointV2 {
         if let Some(named) = self.supervision.legacy_named_admission() {
             let request = &named.request().admission;
             ensure(
-                named.plan().broker_profile_id == scope.profile_id()
+                named.archive_digest().is_some() == named_intent.is_some()
+                    && named.plan().broker_profile_id == scope.profile_id()
                     && equal(&request.admission.decision_request, context.request)?
                     && context.owned.is_none(),
             )?;
