@@ -113,7 +113,7 @@ async fn confirmed_plan(
 ) -> ApiResult<Json<LegacyConfirmedPlanV1>> {
     let binding_ref = canonical_uuid(&binding_ref).map_err(control_error)?;
     broker
-        .blocking(move |tenant, broker, redactor| {
+        .blocking_on(store_io::Lane::Control, move |tenant, broker, redactor| {
             let store = tenant.store.sqlite_api()?;
             let plan = store
                 .legacy_confirmed_plan(&broker, binding_ref)
@@ -183,37 +183,43 @@ async fn reserve_named(
     let preflight = Arc::clone(&request);
     let replay = broker
         .clone()
-        .blocking(move |tenant, identity, redactor| {
-            let store = named_admission_store(&tenant, &redactor)?;
-            if let Some(receipt) = store
-                .preflight_legacy_named_admission(&identity, &preflight, &tenant.worker_quota)
-                .map_err(|error| named_admission_error(&tenant.store, error))?
-            {
-                return Ok(Some(named_admission_response(receipt, &redactor)?));
-            }
-            tenant.write_quota()?;
-            Ok(None)
-        })
+        .blocking_on(
+            store_io::Lane::Control,
+            move |tenant, identity, redactor| {
+                let store = named_admission_store(&tenant, &redactor)?;
+                if let Some(receipt) = store
+                    .preflight_legacy_named_admission(&identity, &preflight, &tenant.worker_quota)
+                    .map_err(|error| named_admission_error(&tenant.store, error))?
+                {
+                    return Ok(Some(named_admission_response(receipt, &redactor)?));
+                }
+                tenant.write_quota()?;
+                Ok(None)
+            },
+        )
         .await?;
     if let Some(response) = replay {
         return Ok(response);
     }
     let (decision, jev) = fresh_policy(&state, &request.admission.admission.decision_request).await;
     broker
-        .blocking(move |tenant, identity, redactor| {
-            let store = named_admission_store(&tenant, &redactor)?;
-            let receipt = store
-                .admit_legacy_named(
-                    &identity,
-                    &request,
-                    &state.policy,
-                    decision,
-                    jev,
-                    &tenant.worker_quota,
-                )
-                .map_err(|error| named_admission_error(&tenant.store, error))?;
-            named_admission_response(receipt, &redactor)
-        })
+        .blocking_on(
+            store_io::Lane::Control,
+            move |tenant, identity, redactor| {
+                let store = named_admission_store(&tenant, &redactor)?;
+                let receipt = store
+                    .admit_legacy_named(
+                        &identity,
+                        &request,
+                        &state.policy,
+                        decision,
+                        jev,
+                        &tenant.worker_quota,
+                    )
+                    .map_err(|error| named_admission_error(&tenant.store, error))?;
+                named_admission_response(receipt, &redactor)
+            },
+        )
         .await
 }
 

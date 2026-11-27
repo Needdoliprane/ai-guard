@@ -293,6 +293,7 @@ impl Proof {
     }
     async fn blocking<T: Send + 'static>(
         self: Arc<Self>,
+        lane: store_io::Lane,
         operation: impl FnOnce(TenantState, AuthenticatedWorkload, Redactor) -> ApiResult<T>
         + Send
         + 'static,
@@ -304,7 +305,7 @@ impl Proof {
             .cloned()
             .ok_or_else(ambiguous)?;
         let shared = Arc::clone(&self.state.io);
-        store_io::run(shared, None, store_io::Lane::Read, false, move || {
+        store_io::run(shared, None, lane, false, move || {
             let mut scope = store_io::Scope::default();
             scope.hold(&tenant, store_io::Lane::Read, true)?;
             let state = self.state.scoped(Arc::new(scope));
@@ -312,6 +313,13 @@ impl Proof {
             if source != self.source || !same_identity(&self.identity, &current) {
                 return Err(forbidden());
             }
+            let _control = if lane == store_io::Lane::Control {
+                // The authentication leases end before the checked control work.
+                drop(state);
+                Some(tenant.io.admit(lane, false)?)
+            } else {
+                None
+            };
             operation(tenant, current, self.redactor.clone())
         })
         .await
@@ -381,10 +389,15 @@ impl VerifiedWorker {
         + 'static,
     ) -> ApiResult<T> {
         self.0
-            .blocking(move |tenant, identity, redactor| match identity {
-                AuthenticatedWorkload::Worker(identity) => operation(tenant, identity, redactor),
-                _ => Err(forbidden()),
-            })
+            .blocking(
+                store_io::Lane::Read,
+                move |tenant, identity, redactor| match identity {
+                    AuthenticatedWorkload::Worker(identity) => {
+                        operation(tenant, identity, redactor)
+                    }
+                    _ => Err(forbidden()),
+                },
+            )
             .await
     }
 }
@@ -406,8 +419,16 @@ impl VerifiedBroker {
         self,
         operation: impl FnOnce(TenantState, BrokerIdentityV1, Redactor) -> ApiResult<T> + Send + 'static,
     ) -> ApiResult<T> {
+        self.blocking_on(store_io::Lane::Read, operation).await
+    }
+
+    pub(super) async fn blocking_on<T: Send + 'static>(
+        self,
+        lane: store_io::Lane,
+        operation: impl FnOnce(TenantState, BrokerIdentityV1, Redactor) -> ApiResult<T> + Send + 'static,
+    ) -> ApiResult<T> {
         self.0
-            .blocking(move |tenant, identity, redactor| match identity {
+            .blocking(lane, move |tenant, identity, redactor| match identity {
                 AuthenticatedWorkload::Broker(identity) => operation(tenant, identity, redactor),
                 _ => Err(forbidden()),
             })
