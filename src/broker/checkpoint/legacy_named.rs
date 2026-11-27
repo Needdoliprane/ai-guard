@@ -42,6 +42,12 @@ pub(crate) struct LegacyNamedAdmissionCheckpoint {
     import_claim: Option<Box<LegacyNamedImportClaimCheckpointV1>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     import_observations: Vec<LegacyNamedImportObservationCheckpointV1>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    import_verification: Option<Box<LegacyNamedImportVerificationPlanV1>>,
 }
 
 fn deserialize_present<'de, D, T>(decoder: D) -> Result<Option<T>, D::Error>
@@ -125,6 +131,26 @@ pub(crate) struct LegacyNamedImportObservationCheckpointV1 {
     version: u32,
     request: LegacyNamedImportObservationRequestV1,
     receipt: Option<MutationReceiptV1>,
+}
+
+/// Durable intent for a distinct ImportVerification helper. It contains no
+/// owned handle or runtime authority; the successful named Terminal receipt
+/// and immutable helper policy are the only inputs to a later effect.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct LegacyNamedImportVerificationPlanV1 {
+    version: u32,
+    preparation: HelperPreparationV1,
+    parent_revision: u64,
+}
+
+impl LegacyNamedImportVerificationPlanV1 {
+    pub(crate) fn preparation(&self) -> &HelperPreparationV1 {
+        &self.preparation
+    }
+    pub(crate) fn parent_revision(&self) -> u64 {
+        self.parent_revision
+    }
 }
 
 impl LegacyNamedImportObservationCheckpointV1 {
@@ -227,6 +253,7 @@ impl LegacyNamedAdmissionCheckpoint {
             import_creation: None,
             import_claim: None,
             import_observations: Vec::new(),
+            import_verification: None,
         };
         let namespace = uuid(&value.plan.control_namespace_uuid)?;
         value.validate_shape(namespace)?;
@@ -470,6 +497,59 @@ impl LegacyNamedAdmissionCheckpoint {
             .map(|saved| (saved.request(), saved.receipt()))
     }
 
+    pub(crate) fn import_verification_plan(&self) -> Option<&LegacyNamedImportVerificationPlanV1> {
+        self.import_verification.as_deref()
+    }
+
+    /// Add the one immutable verification-helper intent after the exact
+    /// successful named Import Terminal receipt is retained. Replaying the
+    /// same helper id is idempotent; a different id conflicts.
+    pub(crate) fn with_import_verification_plan(mut self, helper_id: Uuid) -> JournalResult<Self> {
+        let namespace = uuid(&self.plan.control_namespace_uuid)?;
+        self.validate_shape(namespace)?;
+        if let Some(saved) = self.import_verification_plan() {
+            ensure(saved.preparation().policy().helper_id == helper_id.to_string())?;
+            return Ok(self);
+        }
+        let (parent, permission) = self.import_verification_inputs()?;
+        let policy = checked(helper_execution_policy_v1(
+            &parent,
+            HelperPurposeV1::ImportVerification,
+            helper_id,
+        ))?;
+        let preparation = HelperPreparationV1::new(policy, permission, None)?;
+        self.import_verification = Some(Box::new(LegacyNamedImportVerificationPlanV1 {
+            version: 1,
+            preparation,
+            parent_revision: parent.revision,
+        }));
+        self.validate_shape(namespace)?;
+        Ok(self)
+    }
+
+    fn import_verification_inputs(&self) -> JournalResult<(WorkerV1, HelperPermissionV1)> {
+        let reserved = self
+            .admission_result()
+            .filter(|result| result.accepted)
+            .and_then(|result| result.worker.as_ref())
+            .ok_or(JournalError::Conflict)?;
+        let import_arm = self
+            .import_arm()
+            .filter(|arm| arm.receipt().is_some())
+            .ok_or(JournalError::Conflict)?;
+        let prepare = WorkerMutationV1 {
+            version: 1,
+            operation_id: import_arm.arm.operation_id.clone(),
+            worker_id: reserved.worker_id.clone(),
+            attempt_id: reserved.attempt.attempt_id.clone(),
+            expected_revision: reserved.revision,
+            transition: WorkerTransitionV1::Prepare,
+        };
+        let parent = checked(crate::audit::expected_worker_transition(reserved, &prepare))?;
+        checked(import_arm.arm.validate_for_parent(&parent))?;
+        Ok((parent, self.import_verification_permission()?))
+    }
+
     /// Build the evidence for a separate verification Arm from the exact
     /// acknowledged Import result. Store still checks the current parent.
     #[allow(dead_code, reason = "the separate verification Arm is composed next")]
@@ -586,7 +666,8 @@ impl LegacyNamedAdmissionCheckpoint {
                     && self.import_arm.is_none()
                     && self.import_creation.is_none()
                     && self.import_claim.is_none()
-                    && self.import_observations.is_empty(),
+                    && self.import_observations.is_empty()
+                    && self.import_verification.is_none(),
             )?,
             2 => hash(self.archive_digest().ok_or(JournalError::Conflict)?)?,
             _ => return Err(JournalError::UnsupportedVersion),
@@ -644,6 +725,29 @@ impl LegacyNamedAdmissionCheckpoint {
             self.validate_import_claim(claim)?;
         }
         self.validate_import_observations()?;
+        if let Some(saved) = self.import_verification_plan() {
+            ensure(saved.version == 1 && saved.preparation().owned().is_none())?;
+            let helper_id = uuid(&saved.preparation().policy().helper_id)?;
+            let (parent, permission) = self.import_verification_inputs()?;
+            let expected = checked(helper_execution_policy_v1(
+                &parent,
+                HelperPurposeV1::ImportVerification,
+                helper_id,
+            ))?;
+            ensure(
+                saved.preparation().policy().purpose == HelperPurposeV1::ImportVerification
+                    && saved.parent_revision() == parent.revision
+                    && equal(saved.preparation().policy(), &expected)?
+                    && equal(saved.preparation().permission(), &permission)?,
+            )?;
+            let import_helper = match permission {
+                HelperPermissionV1::ImportVerification {
+                    import_helper_id, ..
+                } => uuid(&import_helper_id)?,
+                _ => return Err(JournalError::Conflict),
+            };
+            ensure(helper_id != import_helper && helper_id != self.plan.operation_id)?;
+        }
         ensure(canonical(self)?.len() <= MAX_OPERATION_BYTES)
     }
 
@@ -814,7 +918,8 @@ impl LegacyNamedAdmissionCheckpoint {
                 self.receipt.is_none()
                     && self.import_arm.is_none()
                     && self.import_creation.is_none()
-                    && self.import_claim.is_none(),
+                    && self.import_claim.is_none()
+                    && self.import_verification.is_none(),
             ),
             Some(old) => {
                 ensure(
@@ -886,6 +991,26 @@ impl LegacyNamedAdmissionCheckpoint {
                         let current_receipt = current.receipt().ok_or(JournalError::Conflict)?;
                         ensure(equal(receipt, current_receipt)?)?;
                     }
+                }
+                match (
+                    old.import_verification_plan(),
+                    self.import_verification_plan(),
+                ) {
+                    (None, None) => {}
+                    (None, Some(current)) => {
+                        // The named Terminal ACK must predate the verification
+                        // intent; one atomic write cannot invent both facts.
+                        let previous_permission = old.import_verification_permission()?;
+                        ensure(
+                            current.version == 1
+                                && current.preparation().owned().is_none()
+                                && equal(current.preparation().permission(), &previous_permission)?,
+                        )?;
+                    }
+                    (Some(previous), Some(current)) => {
+                        ensure(equal(previous, current)?)?;
+                    }
+                    (Some(_), None) => return Err(JournalError::Conflict),
                 }
                 match (old.import_arm(), self.import_arm()) {
                     (None, None) => Ok(()),
@@ -2366,6 +2491,12 @@ mod tests {
             Err(JournalError::Conflict)
         ));
         assert!(matches!(
+            terminal_first
+                .clone()
+                .with_import_verification_plan(Uuid::new_v4()),
+            Err(JournalError::Conflict)
+        ));
+        assert!(matches!(
             terminal_first.with_import_observation(started_request.clone()),
             Err(JournalError::Conflict)
         ));
@@ -2398,6 +2529,48 @@ mod tests {
                     .clone(),
             }
         )?);
+        let verification_helper_id = Uuid::new_v4();
+        let verification_plan = verified_prefix
+            .clone()
+            .with_import_verification_plan(verification_helper_id)?;
+        let retained_plan = verification_plan
+            .import_verification_plan()
+            .ok_or(JournalError::Conflict)?;
+        assert_eq!(
+            retained_plan.preparation().policy().purpose,
+            HelperPurposeV1::ImportVerification
+        );
+        assert!(retained_plan.preparation().owned().is_none());
+        assert_eq!(retained_plan.parent_revision(), arm.expected_revision);
+        assert!(equal(
+            retained_plan.preparation().permission(),
+            &verified_prefix.import_verification_permission()?
+        )?);
+        let verification_bytes = canonical(&verification_plan)?;
+        let reopened_plan: LegacyNamedAdmissionCheckpoint =
+            serde_json::from_slice(&verification_bytes)?;
+        assert_eq!(canonical(&reopened_plan)?, verification_bytes);
+        assert!(equal(
+            reopened_plan.import_verification_plan().unwrap(),
+            retained_plan
+        )?);
+        assert!(equal(
+            &verification_plan
+                .clone()
+                .with_import_verification_plan(verification_helper_id)?,
+            &verification_plan
+        )?);
+        assert!(matches!(
+            verification_plan
+                .clone()
+                .with_import_verification_plan(Uuid::new_v4()),
+            Err(JournalError::Conflict)
+        ));
+        verification_plan.validate_transition(Some(&verified_prefix))?;
+        assert!(matches!(
+            verification_plan.validate_transition(Some(&observation_base)),
+            Err(JournalError::Conflict)
+        ));
         let mut failed = terminal_request.clone();
         failed.observation.observation.exit_code = Some(1);
         let failed_receipt = MutationReceiptV1 {
@@ -2410,6 +2583,10 @@ mod tests {
             .acknowledge_import_observation(&failed, failed_receipt)?;
         assert!(matches!(
             failed_prefix.import_verification_permission(),
+            Err(JournalError::Conflict)
+        ));
+        assert!(matches!(
+            failed_prefix.with_import_verification_plan(Uuid::new_v4()),
             Err(JournalError::Conflict)
         ));
         let terminal_pending = observation_writer
