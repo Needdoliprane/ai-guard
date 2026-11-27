@@ -324,6 +324,50 @@ fn legacy_named_admission_commits_a_grant_and_replays_after_reopen() {
     let f = Fixture::new();
     let (store, _) = f.provision(f.create().unwrap()).unwrap();
     let (request, mut initiator) = f.confirmed_request(&store);
+    {
+        let after_fences = store.head().unwrap() + 1;
+        let db = store.db.lock().unwrap();
+        let confirmed = event_by_id(&db, &request.binding_ref.to_string())
+            .unwrap()
+            .unwrap();
+        let launch = &request.admission.admission;
+        let unrelated = Uuid::new_v4().to_string();
+        for (operation, session) in [
+            (launch.operation_id.as_str(), unrelated.as_str()),
+            (unrelated.as_str(), launch.launch.session_id.as_str()),
+        ] {
+            protect_manual_at(&db, operation, session, confirmed.seq).unwrap();
+            assert_eq!(
+                protect_manual_at(&db, operation, session, after_fences)
+                    .unwrap_err()
+                    .downcast_ref::<ControlFailure>(),
+                Some(&ControlFailure::Conflict)
+            );
+        }
+    }
+    let confirmation_revision = store.identity_authorization_revision().unwrap();
+    store
+        .mutate_identity(&IdentityMutationV1 {
+            version: 1,
+            actor: f.operator.clone(),
+            operation_id: Uuid::new_v4().to_string(),
+            change: IdentityChangeV1::Account {
+                expected_revision: 0,
+                account: HumanAccountV1 {
+                    version: 1,
+                    principal: PrincipalRefV1::HumanLocal {
+                        installation_id: Uuid::new_v4().to_string(),
+                        account_id: Uuid::new_v4().to_string(),
+                    },
+                    display_name: "Unrelated admission fixture account".into(),
+                    revision: 1,
+                    active: true,
+                },
+            },
+        })
+        .unwrap();
+    let admission_revision = store.identity_authorization_revision().unwrap();
+    assert_eq!(admission_revision, confirmation_revision + 1);
     let Some(AuthenticatedWorkload::Broker(broker)) =
         store.authenticate_workload_token(BROKER_TOKEN).unwrap()
     else {
@@ -390,6 +434,20 @@ fn legacy_named_admission_commits_a_grant_and_replays_after_reopen() {
         committed.audit_seq,
         committed.admission.receipt.audit_seq + 2
     );
+    let fact = store
+        .events(&EventQuery {
+            kind: Some("control.legacy_session_prepare.admission".into()),
+            limit: Some(1),
+            ..Default::default()
+        })
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert_eq!(fact.hash, committed.audit_hash);
+    assert_eq!(
+        fact.event.data["authorization_revision"],
+        admission_revision
+    );
     initiator.active = false;
     initiator.revision += 1;
     store
@@ -408,11 +466,20 @@ fn legacy_named_admission_commits_a_grant_and_replays_after_reopen() {
             .legacy_confirmed_plan(&broker, request.binding_ref)
             .is_err()
     );
-    let after_revocation = store.integrity().unwrap().head_hash;
     drop(store);
 
     let reopened = f.reopen();
     assert!(!reopened.supervision_state().unwrap().active);
+    let mut retired_target = f.target.clone();
+    retired_target.expected_revision = 1;
+    retired_target.target.catalogue.revision = 2;
+    retired_target.target.catalogue.active = false;
+    let retired = reopened
+        .provision_legacy_session_target(f.operator.clone(), retired_target)
+        .unwrap();
+    drop(reopened);
+    let reopened = f.reopen();
+    assert!(reopened.integrity().unwrap().valid);
     *reopened.named_admission_commit_observation.lock().unwrap() =
         Some(crate::broker_registry::parse_time(DEADLINE).unwrap());
     assert_eq!(
@@ -423,13 +490,13 @@ fn legacy_named_admission_commits_a_grant_and_replays_after_reopen() {
         Some(&WorkloadFailureV1::Unauthorized)
     );
     assert!(reopened.integrity().unwrap().valid);
-    assert_eq!(reopened.integrity().unwrap().head_hash, after_revocation);
+    assert_eq!(reopened.integrity().unwrap().head_hash, retired.audit_hash);
     let replay = apply(&reopened, &request).unwrap();
     assert!(replay.admission.replayed);
     assert_eq!(replay.admission.receipt, committed.admission.receipt);
     assert_eq!(replay.grant, committed.grant);
     assert_eq!(replay.audit_hash, committed.audit_hash);
-    assert_eq!(reopened.integrity().unwrap().head_hash, after_revocation);
+    assert_eq!(reopened.integrity().unwrap().head_hash, retired.audit_hash);
     assert_eq!(reopened.worker_quota(&quota).unwrap().held_workers, 1);
     assert!(apply(&reopened, &divergent).is_err());
 }

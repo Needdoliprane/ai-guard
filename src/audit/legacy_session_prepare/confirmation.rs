@@ -17,11 +17,12 @@ mod admission;
 #[cfg(test)]
 mod tests;
 
+pub(in crate::audit) use admission::{ADMITTED, validate_admission_initiator};
+
 const PREPARED: &str = "control.legacy_session_prepare.prepared";
 const CONFIRMED: &str = "control.legacy_session_prepare.confirmed";
 const FENCED: &str = "control.legacy_session_prepare.fenced";
-pub(in crate::audit) const REFERENCE_KINDS: [&str; 4] =
-    [PREPARED, CONFIRMED, FENCED, admission::ADMITTED];
+pub(in crate::audit) const REFERENCE_KINDS: [&str; 4] = [PREPARED, CONFIRMED, FENCED, ADMITTED];
 
 /// Borrowed proof from the authenticated local gateway context. The digest
 /// is used solely to re-read the credential inside the write transaction.
@@ -94,6 +95,7 @@ struct ResolvedLegacyConfirmedPlan {
     plan: LegacyConfirmedPlanV1,
     confirmed: StoredEvent,
     initiator: Initiator,
+    authorization_revision: u64,
     broker_deadline: DateTime<Utc>,
 }
 
@@ -218,24 +220,40 @@ fn require_target_launcher(record: &TargetRecord, initiator: &Initiator) -> anyh
     Ok(())
 }
 
+fn require_target_at(
+    db: &Connection,
+    selection: crate::control::session_control::SessionLaunchTargetSelectionV1,
+    initiator: &Initiator,
+    before_seq: i64,
+) -> anyhow::Result<(StoredEvent, TargetRecord)> {
+    let (stored, record) = target(db, selection)?;
+    anyhow::ensure!(stored.seq < before_seq, IdentityFailureV1::Conflict);
+    require_target_launcher(&record, initiator)?;
+    let catalogue = &record.command.target.catalogue;
+    // Target revisions are contiguous in audit order.
+    anyhow::ensure!(
+        !event_is_present(
+            db,
+            &target_event_id(catalogue.launch_target_id, catalogue.revision + 1),
+            Some(before_seq),
+        )?,
+        IdentityFailureV1::Conflict
+    );
+    Ok((stored, record))
+}
+
 fn require_current_target(
     db: &Connection,
     selection: crate::control::session_control::SessionLaunchTargetSelectionV1,
     initiator: &Initiator,
     clock: &workload::AuthorizedControlTimeV1,
 ) -> anyhow::Result<(StoredEvent, TargetRecord)> {
-    let (stored, record) = target(db, selection)?;
-    require_target_launcher(&record, initiator)?;
-    let catalogue = &record.command.target.catalogue;
-    anyhow::ensure!(
-        event_by_id(
-            db,
-            &target_event_id(catalogue.launch_target_id, catalogue.revision + 1)
-        )?
-        .is_none(),
-        IdentityFailureV1::Conflict
-    );
-    validate_target_broker(db, &record.command, clock.at(), audit_head(db)?.0 + 1)?;
+    let before_seq = audit_head(db)?
+        .0
+        .checked_add(1)
+        .context("audit sequence exhausted")?;
+    let (stored, record) = require_target_at(db, selection, initiator, before_seq)?;
+    validate_target_broker(db, &record.command, clock.at(), before_seq)?;
     Ok((stored, record))
 }
 
@@ -304,18 +322,56 @@ pub(in crate::audit) fn protect_manual(
     operation: &str,
     session: &str,
 ) -> anyhow::Result<()> {
-    if !capability_present(tx)? {
+    protect_manual_before(tx, operation, session, None)
+}
+
+pub(in crate::audit) fn protect_manual_at(
+    tx: &Connection,
+    operation: &str,
+    session: &str,
+    before_seq: i64,
+) -> anyhow::Result<()> {
+    protect_manual_before(tx, operation, session, Some(before_seq))
+}
+
+fn protect_manual_before(
+    tx: &Connection,
+    operation: &str,
+    session: &str,
+    before_seq: Option<i64>,
+) -> anyhow::Result<()> {
+    let enabled = match before_seq {
+        Some(seq) => tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM events WHERE kind=?1 AND seq<?2)",
+            params![GENESIS_KIND, seq],
+            |row| row.get(0),
+        )?,
+        None => capability_present(tx)?,
+    };
+    if !enabled {
         return Ok(());
     }
-    let protected = named_operation(tx, canonical_uuid(operation)?)?
-        || event_by_id(tx, &session_fence_id(canonical_uuid(session)?))?.is_some();
+    let protected = named_operation_before(tx, canonical_uuid(operation)?, before_seq)?
+        || event_is_present(tx, &session_fence_id(canonical_uuid(session)?), before_seq)?;
     anyhow::ensure!(!protected, ControlFailure::Conflict);
     Ok(())
 }
 
 fn named_operation(tx: &Connection, operation: Uuid) -> anyhow::Result<bool> {
-    Ok(event_by_id(tx, &prepare_id(operation))?.is_some()
-        || event_by_id(tx, &operation_fence_id(operation))?.is_some())
+    named_operation_before(tx, operation, None)
+}
+
+fn named_operation_before(
+    tx: &Connection,
+    operation: Uuid,
+    before_seq: Option<i64>,
+) -> anyhow::Result<bool> {
+    Ok(event_is_present(tx, &prepare_id(operation), before_seq)?
+        || event_is_present(tx, &operation_fence_id(operation), before_seq)?)
+}
+
+fn event_is_present(tx: &Connection, id: &str, before_seq: Option<i64>) -> anyhow::Result<bool> {
+    Ok(event_by_id(tx, id)?.is_some_and(|event| before_seq.is_none_or(|seq| event.seq < seq)))
 }
 
 fn matching_prepare(record: &Prepared, request: &SessionLaunchRequestV1) -> anyhow::Result<()> {
@@ -451,7 +507,7 @@ pub(in crate::audit) fn validate_reference_event(
                 "invalid Legacy confirmation fence"
             );
         }
-        admission::ADMITTED => admission::validate_fact(tx, stored)?,
+        ADMITTED => admission::validate_fact(tx, stored)?,
         _ => anyhow::bail!("unknown Legacy reference event"),
     }
     Ok(())
@@ -563,6 +619,7 @@ impl Store {
             plan,
             confirmed,
             initiator: prepared.initiator,
+            authorization_revision: scope.authorization_revision(),
             broker_deadline,
         })
     }

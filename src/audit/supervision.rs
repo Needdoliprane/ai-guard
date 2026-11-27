@@ -654,6 +654,12 @@ impl Replay {
             Input::Arm(request) => {
                 invalid(record.worker_record.is_none())?;
                 let parent = self.parent(workers, &request.worker_id)?;
+                legacy_session_prepare::protect_manual_at(
+                    db,
+                    &parent.admission_operation_id,
+                    &parent.launch.session_id,
+                    stored.seq,
+                )?;
                 self.bound(parent, &request.intent_hash)?;
                 request.validate_for_parent(parent)?;
                 self.permission(db, parent, request, stored.seq)?;

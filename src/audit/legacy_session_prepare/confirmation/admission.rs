@@ -1,7 +1,7 @@
 //! One checked Legacy transaction for a confirmed admission and nominative grant.
 use super::*;
 use crate::{
-    audit::supervision_admission as admission_codec,
+    audit::{identity::projection::Projection, supervision_admission as admission_codec},
     control::{
         AdmissionResultV1, DecisionPhaseV1, MutationReceiptV1, QuotaPolicyV1, conflict,
         session_control::LegacyNamedSupervisedAdmissionV1,
@@ -13,7 +13,7 @@ use crate::{
     workload::WorkloadFailureV1,
 };
 
-pub(super) const ADMITTED: &str = "control.legacy_session_prepare.admission";
+pub(in crate::audit) const ADMITTED: &str = "control.legacy_session_prepare.admission";
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -60,6 +60,7 @@ struct AdmissionFact {
     version: u32,
     binding_ref: Uuid,
     confirmation_hash: String,
+    authorization_revision: u64,
     broker_profile_id: String,
     actor: AdmissionActor,
     input_hash: String,
@@ -163,23 +164,60 @@ pub(super) fn require_link_when_admitted(
     Ok(())
 }
 
+fn admission_origin(
+    db: &Connection,
+    binding_ref: Uuid,
+) -> anyhow::Result<(StoredEvent, Confirmed, Prepared)> {
+    let confirmed = event_by_id(db, &binding_ref.to_string())?
+        .context("missing Legacy named admission confirmation")?;
+    let confirmation: Confirmed = decoded(&confirmed, CONFIRMED)?;
+    let preparation =
+        event_by_id(db, &confirmation.preparation_id)?.context("missing Legacy preparation")?;
+    let prepared = decoded(&preparation, PREPARED)?;
+    Ok((confirmed, confirmation, prepared))
+}
+
+pub(in crate::audit) fn validate_admission_initiator(
+    db: &Connection,
+    stored: &StoredEvent,
+    projection: &Projection,
+) -> anyhow::Result<()> {
+    let fact: AdmissionFact = decoded(stored, ADMITTED)?;
+    let (_, _, prepared) = admission_origin(db, fact.binding_ref)?;
+    let initiator = &prepared.initiator;
+    // The structural replay enforces adjacency. The intervening first session
+    // grant leaves the account, credential, membership and revision unchanged.
+    projection.require_local_launch_at(
+        &initiator.principal,
+        (&initiator.credential_id, initiator.credential_revision),
+        (&initiator.membership_id, initiator.membership_revision),
+        (&fact.actor.tenant_id, &initiator.organization),
+        (
+            fact.admission.audit_seq,
+            crate::broker_registry::parse_time(&stored.event.timestamp)?,
+        ),
+    )
+}
+
 pub(super) fn validate_fact(db: &Connection, stored: &StoredEvent) -> anyhow::Result<()> {
     let fact: AdmissionFact = decoded(stored, ADMITTED)?;
     let (admission, record) = admission_record(db, &fact)?;
     let (supervised, worker_record) = record.admission()?;
-    let confirmed = event_by_id(db, &fact.binding_ref.to_string())?
-        .context("missing Legacy named admission confirmation")?;
-    let confirmation: Confirmed = decoded(&confirmed, CONFIRMED)?;
+    let (confirmed, confirmation, prepared) = admission_origin(db, fact.binding_ref)?;
     let authority = confirmation
         .admission_authority
         .as_ref()
         .filter(|_| confirmation.version == 2)
         .context("missing Legacy named admission authority")?;
-    let preparation =
-        event_by_id(db, &confirmation.preparation_id)?.context("missing Legacy preparation")?;
-    let prepared: Prepared = decoded(&preparation, PREPARED)?;
-    let (target_event, target) = target(db, confirmation.request.selection()?)?;
+    let (target_event, target) = require_target_at(
+        db,
+        confirmation.request.selection()?,
+        &prepared.initiator,
+        admission.seq,
+    )?;
     let selected = &target.command.target;
+    // The linked fact retains the authorization observation made before
+    // staging; the transaction separately checks the real deadline at commit.
     let at = crate::broker_registry::parse_time(&stored.event.timestamp)?;
     conflict(
         fact.version == 1
@@ -188,6 +226,9 @@ pub(super) fn validate_fact(db: &Connection, stored: &StoredEvent) -> anyhow::Re
             && confirmed.seq < admission.seq
             && target_event.hash == prepared.target_audit_hash
             && at < authority.expires_at
+            && fact.authorization_revision >= authority.authorization_revision
+            && fact.authorization_revision
+                == identity::authorization_revision_before(db, admission.seq)?
             && fact.actor.tenant_id == selected.catalogue.tenant_id
             && fact.actor.broker_id == selected.broker_id.to_string()
             && fact.actor.grant_revision == selected.broker_grant_revision,
@@ -335,6 +376,7 @@ impl Store {
             version: 1,
             binding_ref: request.binding_ref,
             confirmation_hash: resolved.confirmed.hash,
+            authorization_revision: resolved.authorization_revision,
             broker_profile_id: request.broker_profile_id.clone(),
             actor: AdmissionActor::capture(broker),
             input_hash,

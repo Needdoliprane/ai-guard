@@ -354,6 +354,55 @@ pub(super) fn authorization_revision_before(db: &Connection, seq: i64) -> anyhow
     }
 }
 
+impl Projection {
+    pub(super) fn require_local_launch_at(
+        &self,
+        principal: &PrincipalRefV1,
+        (credential_id, credential_revision): (&str, u64),
+        (membership_id, membership_revision): (&str, u64),
+        (tenant, organization): (&str, &str),
+        (before_seq, at): (i64, chrono::DateTime<chrono::Utc>),
+    ) -> anyhow::Result<()> {
+        let (account, account_seq) = self
+            .accounts
+            .get(&principal.key()?)
+            .ok_or(IdentityFailureV1::IdentityRevoked)?;
+        invalid(account.active && *account_seq < before_seq)?;
+        let (credential, credential_seq) = self
+            .credentials
+            .get(credential_id)
+            .ok_or(IdentityFailureV1::IdentityRevoked)?;
+        let expiry = credential
+            .expires_at
+            .as_deref()
+            .map(crate::broker_registry::parse_time)
+            .transpose()?;
+        invalid(
+            credential.active
+                && &credential.principal == principal
+                && credential.revision == credential_revision
+                && expiry.is_none_or(|deadline| at < deadline)
+                && *credential_seq < before_seq,
+        )?;
+        let (member, member_seq) = self
+            .memberships
+            .get(membership_id)
+            .ok_or(IdentityFailureV1::ContextRevoked)?;
+        let scope = crate::identity::authorize_context(
+            principal,
+            member,
+            ContextModeV1::Personal,
+            membership_revision,
+        )?;
+        invalid(
+            *member_seq < before_seq
+                && scope.tenant_id() == tenant
+                && scope.organization_scope() == organization
+                && scope.has_capability(HumanCapabilityV1::LaunchSession),
+        )
+    }
+}
+
 /// Full replay is an integrity/startup operation, never a human read query.
 pub(super) fn validate(db: &Connection) -> anyhow::Result<()> {
     let version: i64 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;
@@ -367,14 +416,22 @@ pub(super) fn validate(db: &Connection) -> anyhow::Result<()> {
         |r| r.get(0),
     )?;
     let mut projection = Projection::default();
-    let mut statement = db.prepare("SELECT seq,received_at,prev_hash,hash,payload FROM events WHERE kind GLOB 'control.identity.*' ORDER BY seq")?;
+    let mut statement = db.prepare(
+        "SELECT seq,received_at,prev_hash,hash,payload FROM events \
+         WHERE kind GLOB 'control.identity.*' OR kind=?1 ORDER BY seq",
+    )?;
     let mut seen_genesis = false;
     let mut seen_human_access = false;
     let mut seen_broker_access = false;
     let mut seen_worker_access = false;
     let mut seen_rights_access = false;
-    for row in statement.query_map([], row_event)? {
+    for row in statement.query_map([legacy_session_prepare::ADMITTED], row_event)? {
         let stored = row?;
+        if stored.event.kind == legacy_session_prepare::ADMITTED {
+            invalid(seen_rights_access && legacy_session_prepare::format_admits(version))?;
+            legacy_session_prepare::validate_admission_initiator(db, &stored, &projection)?;
+            continue;
+        }
         if stored.event.kind == "control.identity.genesis" {
             invalid(!seen_genesis && stored.seq == genesis.seq && stored.hash == genesis.hash)?;
             seen_genesis = true;
