@@ -73,6 +73,17 @@ struct Confirmed {
     preparation_id: String,
     preparation_audit_hash: String,
     session_id: Uuid,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    admission_authority: Option<ConfirmationAuthority>,
+}
+
+/// The authorization limits observed at confirmation. Replaying the public
+/// receipt can use a fresh context, but cannot renew this retained authority.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ConfirmationAuthority {
+    expires_at: DateTime<Utc>,
+    authorization_revision: u64,
 }
 
 #[derive(Clone, Copy, Serialize, Deserialize)]
@@ -336,14 +347,26 @@ pub(in crate::audit) fn validate_reference_event(
                 event_by_id(tx, &record.preparation_id)?.context("missing preparation")?;
             let preparation: Prepared = decoded(&prepared, PREPARED)?;
             matching_prepare(&preparation, &record.request)?;
+            let confirmed_at = crate::broker_registry::parse_time(&event.timestamp)?;
+            let prepare_deadline =
+                crate::broker_registry::parse_time(&preparation.request.expires_at)?;
+            let valid_authority = match (record.version, record.admission_authority.as_ref()) {
+                (1, None) => true,
+                (2, Some(authority)) => {
+                    authority.expires_at > confirmed_at
+                        && authority.expires_at <= prepare_deadline
+                        && authority.authorization_revision
+                            >= preparation.initiator.authorization_revision
+                }
+                _ => false,
+            };
             anyhow::ensure!(
-                record.version == 1
+                valid_authority
                     && prepared.seq < stored.seq
                     && prepared.hash == record.preparation_audit_hash
                     && event.id == confirmation_ref(&prepared, preparation.request.operation_id)
                     && record.session_id == session_id(record.request.operation_id)?
-                    && crate::broker_registry::parse_time(&preparation.request.expires_at)?
-                        > crate::broker_registry::parse_time(&event.timestamp)?,
+                    && prepare_deadline > confirmed_at,
                 "invalid Legacy confirmation"
             );
             for kind in [FenceKind::Operation, FenceKind::Session] {
@@ -561,11 +584,15 @@ impl Store {
         )?;
         anyhow::ensure!(!occupied, IdentityFailureV1::Conflict);
         let record = Confirmed {
-            version: 1,
+            version: 2,
             request,
             preparation_id,
             preparation_audit_hash: stored.hash,
             session_id,
+            admission_authority: Some(ConfirmationAuthority {
+                expires_at: expires,
+                authorization_revision: initiator.authorization_revision,
+            }),
         };
         let confirmed =
             self.append_legacy_session_record(&tx, &clock, CONFIRMED, id.clone(), &record)?;

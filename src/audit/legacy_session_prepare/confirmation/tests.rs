@@ -401,6 +401,69 @@ fn legacy_prepare_and_confirm_leave_the_stop_audit_reserve_available() {
 }
 
 #[test]
+fn legacy_confirmation_keeps_its_shorter_deadline_after_reopen_and_replay() {
+    let mut f = Fixture::new();
+    let prepared = f
+        .store
+        .legacy_session_prepare_local(f.proof(), f.request())
+        .unwrap();
+    let request = SessionLaunchRequestV1 {
+        version: 1,
+        operation_id: Uuid::new_v4(),
+        launch_target_id: f.target_id,
+        expected_target_revision: 1,
+        preparation_operation_id: prepared.operation_id,
+        preparation_input_hash: prepared.input_hash,
+    };
+    let confirmation_deadline = "2124-01-01T00:00:00.123456789Z";
+    let proof = LegacySessionLocalProof {
+        context_expires_at: confirmation_deadline,
+        ..f.proof()
+    };
+    let confirmation = f
+        .store
+        .legacy_session_confirm_local(proof, request.clone())
+        .unwrap();
+    let query = crate::audit::EventQuery {
+        kind: Some("control.legacy_session_prepare.confirmed".into()),
+        ..Default::default()
+    };
+    let records = f.store.events(&query).unwrap();
+    assert_eq!(records.len(), 1);
+    let event = &records[0].event;
+    assert_eq!(event.id, confirmation.binding_ref);
+    assert_eq!(
+        event.data["admission_authority"]["expires_at"],
+        confirmation_deadline
+    );
+    assert_eq!(
+        event.data["admission_authority"]["authorization_revision"],
+        f.scope.authorization_revision()
+    );
+
+    let path = f
+        .directory
+        .path()
+        .canonicalize()
+        .unwrap()
+        .join("legacy.sqlite");
+    drop(f.store);
+    f.store = Fixture::open(&path, Redactor::new(vec![]));
+    let head = f.store.head().unwrap();
+    let replay = f
+        .store
+        .legacy_session_confirm_local(f.proof(), request)
+        .unwrap();
+    assert!(replay.replayed);
+    assert_eq!(replay.binding_ref, confirmation.binding_ref);
+    assert_eq!(replay.audit_hash, confirmation.audit_hash);
+    assert_eq!(f.store.head().unwrap(), head);
+    let replayed = f.store.events(&query).unwrap();
+    assert_eq!(replayed.len(), 1);
+    assert_eq!(replayed[0].event.data, event.data);
+}
+
+#[test]
 fn redacted_legacy_prepare_event_identifier_leaves_the_head_and_reopen_intact() {
     let mut f = Fixture::new();
     let request = f.request();
