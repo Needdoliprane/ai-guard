@@ -29,7 +29,7 @@ pub(crate) struct LegacySessionLocalProof<'a> {
     pub context_expires_at: &'a str,
 }
 
-#[derive(Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Initiator {
     principal: PrincipalRefV1,
@@ -39,6 +39,19 @@ struct Initiator {
     membership_revision: u64,
     authorization_revision: u64,
     organization: String,
+}
+
+impl Initiator {
+    fn same_binding(&self, current: &Self) -> bool {
+        // The tenant's authorization revision is retained for provenance and
+        // checked on the presented scope before comparing the durable binding.
+        self.principal == current.principal
+            && self.credential_id == current.credential_id
+            && self.credential_revision == current.credential_revision
+            && self.membership_id == current.membership_id
+            && self.membership_revision == current.membership_revision
+            && self.organization == current.organization
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -428,7 +441,7 @@ impl Store {
         if let Some(stored) = event_by_id(&tx, &id)? {
             let record: Prepared = decoded(&stored, PREPARED)?;
             anyhow::ensure!(
-                record.initiator == initiator,
+                record.initiator.same_binding(&initiator),
                 IdentityFailureV1::PermissionDenied
             );
             anyhow::ensure!(record.request == request, IdentityFailureV1::Conflict);
@@ -481,7 +494,7 @@ impl Store {
         let stored = event_by_id(&tx, &preparation_id)?.ok_or(IdentityFailureV1::NotFound)?;
         let prepared: Prepared = decoded(&stored, PREPARED)?;
         anyhow::ensure!(
-            prepared.initiator == initiator,
+            prepared.initiator.same_binding(&initiator),
             IdentityFailureV1::PermissionDenied
         );
         matching_prepare(&prepared, &request)?;

@@ -509,6 +509,25 @@ async fn legacy_local_confirmation_survives_reopen_without_admission() {
             .unwrap(),
         )
     };
+    let add_unrelated_account = |store: &Store| {
+        let before = store.identity_authorization_revision().unwrap();
+        let receipt = store
+            .mutate_identity(&control(IdentityChangeV1::Account {
+                expected_revision: 0,
+                account: HumanAccountV1 {
+                    version: 1,
+                    principal: PrincipalRefV1::HumanLocal {
+                        installation_id: Uuid::new_v4().to_string(),
+                        account_id: Uuid::new_v4().to_string(),
+                    },
+                    display_name: "Unrelated fixture account".into(),
+                    revision: 1,
+                    active: true,
+                },
+            }))
+            .unwrap();
+        assert_eq!(receipt.authorization_revision, before + 1);
+    };
     let reopened = Arc::new(reopened);
     let router = make_router(reopened.clone());
     let (status, who) = call(&router, "/api/v1/human/identity", &credential, None).await;
@@ -535,6 +554,31 @@ async fn legacy_local_confirmation_survives_reopen_without_admission() {
         "version": 1, "operation_id": Uuid::new_v4(), "launch_target_id": target_id, "expected_target_revision": 1,
         "preparation_operation_id": prepare_op, "preparation_input_hash": prepare_receipt["input_hash"],
     });
+    add_unrelated_account(&reopened);
+    let head = reopened.head().unwrap();
+    for (path, input) in [
+        ("/api/v1/human/legacy/sessions/prepare", &prepared),
+        ("/api/v1/human/legacy/sessions/confirm", &confirm),
+    ] {
+        let (status, body) = call(&router, path, &credential, Some((context, input))).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["error"]["code"], "context_revoked");
+    }
+    let (status, who) = call(&router, "/api/v1/human/identity", &credential, None).await;
+    assert_eq!(status, StatusCode::OK);
+    let context = who["contexts"][0]["id"].as_str().unwrap();
+    let (status, mut replay) = call(
+        &router,
+        "/api/v1/human/legacy/sessions/prepare",
+        &credential,
+        Some((context, &prepared)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(replay["replayed"], true);
+    replay["replayed"] = false.into();
+    assert_eq!(replay, prepare_receipt);
+    assert_eq!(reopened.head().unwrap(), head);
     let (status, receipt) = call(
         &router,
         "/api/v1/human/legacy/sessions/confirm",
@@ -622,12 +666,13 @@ async fn legacy_local_confirmation_survives_reopen_without_admission() {
     let reopened = Arc::new(
         Store::open_existing_for_tenant(&path, "tenant-a", Redactor::new(vec![]), 1000).unwrap(),
     );
+    add_unrelated_account(&reopened);
     let router = make_router(reopened.clone());
     let (status, who) = call(&router, "/api/v1/human/identity", &credential, None).await;
     assert_eq!(status, StatusCode::OK);
     let head = reopened.head().unwrap();
     let context = who["contexts"][0]["id"].as_str().unwrap();
-    let (status, replay) = call(
+    let (status, mut replay) = call(
         &router,
         "/api/v1/human/legacy/sessions/confirm",
         &credential,
@@ -635,9 +680,9 @@ async fn legacy_local_confirmation_survives_reopen_without_admission() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(replay["binding_ref"], binding_ref);
-    assert_eq!(replay["audit_hash"], receipt["audit_hash"]);
     assert_eq!(replay["replayed"], true);
+    replay["replayed"] = false.into();
+    assert_eq!(replay, receipt);
     assert!(reopened.workers().unwrap().is_empty());
     assert_eq!(
         reopened
@@ -656,6 +701,29 @@ async fn legacy_local_confirmation_survives_reopen_without_admission() {
             .is_none()
     );
     assert!(reopened.integrity().unwrap().valid);
+    assert_eq!(reopened.head().unwrap(), head);
+
+    let mut restricted = membership;
+    restricted.revision += 1;
+    restricted.capabilities = [HumanCapabilityV1::ReadMetadata].into_iter().collect();
+    reopened
+        .mutate_identity(&control(IdentityChangeV1::Membership {
+            expected_revision: restricted.revision - 1,
+            membership: restricted,
+        }))
+        .unwrap();
+    let head = reopened.head().unwrap();
+    let (status, who) = call(&router, "/api/v1/human/identity", &credential, None).await;
+    assert_eq!(status, StatusCode::OK);
+    let context = who["contexts"][0]["id"].as_str().unwrap();
+    for (path, input) in [
+        ("/api/v1/human/legacy/sessions/prepare", &prepared),
+        ("/api/v1/human/legacy/sessions/confirm", &confirm),
+    ] {
+        let (status, body) = call(&router, path, &credential, Some((context, input))).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["error"]["code"], "permission_denied");
+    }
     assert_eq!(reopened.head().unwrap(), head);
 }
 

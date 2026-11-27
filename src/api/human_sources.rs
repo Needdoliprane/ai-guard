@@ -895,6 +895,8 @@ const REGISTERED_ROUTES: &[(&str, &[&str])] = &[
     ("/api/v1/human/export", &["GET", "HEAD"]),
     ("/api/v1/human/federation/workers", &["GET", "HEAD"]),
     ("/api/v1/human/identity", &["GET", "HEAD"]),
+    ("/api/v1/human/legacy/sessions/confirm", &["POST"]),
+    ("/api/v1/human/legacy/sessions/prepare", &["POST"]),
     (HUMAN_OWNED_GRANT_CHANGE_PATH, &["POST"]),
     (HUMAN_OWNED_MEMBERSHIP_CHANGE_PATH, &["POST"]),
     ("/api/v1/human/owned/brokers", &["GET", "HEAD"]),

@@ -524,6 +524,13 @@ async fn modern_route_matrix_closes_before_body_extractors_and_store() {
             "missing guard for {route:?}"
         );
     }
+    let legacy_only = [
+        "/api/v1/human/legacy/sessions/prepare",
+        "/api/v1/human/legacy/sessions/confirm",
+    ];
+    for path in legacy_only {
+        assert!(REGISTERED_ROUTES.contains(&(path, &["POST"])));
+    }
     let (_fixture, state) = fixture();
     let observed =
         crate::audit::read_test_observer::observe(state.tenants[0].store.sqlite().unwrap());
@@ -577,10 +584,12 @@ async fn modern_route_matrix_closes_before_body_extractors_and_store() {
                     .unwrap();
             assert_eq!(response.status(), expected, "{method} {path}");
             assert_eq!(response.headers().get("cache-control").unwrap(), "no-store");
-            if matches!(
-                path.as_str(),
-                "/api/v1/events/batch" | "/api/v1/egress/connect-permits"
-            ) {
+            if legacy_only.contains(&path.as_str())
+                || matches!(
+                    path.as_str(),
+                    "/api/v1/events/batch" | "/api/v1/egress/connect-permits"
+                )
+            {
                 let body = axum::body::to_bytes(response.into_body(), 4096)
                     .await
                     .unwrap();
@@ -589,6 +598,22 @@ async fn modern_route_matrix_closes_before_body_extractors_and_store() {
                     "identity_unavailable"
                 );
             }
+        }
+    }
+    for path in legacy_only {
+        for method in ["GET", "HEAD", "PUT", "PATCH", "DELETE", "OPTIONS", "TRACE"] {
+            let request = axum::http::Request::builder()
+                .method(method)
+                .uri(path)
+                .body(Body::empty())
+                .unwrap();
+            let response = router.clone().oneshot(request).await.unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::METHOD_NOT_ALLOWED,
+                "{method} {path}"
+            );
+            assert_eq!(response.headers().get("allow").unwrap(), "POST");
         }
     }
     assert!(observed.try_recv().is_err());
