@@ -8,6 +8,7 @@
 use super::{ExportReport, Manifest, anchored_export, read_workspace_archive};
 use super::{Limits, PreparedWorkspace, collect_workspace_from_root};
 use anyhow::{Context, Result, ensure};
+use sha2::{Digest, Sha256};
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::io::Read;
 use std::{
@@ -18,6 +19,7 @@ use std::{
         unix::{ffi::OsStrExt, fs::MetadataExt, fs::OpenOptionsExt},
     },
     path::{Component, Path, PathBuf},
+    time::UNIX_EPOCH,
 };
 
 const DIRECTORY_FLAGS: libc::c_int =
@@ -100,6 +102,48 @@ impl AuthorizedSource {
     /// pathname as a new content authority.
     pub(crate) fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// Opaque fingerprint of the authorized source and selected ancestry.
+    /// Reopening the same directory on the same mount preserves this value.
+    /// The original descriptor remains the authority for collecting content.
+    #[allow(
+        dead_code,
+        reason = "the Legacy Prepare integration will bind this source identity"
+    )]
+    pub(crate) fn identity_hash(&self) -> Result<String> {
+        self.revalidate()?;
+        let project = self
+            .chain
+            .last()
+            .context("source authorization has no project")?;
+        let birth = project
+            .file
+            .metadata()
+            .and_then(|facts| facts.created())
+            .context("authorized source creation time is unavailable")?
+            .duration_since(UNIX_EPOCH)
+            .context("authorized source creation time is invalid")?;
+        ensure!(
+            !birth.is_zero(),
+            "authorized source creation time is unavailable"
+        );
+
+        let path = self.path.as_os_str().as_bytes();
+        let mut digest = Sha256::new();
+        digest.update(b"ai-guard:workspace-source-identity:v1\0");
+        digest.update((path.len() as u64).to_be_bytes());
+        digest.update(path);
+        digest.update((self.boundary_index as u64).to_be_bytes());
+        digest.update((self.chain.len() as u64).to_be_bytes());
+        for directory in &self.chain {
+            digest.update(directory.identity.device.to_be_bytes());
+            digest.update(directory.identity.inode.to_be_bytes());
+        }
+        digest.update(birth.as_secs().to_be_bytes());
+        digest.update(birth.subsec_nanos().to_be_bytes());
+        self.revalidate()?;
+        Ok(hex::encode(digest.finalize()))
     }
 
     pub(crate) fn revalidate(&self) -> Result<()> {
@@ -469,6 +513,46 @@ mod authorized_workspace_tests {
         fs::create_dir_all(&project).unwrap();
         fs::write(project.join("README.txt"), b"synthetic project content\n").unwrap();
         project
+    }
+
+    #[test]
+    fn authorized_source_identity_distinguishes_copies_and_path_replacement() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().canonicalize()?;
+        let original_path = write_project(&root.join("original"));
+        let copy_path = root.join("copy");
+        fs::create_dir(&copy_path)?;
+        fs::copy(
+            original_path.join("README.txt"),
+            copy_path.join("README.txt"),
+        )?;
+        let allowed = std::slice::from_ref(&root);
+
+        let original_hash = AuthorizedSource::open(&original_path, allowed)?.identity_hash()?;
+        let original = AuthorizedSource::open(&original_path, allowed)?;
+        assert_eq!(original.identity_hash()?, original_hash);
+        let copied = AuthorizedSource::open(&copy_path, allowed)?;
+        let original_manifest = original.prepare(Limits::default(), &[])?.manifest;
+        assert_eq!(
+            copied.prepare(Limits::default(), &[])?.manifest,
+            original_manifest
+        );
+        assert_ne!(copied.identity_hash()?, original_hash);
+
+        let retired_path = root.join("retired");
+        fs::rename(&original_path, &retired_path)?;
+        let retired = AuthorizedSource::open(&retired_path, allowed)?;
+        assert_ne!(retired.identity_hash()?, original_hash);
+
+        fs::rename(&copy_path, &original_path)?;
+        assert!(original.identity_hash().is_err());
+        let replacement = AuthorizedSource::open(&original_path, allowed)?;
+        assert_eq!(
+            replacement.prepare(Limits::default(), &[])?.manifest,
+            original_manifest
+        );
+        assert_ne!(replacement.identity_hash()?, original_hash);
+        Ok(())
     }
 
     struct ExportParentFixture {
