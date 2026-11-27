@@ -16,6 +16,12 @@ L'identité authentifiée détermine le tenant. Exiger LaunchSession et SendSess
 
 Distinguer initiateur, acteur broker effectif et causalité. Une consigne normale n'approuve aucune action, ne prolonge pas de lease, ne change pas de politique, ne lève pas un refus et ne contourne pas une review obligatoire. Aucun credential runner dans le worker ou le frontend, et aucun jeton SSO humain dans le worker. Le navigateur conserve seulement son bearer humain en mémoire selon le contrat SSO. Les profils de lecture possédés et leurs contrats fermés de routes/formats restent fermés ; profils de mutation, provisionnement et migrations doivent être explicites, sauvegardés et coordonnés avec l'intégrateur.
 
+### Résoudre le plan Legacy confirmé
+
+Sur une source SQLite Legacy avec la préparation de session activée, le broker lié à la confirmation lit le plan sur le transport privé de contrôle, via `GET /control/api/v1/control/session-confirmations/{binding_ref}`. Le gateway revérifie l’identité workload du broker, son grant, la révision de la cible et le droit de lancement courant de l’initiateur. La réponse contient les identifiants d’opération et de session, les références de cible et de profil, le namespace de contrôle, l’empreinte attendue du plan avec l’identifiant de session assigné et l’échéance de l’initiateur.
+
+La réponse prépare la comparaison côté broker. L’admission résout la même confirmation durable et revérifie l’autorisation dans la transaction qui inscrit le grant, la réservation et l’audit. Les anciennes confirmations V1 permettent à l’initiateur autorisé de rejouer le reçu d’origine.
+
 ## Un vrai canal de conversation
 
 [Étude des protocoles et oracles de recette](evidence/2026-11-25/provider-conversation.fr.md).

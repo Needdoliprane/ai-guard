@@ -16,6 +16,12 @@ The authenticated identity determines the tenant. Require explicit, distinct Lau
 
 Keep initiator, effective broker actor and causality distinct. A normal instruction does not approve an action, extend a lease, change a policy, lift a denial or bypass required review. No runner credential enters the worker or frontend, and no human SSO token enters the worker. The browser keeps only its human bearer in memory according to the SSO contract. Existing owned read profiles and closed route/format contracts stay closed; new mutation profiles, provisioning and migrations must be explicit, backed up and coordinated with the integrator.
 
+### Resolve the confirmed Legacy plan
+
+On a Legacy SQLite source with session preparation enabled, the broker bound to the confirmation reads the plan through the private control transport at `GET /control/api/v1/control/session-confirmations/{binding_ref}`. The gateway revalidates the broker's workload identity, grant, target revision and the initiator's current launch permission. The response carries the operation and session IDs, the target and profile references, the control namespace, the expected fingerprint of the launch spec with the assigned session ID, and the initiator's deadline.
+
+The response prepares the broker's comparison. Admission resolves the same durable confirmation and revalidates authorization inside the transaction that records the grant, reservation and audit. Older V1 confirmations support replay of the original receipt by the authorized initiator.
+
 ## A real conversation channel
 
 [Protocol and test design note in French](evidence/2026-11-25/provider-conversation.fr.md).
