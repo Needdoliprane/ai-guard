@@ -1,11 +1,20 @@
 use super::native_stop_failure::{CauseTarget, NativeStopFailures};
 use super::recovery::RecoveryAttemptOwner;
 use super::*;
+use super::{
+    legacy_named_stop::NamedImportStopFactsV1,
+    legacy_named_stop_auth::{
+        FirstAuthentication, HANDSHAKE_FRAME, StopsOnlyAuthenticationV1, StopsOnlyResultV1,
+    },
+    legacy_named_stop_ipc::{
+        NamedImportStopCommand, NamedImportStopEndpoint, STOP_COMMAND_FRAME, STOP_EXCHANGE_TIMEOUT,
+    },
+};
 use crate::{
     broker::{
         clock::{HostClock, NativeHostClock},
         discovery::RoleLease,
-        local_ipc::{PrivateListener, read_frame, write_frame},
+        local_ipc::{EndpointRecordV1, PrivateListener, read_frame, write_frame},
     },
     control_fs::Directory,
     runtime::ManagedRuntime,
@@ -36,6 +45,7 @@ struct State {
     _lease: Arc<RoleLease>,
     owners: NativeOwners,
     epoch: Uuid,
+    endpoint: EndpointRecordV1,
     max_slots: u32,
     max_recovery_stop_owners: u32,
     capability: [u8; 32],
@@ -176,6 +186,7 @@ async fn run_legacy(
         _lease: Arc::clone(&lease),
         owners: owners.clone(),
         epoch: listener.endpoint().epoch(),
+        endpoint: listener.endpoint().clone(),
         max_slots,
         max_recovery_stop_owners,
         capability: secret,
@@ -317,7 +328,19 @@ async fn serve_connection(mut stream: UnixStream, state: Arc<State>) -> Enforcer
         nonce: Uuid::new_v4(),
     };
     write_frame(&mut stream, &challenge, 1024, IO_TIMEOUT).await?;
-    let authentication: Authentication = read_frame(&mut stream, 1024, IO_TIMEOUT).await?;
+    let authentication: FirstAuthentication =
+        read_frame(&mut stream, HANDSHAKE_FRAME, IO_TIMEOUT).await?;
+    let authentication = match authentication {
+        FirstAuthentication::Legacy(proof) => proof,
+        FirstAuthentication::StopsOnly(authentication) => {
+            return tokio::time::timeout(
+                STOP_EXCHANGE_TIMEOUT,
+                serve_named_stop_connection(&mut stream, &state, &challenge, authentication),
+            )
+            .await
+            .map_err(|_| EnforcerError::Unavailable)?;
+        }
+    };
     let expected = proof(&state.capability, &challenge);
     if authentication.proof.len() != expected.len()
         || authentication
@@ -379,6 +402,32 @@ async fn serve_connection(mut stream: UnixStream, state: Arc<State>) -> Enforcer
         state.shutdown.send_replace(true);
     }
     written?;
+    Ok(())
+}
+
+async fn serve_named_stop_connection(
+    stream: &mut UnixStream,
+    state: &State,
+    challenge: &Challenge,
+    authentication: StopsOnlyAuthenticationV1,
+) -> EnforcerResult<()> {
+    state._lease.revalidate()?;
+    let endpoint = NamedImportStopEndpoint::pin(state._lease.root(), Some(&state.endpoint))?;
+    let session = authentication.authenticate(&state.capability, challenge, endpoint.binding())?;
+    let grant = session.grant(&state.capability)?;
+    write_frame(stream, &grant, HANDSHAKE_FRAME, IO_TIMEOUT).await?;
+    let command: NamedImportStopCommand<NamedImportStopFactsV1> =
+        read_frame(stream, STOP_COMMAND_FRAME, IO_TIMEOUT).await?;
+    session.require_request(&command)?;
+    state._lease.revalidate()?;
+    endpoint.revalidate()?;
+    let NamedImportStopCommand::DeliverNamedImportStop { facts } = command;
+    let result = match state.latch_named_import_stop(&facts) {
+        Ok(()) => StopsOnlyResultV1::IntentLatched {},
+        Err(code) => StopsOnlyResultV1::Refused { code },
+    };
+    let ack = session.acknowledge(&state.capability, result)?;
+    write_frame(stream, &ack, HANDSHAKE_FRAME, IO_TIMEOUT).await?;
     Ok(())
 }
 

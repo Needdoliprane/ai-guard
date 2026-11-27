@@ -14,6 +14,7 @@ use crate::{
         enforcer::{
             CancelGeneration, EnforcerClient, EnforcerError, EnforcerFullClientV3,
             EnforcerStopClient, ExecutionEnforcerV1, FreshEnforcerOwner, RegistrationV1,
+            deliver_named_import_stop_from_legacy_root,
         },
         journal::{
             AcceptedJobV1, CancelStopProjectionV1, ControlSecrets, FsExclusions, Journal,
@@ -2414,6 +2415,11 @@ impl Service {
     ) -> Result<LocalCommandReceiptV1, BrokerErrorCodeV1> {
         #[cfg(test)]
         let operation = projection.operation_id();
+        if canonical(scope).map_err(jobs::journal_error)?
+            != canonical(projection.scope()).map_err(jobs::journal_error)?
+        {
+            return Err(BrokerErrorCodeV1::Conflict);
+        }
         let receipt = projection.receipt().clone();
         let projection = Arc::new(projection);
         async {
@@ -2423,20 +2429,25 @@ impl Service {
             if let Some(result) = cancel_retry_tests::delivery(operation, cancel.current()) {
                 return result;
             }
-            if let Some(enforcer) = &self.stop_enforcer {
-                if canonical(scope).map_err(jobs::journal_error)?
-                    != canonical(projection.scope()).map_err(jobs::journal_error)?
-                {
-                    return Err(BrokerErrorCodeV1::Conflict);
+            let ordinary = async {
+                if let Some(enforcer) = &self.stop_enforcer {
+                    enforcer
+                        .deliver_projection(Arc::clone(&projection), cancel.current())
+                        .await
+                        .map_err(|_| BrokerErrorCodeV1::NeedsReconciliation)
+                } else {
+                    deliver_cancellation(self.full_enforcer()?, scope, &projection, cancel)
+                        .await
+                        .map_err(|_| BrokerErrorCodeV1::NeedsReconciliation)
                 }
-                enforcer
-                    .deliver_projection(Arc::clone(&projection), cancel.current())
-                    .await
-                    .map_err(|_| BrokerErrorCodeV1::NeedsReconciliation)
+            };
+            if projection.named_import().is_some() {
+                let (regular, named) =
+                    tokio::join!(ordinary, self.deliver_named_import_cancel(&projection));
+                regular?;
+                named
             } else {
-                deliver_cancellation(self.full_enforcer()?, scope, &projection, cancel)
-                    .await
-                    .map_err(|_| BrokerErrorCodeV1::NeedsReconciliation)
+                ordinary.await
             }
         }
         .await?;
@@ -2457,6 +2468,28 @@ impl Service {
         }
         Ok(receipt)
     }
+
+    async fn deliver_named_import_cancel(
+        &self,
+        projection: &CancelStopProjectionV1,
+    ) -> Result<(), BrokerErrorCodeV1> {
+        let result = match self.full_enforcer() {
+            Ok(ExecutionEnforcerV1::Legacy(client)) => {
+                client.deliver_named_import_stop(projection).await
+            }
+            _ if self.recovery_only() => {
+                let root = self
+                    .root
+                    .persistent_child("enforcer", false)
+                    .map_err(|_| BrokerErrorCodeV1::NeedsReconciliation)?
+                    .ok_or(BrokerErrorCodeV1::NeedsReconciliation)?;
+                deliver_named_import_stop_from_legacy_root(&root, projection).await
+            }
+            _ => return Err(BrokerErrorCodeV1::NeedsReconciliation),
+        };
+        result.map_err(|_| BrokerErrorCodeV1::NeedsReconciliation)
+    }
+
     async fn resume(
         &self,
         request: AuthorizedRequest,

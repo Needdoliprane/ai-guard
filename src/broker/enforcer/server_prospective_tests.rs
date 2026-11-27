@@ -837,13 +837,21 @@ async fn exercise(mode: &str, parent: &Directory) {
             .fixture_stop_facts(&pending.prospective);
         let mut wrong = serde_json::to_value(&facts).unwrap();
         wrong["command_input_hash"] = json!("4".repeat(64));
+        let endpoint = NamedImportStopEndpoint::pin(&root, None).unwrap();
+        let key = capability(&root, false).unwrap();
         assert_eq!(
-            native.latch_named_import_stop(&serde_json::from_value(wrong).unwrap()),
+            endpoint.exchange(&wrong, &key, || Ok(())).await,
             Err(EnforcerError::Conflict)
         );
+        assert_eq!(
+            endpoint
+                .exchange(&facts, &key, || Err(EnforcerError::NotReady))
+                .await,
+            Err(EnforcerError::NotReady)
+        );
         assert!(!pending.state.lock().unwrap().stop_reserved);
-        native.latch_named_import_stop(&facts).unwrap();
-        native.latch_named_import_stop(&facts).unwrap();
+        endpoint.exchange(&facts, &key, || Ok(())).await.unwrap();
+        endpoint.exchange(&facts, &key, || Ok(())).await.unwrap();
         let retained = native
             .pending(
                 &pending.reservation,

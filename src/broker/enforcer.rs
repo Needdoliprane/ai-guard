@@ -7,13 +7,11 @@ mod client;
 mod diagnostics;
 mod execution;
 pub(crate) mod ledger;
-#[allow(
-    dead_code,
-    reason = "the live named STOP dispatch is composed separately"
-)]
 mod legacy_named_stop;
+mod legacy_named_stop_auth;
 mod legacy_named_stop_ipc;
 pub(in crate::broker) use legacy_named_stop::NamedImportArmBirthV1;
+pub(in crate::broker) use legacy_named_stop_ipc::deliver_named_import_stop_from_legacy_root;
 mod native_stop_failure;
 mod recovery;
 pub(crate) mod retirement;

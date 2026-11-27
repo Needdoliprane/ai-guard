@@ -308,7 +308,6 @@ impl ProspectiveActor {
 impl State {
     /// Latch one verified STOP on the original prospective owner. The
     /// transport must authenticate the broker's verified journal projection.
-    #[allow(dead_code, reason = "the StopsOnly transport is composed separately")]
     pub(super) fn latch_named_import_stop(
         &self,
         facts: &NamedImportStopFactsV1,

@@ -167,6 +167,18 @@ impl LegacyTransport {
     }
 }
 impl EnforcerClient {
+    pub(in crate::broker) async fn deliver_named_import_stop(
+        &self,
+        projection: &crate::broker::journal::CancelStopProjectionV1,
+    ) -> EnforcerResult<()> {
+        self.legacy_transport()?;
+        let endpoint = super::super::legacy_named_stop_ipc::NamedImportStopEndpoint::pin(
+            &self.0.root,
+            Some(&self.0.endpoint),
+        )?;
+        endpoint.deliver(projection, &self.0.capability).await
+    }
+
     fn legacy_transport(&self) -> EnforcerResult<&LegacyTransport> {
         self.0.legacy.as_deref().ok_or(EnforcerError::Unauthorized)
     }
