@@ -1,8 +1,7 @@
 //! Private named admission facts retained in the broker checkpoint.
 use super::*;
-use crate::{
-    control::session_control::{LegacyConfirmedPlanV1, LegacyNamedSupervisedAdmissionV1},
-    identity::IdentityReceiptV1,
+use crate::control::session_control::{
+    LegacyConfirmedPlanV1, LegacyNamedAdmissionReceiptV1, LegacyNamedSupervisedAdmissionV1,
 };
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -12,16 +11,6 @@ pub(crate) struct LegacyNamedAdmissionCheckpointV1 {
     plan: LegacyConfirmedPlanV1,
     request: LegacyNamedSupervisedAdmissionV1,
     receipt: Option<LegacyNamedAdmissionReceiptV1>,
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct LegacyNamedAdmissionReceiptV1 {
-    version: u32,
-    admission: AdmissionResultV1,
-    grant: Option<IdentityReceiptV1>,
-    audit_seq: i64,
-    audit_hash: String,
 }
 
 impl LegacyNamedAdmissionCheckpointV1 {
@@ -51,19 +40,10 @@ impl LegacyNamedAdmissionCheckpointV1 {
     )]
     pub(crate) fn acknowledge(
         mut self,
-        admission: AdmissionResultV1,
-        grant: Option<IdentityReceiptV1>,
-        audit_seq: i64,
-        audit_hash: String,
+        receipt: LegacyNamedAdmissionReceiptV1,
     ) -> JournalResult<Self> {
         ensure(self.receipt.is_none())?;
-        self.receipt = Some(LegacyNamedAdmissionReceiptV1 {
-            version: 1,
-            admission,
-            grant,
-            audit_seq,
-            audit_hash,
-        });
+        self.receipt = Some(receipt);
         let namespace = uuid(&self.plan.control_namespace_uuid)?;
         self.validate_shape(namespace)?;
         Ok(self)

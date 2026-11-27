@@ -1203,27 +1203,10 @@ fn legacy_named_checkpoint_retains_the_exact_store_admission_after_reopen() {
             &QuotaPolicyV1::default(),
         )
         .unwrap();
-    let mut other_receipt = receipt.admission.clone();
-    other_receipt.receipt.operation_id = Uuid::new_v4().to_string();
-    assert!(
-        pending
-            .clone()
-            .acknowledge(
-                other_receipt,
-                receipt.grant.clone(),
-                receipt.audit_seq,
-                receipt.audit_hash.clone()
-            )
-            .is_err()
-    );
-    let response = pending
-        .acknowledge(
-            receipt.admission,
-            receipt.grant,
-            receipt.audit_seq,
-            receipt.audit_hash,
-        )
-        .unwrap();
+    let mut other_receipt = receipt.clone();
+    other_receipt.admission.receipt.operation_id = Uuid::new_v4().to_string();
+    assert!(pending.clone().acknowledge(other_receipt).is_err());
+    let response = pending.acknowledge(receipt).unwrap();
     let acknowledged = checkpoint(response.clone());
     assert!(matches!(
         acknowledged.validate_transition(Some(&decided)),
