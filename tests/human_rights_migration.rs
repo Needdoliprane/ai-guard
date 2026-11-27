@@ -1,11 +1,16 @@
 //! Explicit human-rights capability marker, its backup and the capabilities it
 //! admits, with real private SQLite stores and the operator CLI.
 mod support;
-use agentsandbox::{audit::Store, identity::*, redaction::Redactor};
+use agentsandbox::{
+    audit::{AuditCapacityPolicyV1, DEFAULT_PHYSICAL_BYTES, Store},
+    identity::*,
+    redaction::Redactor,
+};
 use sha2::{Digest, Sha256};
 use std::{
-    path::Path,
-    process::{Command, Stdio},
+    os::unix::fs::OpenOptionsExt,
+    path::{Path, PathBuf},
+    process::{Command, Output, Stdio},
 };
 use uuid::Uuid;
 
@@ -15,6 +20,38 @@ const NEW_CAPABILITIES: [HumanCapabilityV1; 4] = [
     HumanCapabilityV1::LaunchSession,
     HumanCapabilityV1::SendSessionMessage,
 ];
+
+const LEGACY_AUDIT_MAX_BYTES: u64 = 2 * DEFAULT_PHYSICAL_BYTES;
+
+fn legacy_capacity_files(directory: &Path) -> (PathBuf, PathBuf) {
+    let policy = AuditCapacityPolicyV1::resolved_for(1000, LEGACY_AUDIT_MAX_BYTES);
+    let write = |name, policy: &AuditCapacityPolicyV1| {
+        let path = directory.join(name);
+        let file = std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .mode(0o600)
+            .open(&path)
+            .unwrap();
+        serde_json::to_writer(file, policy).unwrap();
+        path
+    };
+    let increased_cap = write("capacity.json", &policy);
+    let mut exhausted = policy;
+    // Leave two ordinary bytes so the test exercises a realistic ceiling
+    // without filling the store or spending the STOP and identity reserves.
+    exhausted.human_tenant.bytes = 2;
+    exhausted.human_principal.bytes = 1;
+    exhausted.control_reserve.bytes = LEGACY_AUDIT_MAX_BYTES - exhausted.identity_reserve.bytes - 2;
+    (increased_cap, write("capacity-exhausted.json", &exhausted))
+}
+
+fn assert_capacity_refusal(output: Output, reason: &str) {
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains(reason), "unexpected refusal: {stderr}");
+}
 
 fn migrated(path: &Path, through_workers: bool) -> Store {
     let store = Store::open_for_tenant(path, "tenant-a", Redactor::new(vec![]), 1000).unwrap();
@@ -223,6 +260,7 @@ fn legacy_session_prepare_capability_is_explicit_and_survives_reopen() {
     let files = support::private_tempdir();
     let path = files.path().join("tenant.sqlite");
     let backup = files.path().join("before-session-prepare.sqlite");
+    let (capacity, exhausted_capacity) = legacy_capacity_files(files.path());
     let store = migrated(&path, false);
     store
         .migrate_human_workers_v10(&files.path().join("before-store10.sqlite"))
@@ -235,24 +273,24 @@ fn legacy_session_prepare_capability_is_explicit_and_survives_reopen() {
         limit: Some(2),
         ..Default::default()
     };
-    let enable = || {
-        Command::new(env!("CARGO_BIN_EXE_agentsandbox"))
+    let enable = |backup: &Path| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_agentsandbox"));
+        command
             .arg("enable-legacy-session-prepare")
             .arg("--data")
             .arg(&path)
             .arg("--tenant-id")
             .arg("tenant-a")
             .arg("--backup")
-            .arg(&backup)
+            .arg(backup)
             .arg("--max-events")
             .arg("1000")
-            .arg("--confirm-control-stopped")
-            .output()
-            .unwrap()
+            .arg("--confirm-control-stopped");
+        command
     };
     let before_rights = store.head().unwrap();
     drop(store);
-    assert!(!enable().status.success());
+    assert!(!enable(&backup).output().unwrap().status.success());
     assert!(!backup.exists());
     let store = open(&path);
     assert_eq!(store.head().unwrap(), before_rights);
@@ -265,7 +303,41 @@ fn legacy_session_prepare_capability_is_explicit_and_survives_reopen() {
         .unwrap();
     drop(store);
 
-    let enabled = enable();
+    assert_capacity_refusal(
+        enable(&backup)
+            .arg("--audit-capacity-file")
+            .arg(&capacity)
+            .output()
+            .unwrap(),
+        "audit capacity policy must preserve reserves",
+    );
+    assert!(!backup.exists());
+    assert_eq!(open(&path).integrity().unwrap().head_hash, before.head_hash);
+
+    let exhausted_backup = files.path().join("before-exhausted-prepare.sqlite");
+    assert_capacity_refusal(
+        enable(&exhausted_backup)
+            .arg("--audit-max-bytes")
+            .arg(LEGACY_AUDIT_MAX_BYTES.to_string())
+            .arg("--audit-capacity-file")
+            .arg(exhausted_capacity)
+            .output()
+            .unwrap(),
+        "audit capacity protected by control or identity reserves",
+    );
+    let reopened = open(&path);
+    assert!(reopened.integrity().unwrap().valid);
+    assert_eq!(reopened.integrity().unwrap().head_hash, before.head_hash);
+    assert!(reopened.events(&marker).unwrap().is_empty());
+    drop(reopened);
+
+    let enabled = enable(&backup)
+        .arg("--audit-max-bytes")
+        .arg(LEGACY_AUDIT_MAX_BYTES.to_string())
+        .arg("--audit-capacity-file")
+        .arg(capacity)
+        .output()
+        .unwrap();
     assert!(
         enabled.status.success(),
         "the explicit Legacy capability installation failed"
@@ -296,7 +368,7 @@ fn legacy_session_prepare_capability_is_explicit_and_survives_reopen() {
     assert_eq!(saved.integrity().unwrap().head_hash, before.head_hash);
     assert!(saved.events(&marker).unwrap().is_empty());
     drop(saved);
-    assert!(!enable().status.success());
+    assert!(!enable(&backup).output().unwrap().status.success());
     let store = open(&path);
     assert_eq!(store.integrity().unwrap().head_hash, head);
     store
@@ -336,13 +408,14 @@ async fn legacy_local_confirmation_survives_reopen_without_admission() {
         body::{Body, to_bytes},
         http::{Request, StatusCode},
     };
+    use std::io::Write;
     use std::sync::Arc;
-    use std::{io::Write, os::unix::fs::OpenOptionsExt};
     use tower::ServiceExt;
 
     let files = support::private_tempdir();
     let path = files.path().join("tenant.sqlite");
     let target_file = files.path().join("target.json");
+    let (capacity, exhausted_capacity) = legacy_capacity_files(files.path());
     let store = migrated(&path, true);
     store
         .migrate_human_rights_v2(&files.path().join("before-rights.sqlite"))
@@ -393,6 +466,7 @@ async fn legacy_local_confirmation_survives_reopen_without_admission() {
         })
         .unwrap();
     let before = store.head().unwrap();
+    let before_hash = store.integrity().unwrap().head_hash;
     drop(store);
 
     let target_id = Uuid::new_v4();
@@ -418,7 +492,7 @@ async fn legacy_local_confirmation_survives_reopen_without_admission() {
             }
         }
     });
-    let apply = |input: &serde_json::Value| {
+    let provision_target = |input: &serde_json::Value| {
         std::fs::OpenOptions::new()
             .write(true)
             .create(true)
@@ -428,7 +502,8 @@ async fn legacy_local_confirmation_survives_reopen_without_admission() {
             .unwrap()
             .write_all(&serde_json::to_vec(input).unwrap())
             .unwrap();
-        Command::new(env!("CARGO_BIN_EXE_agentsandbox"))
+        let mut command = Command::new(env!("CARGO_BIN_EXE_agentsandbox"));
+        command
             .args(["human", "provision-legacy-session-target", "--data"])
             .arg(&path)
             .args([
@@ -439,7 +514,44 @@ async fn legacy_local_confirmation_survives_reopen_without_admission() {
                 "--confirm-control-stopped",
                 "--target-file",
             ])
-            .arg(&target_file)
+            .arg(&target_file);
+        command
+    };
+    let assert_unchanged = || {
+        let store = Store::open_existing_for_tenant(&path, "tenant-a", Redactor::new(vec![]), 1000)
+            .unwrap();
+        let integrity = store.integrity().unwrap();
+        assert!(integrity.valid);
+        assert_eq!(integrity.head_hash, before_hash);
+        assert_eq!(store.head().unwrap(), before);
+    };
+    assert_capacity_refusal(
+        provision_target(&input)
+            .arg("--audit-capacity-file")
+            .arg(&capacity)
+            .output()
+            .unwrap(),
+        "audit capacity policy must preserve reserves",
+    );
+    assert_unchanged();
+    assert_capacity_refusal(
+        provision_target(&input)
+            .arg("--audit-max-bytes")
+            .arg(LEGACY_AUDIT_MAX_BYTES.to_string())
+            .arg("--audit-capacity-file")
+            .arg(exhausted_capacity)
+            .output()
+            .unwrap(),
+        "audit capacity protected by control or identity reserves",
+    );
+    assert_unchanged();
+
+    let apply = |input: &serde_json::Value| {
+        provision_target(input)
+            .arg("--audit-max-bytes")
+            .arg(LEGACY_AUDIT_MAX_BYTES.to_string())
+            .arg("--audit-capacity-file")
+            .arg(&capacity)
             .output()
             .unwrap()
     };

@@ -152,6 +152,12 @@ enum Command {
         confirm_control_stopped: bool,
         #[arg(long, default_value_t = 100_000)]
         max_events: u64,
+        /// Payload byte cap the gateway uses for this SQLite tenant store.
+        #[arg(long, default_value_t = agentsandbox::audit::DEFAULT_PHYSICAL_BYTES)]
+        audit_max_bytes: u64,
+        /// Private audit capacity policy matching the gateway's tenant policy.
+        #[arg(long)]
+        audit_capacity_file: Option<PathBuf>,
     },
     /// Offline audit retention: install, plan, apply, verify and export archives.
     AuditRetention(agentsandbox::audit::retention::cli::AuditRetentionArgs),
@@ -1365,6 +1371,8 @@ async fn run() -> Result<()> {
             backup,
             confirm_control_stopped,
             max_events,
+            audit_max_bytes,
+            audit_capacity_file,
         } => {
             anyhow::ensure!(
                 confirm_control_stopped,
@@ -1374,11 +1382,13 @@ async fn run() -> Result<()> {
                 (1..=1_000_000).contains(&max_events),
                 "invalid audit capacity"
             );
-            let store = Store::open_existing_for_tenant(
+            let store = Store::open_existing_for_tenant_with_capacity(
                 &data,
                 &tenant_id,
                 Redactor::new(vec![]),
                 max_events,
+                audit_max_bytes,
+                audit_capacity_file.as_deref(),
             )?;
             let report = store.enable_legacy_session_prepare_v1(&backup)?;
             println!("{}", serde_json::to_string_pretty(&report)?);

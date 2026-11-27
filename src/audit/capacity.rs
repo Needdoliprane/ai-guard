@@ -365,18 +365,45 @@ impl Cache {
     }
 }
 
+fn validate_sqlite_physical_bytes(physical_bytes: u64) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        (super::capacity_policy::DEFAULT_PHYSICAL_BYTES
+            ..=super::capacity_policy::MAX_SQLITE_PHYSICAL_BYTES)
+            .contains(&physical_bytes),
+        "the audit payload cap must be between 256 MiB and 2 GiB"
+    );
+    Ok(())
+}
+
 impl Store {
-    /// Select an immutable operator policy before creating any sibling or Arc.
+    /// Verify offline capacity options before opening the existing tenant store.
+    /// As at gateway startup, select the byte ceiling before the explicit policy.
+    pub fn open_existing_for_tenant_with_capacity(
+        path: &Path,
+        tenant_id: &str,
+        redactor: Redactor,
+        max_events: u64,
+        physical_bytes: u64,
+        capacity_file: Option<&Path>,
+    ) -> anyhow::Result<Self> {
+        validate_sqlite_physical_bytes(physical_bytes)?;
+        let policy = capacity_file.map(Self::load_capacity_policy).transpose()?;
+        if let Some(policy) = &policy {
+            policy.validate_for(max_events, physical_bytes)?;
+        }
+        let store = Self::open_existing_for_tenant(path, tenant_id, redactor, max_events)?
+            .with_physical_bytes(physical_bytes)?;
+        match policy {
+            Some(policy) => store.with_capacity_policy(policy),
+            None => Ok(store),
+        }
+    }
+
     /// Select the payload cap of this SQLite store, between 256 MiB and 2 GiB,
     /// before any capacity policy and before sharing the Store. Defaults are
     /// resolved again for that cap.
     pub fn with_physical_bytes(mut self, physical_bytes: u64) -> anyhow::Result<Self> {
-        anyhow::ensure!(
-            (super::capacity_policy::DEFAULT_PHYSICAL_BYTES
-                ..=super::capacity_policy::MAX_SQLITE_PHYSICAL_BYTES)
-                .contains(&physical_bytes),
-            "the audit payload cap must be between 256 MiB and 2 GiB"
-        );
+        validate_sqlite_physical_bytes(physical_bytes)?;
         anyhow::ensure!(
             Arc::strong_count(&self.supervision_lease) == 1
                 && self.capacity_policy
@@ -396,6 +423,7 @@ impl Store {
     pub fn physical_bytes(&self) -> u64 {
         self.physical_bytes
     }
+    /// Select an immutable operator policy before creating any sibling or Arc.
     pub fn with_capacity_policy(mut self, policy: AuditCapacityPolicyV1) -> anyhow::Result<Self> {
         policy.validate_for(self.max_events, self.physical_bytes)?;
         anyhow::ensure!(

@@ -1,6 +1,6 @@
 use super::{ApplyArgs, LegacySessionTargetArgs, OfflineArgs, ProvisionArgs, ResumeProvisionArgs};
 use crate::{
-    audit::Store,
+    audit::{DEFAULT_PHYSICAL_BYTES, Store},
     control_fs::{Directory, PrivateFile, absolute_path},
     identity::*,
     redaction::Redactor,
@@ -60,30 +60,23 @@ struct OfflineStore {
 }
 
 fn open(args: &OfflineArgs) -> Result<OfflineStore> {
+    open_with_capacity(args, DEFAULT_PHYSICAL_BYTES)
+}
+
+fn open_with_capacity(args: &OfflineArgs, audit_max_bytes: u64) -> Result<OfflineStore> {
     ensure!(
         args.confirm_control_stopped,
         "offline identity maintenance requires --confirm-control-stopped"
     );
-    let capacity_policy = args
-        .audit_capacity_file
-        .as_deref()
-        .map(Store::load_capacity_policy)
-        .transpose()?;
-    if let Some(policy) = &capacity_policy {
-        policy.validate(args.max_events)?;
-    }
     let data_path = absolute_path(&args.data)?;
-    let store = Store::open_existing_for_tenant(
+    let store = Store::open_existing_for_tenant_with_capacity(
         &data_path,
         &args.tenant_id,
         Redactor::new(vec![]),
         args.max_events,
+        audit_max_bytes,
+        args.audit_capacity_file.as_deref(),
     )?;
-    let store = if let Some(policy) = capacity_policy {
-        store.with_capacity_policy(policy)?
-    } else {
-        store
-    };
     eprintln!(
         "Audit capacity tenant={} source={} human_read_policy={} policy={} fingerprint={}",
         store.tenant_id(),
@@ -478,7 +471,7 @@ pub(super) fn print_json(value: &serde_json::Value) -> Result<()> {
 }
 
 pub(super) fn provision_legacy_session_target(args: LegacySessionTargetArgs) -> Result<()> {
-    let control = open(&args.offline)?;
+    let control = open_with_capacity(&args.offline, args.audit_max_bytes)?;
     let file = PrivateFile::open(&absolute_path(&args.target_file)?, 65_536)?;
     let input: crate::control::session_control::ProvisionLegacySessionTargetV1 =
         serde_json::from_slice(file.bytes())

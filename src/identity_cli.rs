@@ -142,6 +142,9 @@ pub struct ApplyArgs {
 pub struct LegacySessionTargetArgs {
     #[command(flatten)]
     pub offline: OfflineArgs,
+    /// Payload byte cap the gateway uses for this SQLite tenant store.
+    #[arg(long, default_value_t = crate::audit::DEFAULT_PHYSICAL_BYTES)]
+    pub audit_max_bytes: u64,
     /// Private JSON containing the exact target and its expected previous revision.
     #[arg(long)]
     pub target_file: PathBuf,
