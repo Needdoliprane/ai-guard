@@ -5,8 +5,8 @@ use crate::control::{
     ControlProtocolV1, ExportRequestV1, HelperClaimResultV1, HelperCleanupV1, HelperObservationV1,
     HelperStartClaimV1, MutationReceiptV1, MutationResultV1, SupervisedAdmissionV1,
     session_control::{
-        LegacyConfirmedPlanV1, LegacyNamedAdmissionReceiptV1, LegacyNamedSupervisedAdmissionV1,
-        canonical_uuid,
+        LEGACY_NAMED_ADMISSION_RECEIPT_NOT_FOUND, LegacyConfirmedPlanV1,
+        LegacyNamedAdmissionReceiptV1, LegacyNamedSupervisedAdmissionV1, canonical_uuid,
     },
 };
 use crate::tenant_store::StoreHealth;
@@ -255,7 +255,7 @@ async fn reconcile_named_admission(
                     .ok_or_else(|| {
                         workload::response(
                             StatusCode::NOT_FOUND,
-                            "named_admission_receipt_not_found",
+                            LEGACY_NAMED_ADMISSION_RECEIPT_NOT_FOUND,
                             "Reçu d'admission introuvable.",
                         )
                     })?;

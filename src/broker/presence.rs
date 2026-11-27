@@ -339,6 +339,20 @@ impl PreparedPresence {
         self.revalidate()?;
         legacy_named_admission::admit(self, expected_broker_profile_id, request).await
     }
+    /// Read a receipt for the exact retained request after a missed reply.
+    #[allow(
+        dead_code,
+        reason = "the broker admission caller is a separate G04 integration"
+    )]
+    pub(crate) async fn reconcile_legacy_named(
+        &self,
+        expected_broker_profile_id: &str,
+        plan: &crate::control::session_control::LegacyConfirmedPlanV1,
+        request: &crate::control::session_control::LegacyNamedSupervisedAdmissionV1,
+    ) -> Result<Option<legacy_named_admission::Outcome>> {
+        self.revalidate()?;
+        legacy_named_admission::reconcile(self, expected_broker_profile_id, plan, request).await
+    }
     fn screen_material(&self) -> Result<()> {
         let source = serde_json::from_slice::<Value>(self.files[0].bytes())
             .map_err(|_| PresenceError::InvalidConfig)?;

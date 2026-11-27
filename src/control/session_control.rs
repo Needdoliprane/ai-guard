@@ -141,6 +141,8 @@ pub(crate) struct LegacyConfirmedPlanV1 {
 }
 
 pub(crate) const LEGACY_NAMED_ADMISSION_REQUEST_BYTES: usize = 65_536;
+pub(crate) const LEGACY_NAMED_ADMISSION_RECEIPT_NOT_FOUND: &str =
+    "named_admission_receipt_not_found";
 
 /// Versioned input for the Legacy named admission transaction.
 #[derive(Clone, Serialize, Deserialize)]

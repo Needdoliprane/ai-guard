@@ -14,7 +14,9 @@ use std::{collections::HashSet, fmt};
 use uuid::Uuid;
 mod legacy_named;
 mod validation;
-pub(crate) use legacy_named::LegacyNamedAdmissionCheckpointV1;
+pub(crate) use legacy_named::{
+    LegacyNamedAdmissionCheckpointV1, validate_legacy_named_admission_receipt,
+};
 
 const MAX_BYTES: usize = 32 * 1024 * 1024;
 const MAX_OPERATION_BYTES: usize = 512 * 1024;

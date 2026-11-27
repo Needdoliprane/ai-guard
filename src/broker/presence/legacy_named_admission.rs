@@ -3,7 +3,7 @@
 use super::*;
 use crate::{
     broker::presence::http::{Client, Limits},
-    control::{AdmissionRefusalV1, WorkerStateV1, session_control::*},
+    control::{AdmissionRefusalV1, hash, session_control::*},
 };
 use reqwest::{Method, StatusCode};
 
@@ -12,6 +12,12 @@ const RESPONSE_BYTES: u64 = 128 * 1024;
 pub(crate) enum Outcome {
     Accepted(LegacyNamedAdmissionReceiptV1),
     Refused(LegacyNamedAdmissionReceiptV1),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AdmissionOperation {
+    Reserve,
+    Reconcile,
 }
 
 pub(super) async fn admit(
@@ -31,20 +37,42 @@ pub(super) async fn admit(
     if before != after {
         return Err(PresenceError::Conflict);
     }
-    presence.revalidate()?;
+    send_request(&client, presence, request, AdmissionOperation::Reserve)
+        .await?
+        .ok_or(PresenceError::AdmissionOutcomeUnknown)
+}
 
+pub(super) async fn reconcile(
+    presence: &PreparedPresence,
+    expected_broker_profile_id: &str,
+    plan: &LegacyConfirmedPlanV1,
+    request: &LegacyNamedSupervisedAdmissionV1,
+) -> Result<Option<Outcome>> {
+    validate_plan(presence, expected_broker_profile_id, request, plan)?;
+    let client = Client::new(presence)?;
+    checked_identity(&client, presence).await?;
+    send_request(&client, presence, request, AdmissionOperation::Reconcile).await
+}
+
+async fn send_request(
+    client: &Client,
+    presence: &PreparedPresence,
+    request: &LegacyNamedSupervisedAdmissionV1,
+    operation: AdmissionOperation,
+) -> Result<Option<Outcome>> {
+    presence.revalidate()?;
     let value = serde_json::to_value(request).map_err(|_| PresenceError::Protocol)?;
     presence.screen(&value)?;
     let body = serde_json::to_vec(request).map_err(|_| PresenceError::Protocol)?;
     if body.len() > LEGACY_NAMED_ADMISSION_REQUEST_BYTES {
         return Err(PresenceError::Protocol);
     }
-    // The Store re-resolves the plan in its write transaction. The client
-    // checks the same facts before sending and accepts only a linked receipt.
-    request
-        .require_plan(&plan)
-        .map_err(|_| PresenceError::Protocol)?;
-    let path = format!("{path}/admission");
+    let action = match operation {
+        AdmissionOperation::Reserve => "admission",
+        AdmissionOperation::Reconcile => "admission/reconcile",
+    };
+    let binding = request.binding_ref;
+    let path = format!("/api/v1/control/session-confirmations/{binding}/{action}");
     let (status, bytes) = client
         .send_session_bounded(
             Method::POST,
@@ -57,53 +85,61 @@ pub(super) async fn admit(
             },
         )
         .await
-        .map_err(|error| match error {
-            PresenceError::Transport
-            | PresenceError::Protocol
-            | PresenceError::Unavailable
-            | PresenceError::Capacity => PresenceError::AdmissionOutcomeUnknown,
-            other => other,
-        })?;
-    if !matches!(
-        status,
-        StatusCode::OK
-            | StatusCode::CREATED
-            | StatusCode::FORBIDDEN
-            | StatusCode::TOO_MANY_REQUESTS
-    ) {
-        let value = crate::json::decode_unique(&bytes, 64)
-            .map_err(|_| PresenceError::AdmissionOutcomeUnknown)?;
-        presence
-            .screen(&value)
-            .map_err(|_| PresenceError::AdmissionOutcomeUnknown)?;
-        let error = super::http::remote_error(status, &value);
-        return Err(match error {
-            PresenceError::Unavailable | PresenceError::Transport | PresenceError::Protocol => {
-                PresenceError::AdmissionOutcomeUnknown
-            }
-            other => other,
-        });
-    }
+        .map_err(|_| PresenceError::AdmissionOutcomeUnknown)?;
     let value = crate::json::decode_unique(&bytes, 64)
         .map_err(|_| PresenceError::AdmissionOutcomeUnknown)?;
     presence
         .screen(&value)
         .map_err(|_| PresenceError::AdmissionOutcomeUnknown)?;
+    decode_response(
+        presence.scope.control_namespace_uuid,
+        request,
+        operation,
+        status,
+        value,
+    )
+}
+
+fn decode_response(
+    namespace: uuid::Uuid,
+    request: &LegacyNamedSupervisedAdmissionV1,
+    operation: AdmissionOperation,
+    status: StatusCode,
+    value: Value,
+) -> Result<Option<Outcome>> {
+    if operation == AdmissionOperation::Reconcile
+        && status == StatusCode::NOT_FOUND
+        && value["error"]["code"] == LEGACY_NAMED_ADMISSION_RECEIPT_NOT_FOUND
+    {
+        // Absence was observed at this read. A separate request may still commit.
+        return Ok(None);
+    }
     let receipt: LegacyNamedAdmissionReceiptV1 =
         serde_json::from_value(value.clone()).map_err(|_| {
             if value.get("error").is_some() {
-                super::http::remote_error(status, &value)
+                let error = super::http::remote_error(status, &value);
+                match error {
+                    PresenceError::Authentication
+                    | PresenceError::Forbidden
+                    | PresenceError::Capacity
+                    | PresenceError::Conflict
+                    | PresenceError::Clock => error,
+                    _ => PresenceError::AdmissionOutcomeUnknown,
+                }
             } else {
                 PresenceError::AdmissionOutcomeUnknown
             }
         })?;
-    validate_receipt(request, &plan, &receipt, status)
-        .map_err(|_| PresenceError::AdmissionOutcomeUnknown)?;
-    if receipt.admission.accepted {
-        Ok(Outcome::Accepted(receipt))
-    } else {
-        Ok(Outcome::Refused(receipt))
+    if operation == AdmissionOperation::Reconcile && !receipt.admission.replayed {
+        return Err(PresenceError::AdmissionOutcomeUnknown);
     }
+    validate_receipt(namespace, request, &receipt, status)
+        .map_err(|_| PresenceError::AdmissionOutcomeUnknown)?;
+    Ok(Some(if receipt.admission.accepted {
+        Outcome::Accepted(receipt)
+    } else {
+        Outcome::Refused(receipt)
+    }))
 }
 
 async fn confirmed_plan(
@@ -169,12 +205,6 @@ fn validate_plan_scope(
     binding_ref: uuid::Uuid,
     plan: &LegacyConfirmedPlanV1,
 ) -> Result<()> {
-    let valid_hash = |value: &str| {
-        value.len() == 64
-            && value
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-    };
     if plan.version != 1
         || plan.binding_ref != binding_ref
         || plan.control_namespace_uuid != expected_namespace
@@ -186,7 +216,7 @@ fn validate_plan_scope(
         || plan.launch_target_id.is_nil()
         || !(1..=i64::MAX as u64).contains(&plan.target_revision)
         || plan.expires_at.timestamp() <= 0
-        || !valid_hash(&plan.launch_spec_hash)
+        || hash(&plan.launch_spec_hash).is_err()
     {
         return Err(PresenceError::Forbidden);
     }
@@ -194,120 +224,16 @@ fn validate_plan_scope(
 }
 
 fn validate_receipt(
+    namespace: uuid::Uuid,
     request: &LegacyNamedSupervisedAdmissionV1,
-    plan: &LegacyConfirmedPlanV1,
-    response: &LegacyNamedAdmissionReceiptV1,
+    receipt: &LegacyNamedAdmissionReceiptV1,
     status: StatusCode,
 ) -> Result<()> {
-    let admission = &response.admission;
-    let mutation = &admission.receipt;
-    let valid_hash = |value: &str| {
-        value.len() == 64
-            && value
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-    };
-    if response.version != 1
-        || response.audit_seq <= 0
-        || !valid_hash(&response.audit_hash)
-        || mutation.audit_seq <= 0
-        || !valid_hash(&mutation.audit_hash)
-        || !valid_hash(&mutation.input_hash)
-        || mutation.audit_seq >= response.audit_seq
-        || mutation.operation_id != request.admission.admission.operation_id
-        || mutation.input_hash
-            != request
-                .admission
-                .input_hash()
-                .map_err(|_| PresenceError::Protocol)?
-    {
+    if status != response_status(&receipt.admission) {
         return Err(PresenceError::Protocol);
     }
-    let expected_status = response_status(admission);
-    if status != expected_status {
-        return Err(match status {
-            StatusCode::FORBIDDEN => PresenceError::Forbidden,
-            StatusCode::TOO_MANY_REQUESTS => PresenceError::Capacity,
-            _ => PresenceError::Protocol,
-        });
-    }
-    match (
-        &admission.worker,
-        &response.grant,
-        admission.refusal,
-        admission.accepted,
-    ) {
-        (Some(worker), Some(grant), None, true) => {
-            let worker_uuid =
-                uuid::Uuid::parse_str(&worker.worker_id).map_err(|_| PresenceError::Protocol)?;
-            let expected_grant_seq = mutation
-                .audit_seq
-                .checked_add(1)
-                .ok_or(PresenceError::Protocol)?;
-            let worker_receipt =
-                serde_json::to_value(&worker.receipt).map_err(|_| PresenceError::Protocol)?;
-            let request_receipt = serde_json::to_value(&request.admission.admission.receipt)
-                .map_err(|_| PresenceError::Protocol)?;
-            let worker_launch =
-                serde_json::to_value(&worker.launch).map_err(|_| PresenceError::Protocol)?;
-            let request_launch = serde_json::to_value(&request.admission.admission.launch)
-                .map_err(|_| PresenceError::Protocol)?;
-            if crate::broker_registry::registry_uuid(&worker.worker_id).is_err()
-                || crate::broker_registry::registry_uuid(&worker.attempt.attempt_id).is_err()
-                || worker.admission_operation_id != request.admission.admission.operation_id
-                || worker.request_id != request.admission.admission.decision_request.request_id
-                || worker_receipt != request_receipt
-                || worker_launch != request_launch
-                || worker.launch.session_id != plan.session_id.to_string()
-                || worker.spec_hash
-                    != worker
-                        .launch
-                        .spec_hash()
-                        .map_err(|_| PresenceError::Protocol)?
-                || worker.spec_hash != plan.launch_spec_hash
-                || worker.launch.spec_hash().ok()
-                    != request.admission.admission.launch.spec_hash().ok()
-                || worker.state != WorkerStateV1::Reserved
-                || !worker.quota_held
-                || worker.revision != 1
-                || worker.attempt.stable_name
-                    != format!(
-                        "aig-{}-{}",
-                        plan.control_namespace_uuid.replace('-', ""),
-                        worker_uuid.simple()
-                    )
-                || worker.attempt.volume_name != format!("{}-work", worker.attempt.stable_name)
-                || worker.attempt.container_id.is_some()
-                || worker.attempt.create_operation_id.is_some()
-                || worker.attempt.created_inspection.is_some()
-                || worker.attempt.start_emitter_id.is_some()
-                || worker.attempt.start_operation_id.is_some()
-                || mutation.worker_id.as_deref() != Some(worker.worker_id.as_str())
-                || mutation.revision != Some(worker.revision)
-                || grant.version != 1
-                || grant.operation_id.is_empty()
-                || crate::broker_registry::registry_uuid(&grant.operation_id).is_err()
-                || grant.authorization_revision == 0
-                || grant.authorization_revision > i64::MAX as u64
-                || grant.audit_seq != expected_grant_seq
-                || grant.audit_seq.checked_add(1) != Some(response.audit_seq)
-                || !valid_hash(&grant.input_hash)
-                || !valid_hash(&grant.audit_hash)
-            {
-                return Err(PresenceError::Protocol);
-            }
-        }
-        (None, None, Some(_), false) => {
-            if mutation.worker_id.is_some()
-                || mutation.revision.is_some()
-                || mutation.audit_seq.checked_add(1) != Some(response.audit_seq)
-            {
-                return Err(PresenceError::Protocol);
-            }
-        }
-        _ => return Err(PresenceError::Protocol),
-    }
-    Ok(())
+    crate::broker::checkpoint::validate_legacy_named_admission_receipt(namespace, request, receipt)
+        .map_err(|_| PresenceError::Protocol)
 }
 
 fn response_status(admission: &crate::control::AdmissionResultV1) -> StatusCode {
@@ -384,20 +310,21 @@ mod tests {
 
     #[test]
     fn response_status_distinguishes_replay_and_durable_refusals() {
-        let admission = |replayed, refusal| crate::control::AdmissionResultV1 {
-            replayed,
-            accepted: refusal.is_none(),
-            refusal,
-            worker: None,
-            receipt: crate::control::MutationReceiptV1 {
-                operation_id: uuid::Uuid::new_v4().to_string(),
-                worker_id: None,
-                revision: None,
-                input_hash: "b".repeat(64),
-                audit_seq: 1,
-                audit_hash: "c".repeat(64),
-            },
-        };
+        let admission =
+            |replayed, refusal: Option<AdmissionRefusalV1>| crate::control::AdmissionResultV1 {
+                replayed,
+                accepted: refusal.is_none(),
+                refusal,
+                worker: None,
+                receipt: crate::control::MutationReceiptV1 {
+                    operation_id: uuid::Uuid::new_v4().to_string(),
+                    worker_id: None,
+                    revision: None,
+                    input_hash: "b".repeat(64),
+                    audit_seq: 1,
+                    audit_hash: "c".repeat(64),
+                },
+            };
         assert_eq!(
             response_status(&admission(false, None)),
             StatusCode::CREATED

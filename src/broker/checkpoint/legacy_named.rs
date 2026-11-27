@@ -75,42 +75,7 @@ impl LegacyNamedAdmissionCheckpointV1 {
         )?;
         checked(self.request.require_plan(plan))?;
         if let Some(saved) = &self.receipt {
-            ensure(saved.version == 1)?;
-            let result = &saved.admission;
-            ensure(result.accepted == result.refusal.is_none())?;
-            validation::bound_receipt(
-                &result.receipt,
-                &self.request.admission.admission.operation_id,
-                &checked(self.request.admission.input_hash())?,
-                result
-                    .worker
-                    .as_ref()
-                    .map(|worker| worker.worker_id.as_str()),
-                result.worker.as_ref().map(|worker| worker.revision),
-            )?;
-            hash(&saved.audit_hash)?;
-            match (result.accepted, &result.worker, &saved.grant) {
-                (true, Some(worker), Some(grant)) => {
-                    validation::bound_worker(worker, &self.request.admission, namespace)?;
-                    ensure(
-                        worker.state == WorkerStateV1::Reserved
-                            && worker.revision == 1
-                            && worker.quota_held,
-                    )?;
-                    uuid(&grant.operation_id)?;
-                    hash(&grant.input_hash)?;
-                    hash(&grant.audit_hash)?;
-                    ensure(
-                        grant.version == 1
-                            && result.receipt.audit_seq.checked_add(1) == Some(grant.audit_seq)
-                            && grant.audit_seq.checked_add(1) == Some(saved.audit_seq),
-                    )?;
-                }
-                (false, None, None) => {
-                    ensure(result.receipt.audit_seq.checked_add(1) == Some(saved.audit_seq))?;
-                }
-                _ => return Err(JournalError::Conflict),
-            }
+            validate_legacy_named_admission_receipt(namespace, &self.request, saved)?;
         }
         ensure(canonical(self)?.len() <= MAX_OPERATION_BYTES)
     }
@@ -123,5 +88,56 @@ impl LegacyNamedAdmissionCheckpointV1 {
                 ensure(old.receipt.is_none() || equal(&self.receipt, &old.receipt)?)
             }
         }
+    }
+}
+
+/// The broker uses the same linked receipt checks at the HTTP boundary and
+/// when reading an acknowledged checkpoint.
+pub(crate) fn validate_legacy_named_admission_receipt(
+    namespace: Uuid,
+    request: &LegacyNamedSupervisedAdmissionV1,
+    saved: &LegacyNamedAdmissionReceiptV1,
+) -> JournalResult<()> {
+    ensure(saved.version == 1)?;
+    let result = &saved.admission;
+    ensure(result.accepted == result.refusal.is_none())?;
+    validation::bound_receipt(
+        &result.receipt,
+        &request.admission.admission.operation_id,
+        &checked(request.admission.input_hash())?,
+        result
+            .worker
+            .as_ref()
+            .map(|worker| worker.worker_id.as_str()),
+        result.worker.as_ref().map(|worker| worker.revision),
+    )?;
+    hash(&saved.audit_hash)?;
+    match (result.accepted, &result.worker, &saved.grant) {
+        (true, Some(worker), Some(grant)) => {
+            validation::bound_worker(worker, &request.admission, namespace)?;
+            ensure(
+                worker.state == WorkerStateV1::Reserved
+                    && worker.revision == 1
+                    && worker.quota_held
+                    && worker.attempt.container_id.is_none()
+                    && worker.attempt.created_inspection.is_none()
+                    && worker.attempt.create_operation_id.is_none()
+                    && worker.attempt.start_emitter_id.is_none()
+                    && worker.attempt.start_operation_id.is_none(),
+            )?;
+            uuid(&grant.operation_id)?;
+            hash(&grant.input_hash)?;
+            hash(&grant.audit_hash)?;
+            ensure(
+                grant.version == 1
+                    && (1..=i64::MAX as u64).contains(&grant.authorization_revision)
+                    && result.receipt.audit_seq.checked_add(1) == Some(grant.audit_seq)
+                    && grant.audit_seq.checked_add(1) == Some(saved.audit_seq),
+            )
+        }
+        (false, None, None) => {
+            ensure(result.receipt.audit_seq.checked_add(1) == Some(saved.audit_seq))
+        }
+        _ => Err(JournalError::Conflict),
     }
 }
