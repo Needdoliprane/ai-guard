@@ -194,9 +194,8 @@ pouvoir référencer les tables de la cible et garder `foreign_key_checks` et
    format 15, les marqueurs de supervision owned, le chemin d’écriture owned
    sur 14/15 et le raccord du gateway restent à livrer. Le lecteur Legacy
    reste fermé à ces versions. Le raccord du gateway exige sa propre preuve
-   d’admission et d’epoch. La recette physique du rejeu exact reste `NOT_RUN`
-   sur ce lot.
-   [Publication MySQL](../../../src/mysql_storage/owned_origin/preparation/publication.rs)
+   d’admission et d’epoch. Le rejeu exact du CLI a sa recette physique.
+   [Publication MySQL](../../../src/mysql_storage/owned_origin/preparation/publication.rs) · [Recettes physiques](#recettes-physiques)
 5. Sur commit ou réponse incertains, rapprocher l’opération exacte par une
    relecture intégrale sous verrou. Un état partiel ou divergent reste
    fermé, sans nouvelle genèse ni DDL de reprise. La résolution d’une
@@ -207,6 +206,32 @@ pouvoir référencer les tables de la cible et garder `foreign_key_checks` et
    barrière d’epoch. Le verrou SQL atteste la session de la base.
    [Descripteur actuel](../../../src/human_authority/manifest.rs) ·
    [Epoch et propriétaire](../../../src/human_authority.rs)
+
+## Recettes physiques
+
+- **Libtest `e992a5a1`.** Le sélecteur
+  `owned_fresh_source_publishes_once_and_refuses_reentry` passe en TLS puis
+  en mTLS sur MySQL 8.4.13 ARM64. Il exerce les formats 14 et 15, le refus à
+  la réentrée sur une cible non vide et le refus au niveau du Store Legacy.
+  [Validation du libtest](../../../docs/engineering/VALIDATION.md#27-novembre-2026--publication-unique-mysql-owned-14-et-15)
+- **CLI `38b64857`.** `prepare-mysql-owned` passe sur MySQL 8.4.13 sous
+  Docker Desktop ARM64, format 14 avec mot de passe et TLS et format 15 avec
+  mot de passe et mTLS. Chaque publication sur cible neuve atteint la
+  séquence 2. La réinvocation exacte restitue les mêmes octets de reçu et
+  préserve le DDL, les événements, la tête, l’inventaire et les projections.
+  Les refus d’UUID serveur, de cible de registre divergente et de schéma
+  étranger non vide laissent les états contrôlés intacts. La fermeture des
+  ressources jetables est vérifiée.
+  Binaire SHA-256 `65262cf18615bc14e563d2043f8b0d10fc32c33449f2ac515b911749c935bdb1`.
+  Reçu privé SHA-256 `5f9b01012902f8f3fe452dd7ef7c1f6a67f3d07e270487127acb0a5e67f40d4c`.
+
+La recette CLI couvre ces deux combinaisons. Une interruption pendant le DDL,
+un rejeu divergent sur la base déjà publiée et le démarrage d’un ancien
+binaire gateway sur ces cibles restent `NOT_RUN` pour ce CLI. L’admission
+par le gateway owned, l’epoch du propriétaire, la restauration et les
+parcours SQL-04 à SQL-06 restent ouverts. Le transfert d’un historique reste
+une opération de l’opérateur lors d’un changement de stockage.
+[Contrat de stockage](../../../docs/engineering/ARCHITECTURE_CONTRACT.md#stockage-sql-par-tenant)
 
 ## Témoins à exécuter sur cibles jetables
 
@@ -266,4 +291,4 @@ pouvoir référencer les tables de la cible et garder `foreign_key_checks` et
   reçu, les refus sur demande divergente et la conservation de la tête et
   d’une projection divergente injectée en fin de test. Qualifier séparément
   les profils mot de passe avec TLS et mot de passe avec mTLS. La concurrence
-  et la qualification du CLI gardent leurs propres preuves.
+  et les recettes du CLI gardent leurs propres preuves. [Recettes physiques](#recettes-physiques)

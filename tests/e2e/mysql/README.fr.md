@@ -244,8 +244,16 @@ initiales d’audit ainsi que les projections vides. Une correspondance exacte
 rend la même tête de publication. Une cible incomplète, étrangère, divergente
 ou passée au-delà de la publication initiale est refusée et conservée.
 
-La commande ne réalise aucune migration SQLite ou MySQL automatique.
-L’admission par le gateway, y compris l’epoch du propriétaire, et la
-restauration demandent des qualifications distinctes. La qualification du
-CLI reste en attente.
-[Preuves de publication existantes](../../../docs/engineering/VALIDATION.md#27-novembre-2026--publication-unique-mysql-owned-14-et-15)
+Sur MySQL 8.4.13 sous Docker Desktop ARM64, `prepare-mysql-owned` construit
+depuis `38b64857` passe la publication sur base neuve et le rejeu exact au
+format 14 avec mot de passe et TLS et au format 15 avec mot de passe et mTLS.
+Chaque rejeu restitue les mêmes octets de reçu et préserve la tête d’audit
+initiale et les projections. Le CLI refuse un UUID serveur différent, des
+cibles de registre divergentes et un schéma étranger non vide sans modifier
+l’état contrôlé.
+[Reçu du CLI et preuve distincte du libtest](OWNED_PREPARATION.md#recettes-physiques)
+
+L’opérateur prend en charge tout transfert d’historique lors d’un changement
+de stockage. L’admission par le gateway owned, l’epoch du propriétaire,
+la restauration et les tests applicatifs SQL-04 à SQL-06 exigent encore
+des preuves distinctes.
