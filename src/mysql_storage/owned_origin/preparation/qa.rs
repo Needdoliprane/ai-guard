@@ -1,6 +1,6 @@
 use super::super::fresh_anchor::{ConfiguredTenantNamespace, FreshAnchorRequestV1};
 use super::{
-    EmptyTargetOperation, MysqlOwnedPreparationRefusal, prepare_empty_owned_target,
+    EmptyTargetOperation, MysqlOwnedPreparationRefusal, OwnedAuditLock, prepare_empty_owned_target,
     prepare_owned_fresh_source,
 };
 use crate::{
@@ -11,11 +11,13 @@ use crate::{
     },
     mysql_storage::{
         MAX_CERTIFICATE_BYTES, MAX_PASSWORD_BYTES, MAX_PRIVATE_KEY_BYTES, MysqlClientIdentity,
-        MysqlCredentials, MysqlEndpoint, MysqlProbeError, audit::MysqlAuditStore,
+        MysqlCredentials, MysqlEndpoint, MysqlProbeError, audit::MysqlAuditStore, connect_options,
+        driver_error, open_verified,
     },
     redaction::Redactor,
 };
 use anyhow::{Context, Result, ensure};
+use mysql_async::prelude::Queryable;
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
@@ -90,6 +92,10 @@ async fn owned_audit_tables_remain_unpublished_and_refuse_reentry() -> Result<()
             schema: profile.database.clone(),
         };
         let redactor = Redactor::new(Vec::new());
+        let configured = ConfiguredTenantNamespace {
+            tenant_id: &tenant.tenant_id,
+            namespace_id: profile.namespace,
+        };
         let install = || {
             prepare_empty_owned_target(
                 endpoint(),
@@ -98,10 +104,7 @@ async fn owned_audit_tables_remain_unpublished_and_refuse_reentry() -> Result<()
                 version,
                 EmptyTargetOperation::InstallUnpublishedTables {
                     request: &anchor,
-                    configured: ConfiguredTenantNamespace {
-                        tenant_id: &tenant.tenant_id,
-                        namespace_id: profile.namespace,
-                    },
+                    configured,
                     redactor: &redactor,
                 },
             )
@@ -115,6 +118,22 @@ async fn owned_audit_tables_remain_unpublished_and_refuse_reentry() -> Result<()
             refusal.downcast_ref::<MysqlOwnedPreparationRefusal>()
                 == Some(&MysqlOwnedPreparationRefusal::TargetNotEmpty),
             "expected a target inventory refusal"
+        );
+        let refusal = prepare_owned_fresh_source(
+            endpoint(),
+            credentials(),
+            server,
+            version,
+            &anchor,
+            configured,
+            &redactor,
+        )
+        .await
+        .err()
+        .context("unpublished target yielded a publication receipt")?;
+        ensure!(
+            refusal.to_string() == "MySQL owned publication singleton is absent",
+            "expected read-only refusal for the unpublished target"
         );
         let legacy = MysqlAuditStore::new(
             endpoint(),
@@ -149,7 +168,7 @@ async fn owned_audit_tables_remain_unpublished_and_refuse_reentry() -> Result<()
 
 #[tokio::test]
 #[ignore = "requires fresh dedicated loopback MySQL 8.4 QA schemas and TLS operator credentials"]
-async fn owned_fresh_source_publishes_once_and_refuses_reentry() -> Result<()> {
+async fn owned_fresh_source_publishes_once_and_replays_exactly() -> Result<()> {
     let server = Uuid::parse_str(&std::env::var("AI_GUARD_MYSQL_OWNED_AUDIT_QA_SERVER_UUID")?)?;
     for (version, env) in [
         (14, "AI_GUARD_MYSQL_OWNED_PUBLISH_14_QA_REGISTRY"),
@@ -243,15 +262,92 @@ async fn owned_fresh_source_publishes_once_and_refuses_reentry() -> Result<()> {
             "fresh publication head is not a digest"
         );
 
-        // A second attempt must refuse the now-nonempty target without effect.
-        let refusal = publish()
+        // Simulate a lost receipt by resubmitting the exact operation.
+        let replay = publish()
             .await
-            .err()
-            .context("published target was accepted")?;
+            .context("exact publication replay refused")?;
         ensure!(
-            refusal.downcast_ref::<MysqlOwnedPreparationRefusal>()
-                == Some(&MysqlOwnedPreparationRefusal::TargetNotEmpty),
-            "expected a target inventory refusal on reentry"
+            replay.target_schema_version == version
+                && replay.head_seq == receipt.head_seq
+                && replay.head_hash == receipt.head_hash,
+            "exact replay did not return the verified publication head"
+        );
+
+        for (field, divergent) in [
+            (
+                "operation",
+                FreshAnchorRequestV1 {
+                    operation_id: Uuid::from_u128(701),
+                    ..anchor.clone()
+                },
+            ),
+            (
+                "installation",
+                FreshAnchorRequestV1 {
+                    installation_id: Uuid::from_u128(702),
+                    ..anchor.clone()
+                },
+            ),
+            (
+                "source",
+                FreshAnchorRequestV1 {
+                    source_id: Uuid::from_u128(703),
+                    ..anchor.clone()
+                },
+            ),
+            (
+                "namespace",
+                FreshAnchorRequestV1 {
+                    namespace_id: Uuid::from_u128(704),
+                    ..anchor.clone()
+                },
+            ),
+            (
+                "tenant",
+                FreshAnchorRequestV1 {
+                    tenant_id: "foreign-qa-tenant".into(),
+                    ..anchor.clone()
+                },
+            ),
+            (
+                "server",
+                FreshAnchorRequestV1 {
+                    server_uuid: Uuid::from_u128(705),
+                    ..anchor.clone()
+                },
+            ),
+            (
+                "format",
+                FreshAnchorRequestV1 {
+                    schema_version: if version == 14 { 15 } else { 14 },
+                    ..anchor.clone()
+                },
+            ),
+        ] {
+            let divergent_scope = ConfiguredTenantNamespace {
+                tenant_id: &divergent.tenant_id,
+                namespace_id: divergent.namespace_id,
+            };
+            ensure!(
+                prepare_owned_fresh_source(
+                    endpoint(),
+                    credentials(),
+                    divergent.server_uuid,
+                    divergent.schema_version,
+                    &divergent,
+                    divergent_scope,
+                    &redactor,
+                )
+                .await
+                .is_err(),
+                "divergent {field} yielded a publication receipt"
+            );
+        }
+        let after_refusals = publish().await?;
+        ensure!(
+            after_refusals.head_seq == receipt.head_seq
+                && after_refusals.head_hash == receipt.head_hash,
+            "divergent replays changed the publication head"
         );
 
         // The old gateway remains closed to the owned published version.
@@ -271,6 +367,48 @@ async fn owned_fresh_source_publishes_once_and_refuses_reentry() -> Result<()> {
                     == "unsupported MySQL audit schema version"
             );
         }
+
+        // A projection that was never published must prevent a recovery
+        // receipt even when the audit chain and recorded head still match.
+        let (options, _) = connect_options(&endpoint(), credentials())?;
+        let (mut witness, _) =
+            open_verified(options.into(), &profile.database, &profile.username).await?;
+        let witness_lock = OwnedAuditLock::acquire(&mut witness, server, &profile.database).await?;
+        witness
+            .exec_drop(
+                "INSERT INTO review_authority_meta \
+                 (singleton, source_id, anchor_seq, anchor_hash, incarnation_revision, \
+                  snapshot_json, snapshot_hash) VALUES (1, ?, 2, ?, 1, '{}', ?)",
+                (
+                    anchor.source_id.to_string(),
+                    &receipt.head_hash,
+                    "0".repeat(64),
+                ),
+            )
+            .await
+            .map_err(driver_error)?;
+        witness_lock.release(&mut witness).await?;
+        ensure!(
+            publish()
+                .await
+                .err()
+                .context("divergent projection was accepted")?
+                .to_string()
+                == "MySQL fresh owned common projections contain rows",
+            "expected refusal of the divergent projection"
+        );
+        let unchanged = witness
+            .query_first::<(i64, i64, String), _>(
+                "SELECT r.incarnation_revision, s.head_seq, s.head_hash \
+                 FROM review_authority_meta r JOIN ai_guard_audit_state s ON s.singleton=r.singleton",
+            )
+            .await
+            .map_err(driver_error)?;
+        ensure!(
+            unchanged == Some((1, receipt.head_seq, receipt.head_hash)),
+            "refusing a divergent projection changed the retained state"
+        );
+        witness.disconnect().await.map_err(driver_error)?;
     }
     Ok(())
 }

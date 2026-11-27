@@ -55,11 +55,11 @@ enum Command {
     Human(agentsandbox::identity_cli::HumanArgs),
     /// Explicit private preparation, migration and activation of owned human sources.
     HumanSources(human_sources_cli::HumanSourcesArgs),
-    /// Publish an owned audit format on a dedicated empty MySQL schema.
+    /// Publish or verify the same fresh owned MySQL audit format.
     ///
-    /// Use the operator account and keep other writers and schema administration
-    /// off the target during publication. Preserve any nonempty target after a
-    /// refusal or a lost receipt.
+    /// Use a dedicated schema and keep other writers and schema administration
+    /// off the target. After a lost receipt, repeat the same request for
+    /// read-only verification. Preserve the target if verification is refused.
     #[cfg(feature = "mysql-storage")]
     PrepareMysqlOwned(mysql_prepare_cli::PrepareMysqlOwnedArgs),
     /// Prepare or recover a new private local OIDC installation offline.

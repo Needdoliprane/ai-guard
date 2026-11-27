@@ -115,8 +115,8 @@ pub struct MysqlOwnedPreparationRequest<'a> {
     pub source_id: Uuid,
 }
 
-/// Publish an owned format on a dedicated empty schema. Resolve the endpoint,
-/// tenant and namespace from trusted operator configuration before calling.
+/// Publish on a dedicated empty schema or verify the same fresh publication
+/// read-only. Resolve the endpoint and scope from trusted operator configuration.
 pub async fn publish_owned_fresh_source(
     endpoint: MysqlEndpoint<'_>,
     credentials: MysqlCredentials<'_>,
@@ -150,7 +150,8 @@ pub async fn publish_owned_fresh_source(
 
 /// Install the selected owned format on a verified empty target and publish the
 /// genesis, the fresh creation anchor and the singleton in one durable
-/// transaction, then re-verify the published prefix under the same lock.
+/// transaction, then re-verify the published prefix under the same lock. A
+/// nonempty target can only yield a receipt through read-only verification.
 pub(crate) async fn prepare_owned_fresh_source(
     endpoint: MysqlEndpoint<'_>,
     credentials: MysqlCredentials<'_>,
@@ -285,14 +286,16 @@ async fn prepare_empty_owned_target(
                     )?;
                     let target = match check_empty_schema(&mut conn, &ownership).await {
                         Ok(target) => target,
-                        Err(error) => {
+                        Err(error)
                             if error.downcast_ref::<MysqlOwnedPreparationRefusal>()
-                                == Some(&MysqlOwnedPreparationRefusal::TargetNotEmpty)
-                            {
-                                anchor.reject_divergence(&mut conn, &ownership).await?;
-                            }
-                            return Err(error);
+                                == Some(&MysqlOwnedPreparationRefusal::TargetNotEmpty) =>
+                        {
+                            let head =
+                                publication::verify_published(&mut conn, &ownership, &anchor)
+                                    .await?;
+                            return Ok(Some(head));
                         }
+                        Err(error) => return Err(error),
                     };
                     audit_tables::install(target, schema_version).await?;
                     let target = CheckedEmptyTarget {
@@ -308,17 +311,13 @@ async fn prepare_empty_owned_target(
                         &redactor,
                     )
                     .await?;
-                    publication::verify_published(
-                        &mut conn,
-                        &ownership,
-                        schema_version,
-                        configured.tenant_id,
-                        configured.namespace_id,
-                        server,
-                        endpoint.database,
-                    )
-                    .await?;
-                    Ok(Some(head))
+                    let verified =
+                        publication::verify_published(&mut conn, &ownership, &anchor).await?;
+                    ensure!(
+                        verified == head,
+                        "MySQL owned publication head changed after commit"
+                    );
+                    Ok(Some(verified))
                 }
             }
         }

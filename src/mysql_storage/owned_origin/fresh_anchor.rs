@@ -7,7 +7,7 @@ use crate::{
     control::{content_hash, hash},
     human_authority::HumanAuthorityMarkerReceiptV1,
     model::Event,
-    mysql_storage::audit::{EventColumns, decode_event_columns},
+    mysql_storage::audit::{EncodedEvent, EventColumns, decode_event_columns},
     redaction::Redactor,
     tenancy::validate_tenant_id,
 };
@@ -108,9 +108,8 @@ impl FreshAnchorRequestV1 {
         })
     }
 
-    /// Verify a stored creation event binds the configured origin exactly. The
-    /// open guard uses this without the original draft: the closed request form
-    /// and its content hash must match the tenant, namespace, format and target.
+    /// Verify the stored origin and request hash against the configured target.
+    /// An exact operation replay must also compare the fact with its draft.
     pub(super) fn verify_stored_origin(
         event: &Event,
         tenant: &str,
@@ -244,22 +243,12 @@ impl FreshAnchorDraft<'_> {
             recorded_row_matches(&operation_id, &row.1, row.5.len()),
             REPLAY_CONFLICT
         );
-        let raw = row.5.clone();
         let computed = digest(row.0, &row.2, &row.3, &row.5);
-        let stored = decode_event_columns(row)
-            .map_err(|_| anyhow!(REPLAY_CONFLICT))?
-            .stored;
-        let time = parse_time(&stored.event.timestamp).map_err(|_| anyhow!(REPLAY_CONFLICT))?;
-        let received = parse_time(&stored.received_at).map_err(|_| anyhow!(REPLAY_CONFLICT))?;
-        let ordered = time <= received;
-        let mut expected = self.event.clone();
-        expected.timestamp = format_time(time);
-        // Compare the actual hashed bytes with the codec's closed event form.
-        // This also excludes duplicate keys and extensions in the stored JSON.
-        let exact_fact = raw == serde_json::to_string(&expected)?;
+        let encoded = decode_event_columns(row).map_err(|_| anyhow!(REPLAY_CONFLICT))?;
+        let exact_fact = self.matches_recorded_fact(&encoded)?;
+        let stored = encoded.stored;
         ensure!(
-            ordered
-                && hash(&stored.prev_hash).is_ok()
+            hash(&stored.prev_hash).is_ok()
                 && receipt_matches(
                     stored.seq,
                     &stored.prev_hash,
@@ -274,6 +263,18 @@ impl FreshAnchorDraft<'_> {
             seq: stored.seq,
             hash: stored.hash,
         })
+    }
+
+    /// Match the exact draft against a row whose chain is checked by the caller.
+    pub(super) fn matches_recorded_fact(&self, encoded: &EncodedEvent) -> Result<bool> {
+        let stored = &encoded.stored;
+        let time = parse_time(&stored.event.timestamp).map_err(|_| anyhow!(REPLAY_CONFLICT))?;
+        let received = parse_time(&stored.received_at).map_err(|_| anyhow!(REPLAY_CONFLICT))?;
+        let mut expected = self.event.clone();
+        expected.timestamp = format_time(time);
+        // Compare the hashed bytes, including the operation ID and the closed
+        // request containing the installation and source IDs.
+        Ok(time <= received && encoded.payload == serde_json::to_string(&expected)?)
     }
 }
 
