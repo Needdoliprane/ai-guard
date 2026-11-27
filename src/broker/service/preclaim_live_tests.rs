@@ -13,7 +13,7 @@ use crate::{
         enforcer::{EnforcedSlot, retirement::test_support::OriginalUnusedFixture},
         intent::ExecutionIntentV1,
         journal::retirement_live_fixture::{
-            INVOCATION_DATA_PROGRAM, LiveFixture, live_fixture_with_gateway,
+            INVOCATION_DATA_PROGRAM, LiveFixture, live_fixture_with_gateway_and_program,
         },
         service::preclaim::{AbandonBeforeClaimV1, PreclaimStateV1},
         writer::BeginUnusedRetirement,
@@ -25,6 +25,7 @@ use anyhow::Context;
 use std::{
     fs,
     os::unix::fs::PermissionsExt,
+    path::Path,
     sync::{Mutex, atomic::AtomicUsize},
 };
 use tokio::{net::TcpListener, sync::oneshot, task::JoinHandle};
@@ -243,7 +244,11 @@ impl From<LiveFixture> for ProducerFixture {
 async fn authenticated_preclaim_signal_503_retains_original_and_exact_retry_reaches_real_q_f() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let origin = format!("http://{}", listener.local_addr().unwrap());
-    let live = ProducerFixture::from(live_fixture_with_gateway(&origin, true));
+    let live = ProducerFixture::from(live_fixture_with_gateway_and_program(
+        &origin,
+        true,
+        Path::new(INVOCATION_DATA_PROGRAM),
+    ));
     let scope = live.journal.scope().clone();
     let store = Arc::clone(&live.store);
     let delivery = Arc::new(Delivery::default());
