@@ -146,7 +146,7 @@ impl LegacyIpcFixture {
             launch_nonce,
         }
     }
-    pub(in crate::broker::enforcer) fn root(&self) -> &Directory {
+    pub(in crate::broker) fn root(&self) -> &Directory {
         &self.root
     }
     pub(in crate::broker::enforcer) fn launch_nonce(&self) -> Uuid {
