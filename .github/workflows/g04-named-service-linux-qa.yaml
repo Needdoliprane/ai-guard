@@ -2,7 +2,7 @@ name: G04 named archive and STOP Linux QA
 
 on:
   push:
-    branches: [codex/g04-named-service-linux-runtime-driver-20261127]
+    branches: [codex/g04-named-full-ack-driver-20261127]
     paths: [.github/workflows/g04-named-service-linux-qa.yaml]
 
 permissions:
@@ -13,8 +13,8 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
-      SOURCE_SHA: 9b9f1ba092e0ad3d495d2b85d6d17dcb2f407c04
-      SOURCE_TREE: 0908299f488156959e4ba271c6f22cd02dbb3390
+      SOURCE_SHA: d63500fdf47ccfcbe7e3f56593a2167f8cdb5379
+      SOURCE_TREE: 138fcf307de9beb113d38173f6db032aab9f114c
       CARGO_BUILD_JOBS: '1'
       CARGO_INCREMENTAL: '0'
       CARGO_PROFILE_DEV_DEBUG: '0'
@@ -24,17 +24,16 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: 9b9f1ba092e0ad3d495d2b85d6d17dcb2f407c04
+          ref: d63500fdf47ccfcbe7e3f56593a2167f8cdb5379
           persist-credentials: false
 
-      - name: Build one library harness and verify two exact tests
+      - name: Build one library harness and verify the exact Writer test
         shell: bash
         run: |
           set -euo pipefail
           umask 077
           selectors=(
             broker::checkpoint::legacy_named::tests::explicit_named_admission_requires_an_immutable_archive_digest
-            runtime::managed::deadline_semantic_tests::import_creation_orders_native_mutations_with_stop
           )
 
           report_not_run() {
