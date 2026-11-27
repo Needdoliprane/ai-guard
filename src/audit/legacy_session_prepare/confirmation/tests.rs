@@ -24,6 +24,7 @@ use std::{os::unix::fs::PermissionsExt, path::Path};
 
 const MAX_EVENTS: u64 = 128;
 const DEADLINE: &str = "2126-01-01T00:00:00Z";
+const BROKER_TOKEN: &str = "synthetic-broker-authentication-fixture";
 
 struct Fixture {
     directory: tempfile::TempDir,
@@ -200,41 +201,8 @@ impl Fixture {
                 })
                 .unwrap();
         }
-        let broker_id = Uuid::new_v4();
-        let incarnation_id = Uuid::new_v4();
-        let workload_id = Uuid::new_v4().to_string();
-        store
-            .issue_workload_binding(&WorkloadBindingIssueV1 {
-                version: 1,
-                operation_id: Uuid::new_v4().to_string(),
-                credential_id: workload_id.clone(),
-                expected_revision: 0,
-                subject: WorkloadSubjectV1::Broker {
-                    broker_id: broker_id.to_string(),
-                    incarnation_id: incarnation_id.to_string(),
-                },
-                sha256_digest: hex::encode(Sha256::digest(
-                    b"synthetic broker authentication fixture",
-                )),
-                expires_at: DEADLINE.into(),
-            })
-            .unwrap();
-        store
-            .mutate_broker_grant(&BrokerGrantMutationV1 {
-                version: 1,
-                operation_id: Uuid::new_v4().to_string(),
-                broker_id: broker_id.to_string(),
-                expected_revision: None,
-                credential_id: workload_id,
-                incarnation_id: incarnation_id.to_string(),
-                authorities: vec![BrokerAuthorityV1 {
-                    authority_id: launch.authority_id.clone(),
-                    runtime_kind: BrokerRuntimeKindV1::Docker,
-                }],
-                lease_seconds: 120,
-                not_after: DEADLINE.into(),
-            })
-            .unwrap();
+        let (broker_id, incarnation_id) =
+            Self::issue_broker(store, &launch.authority_id, BROKER_TOKEN);
         store
             .provision_legacy_session_target(
                 actor,
@@ -265,6 +233,182 @@ impl Fixture {
             .unwrap();
         (scope, credential_id, digest)
     }
+
+    fn issue_broker(store: &Store, authority_id: &str, token: &str) -> (Uuid, Uuid) {
+        let broker_id = Uuid::new_v4();
+        let incarnation_id = Uuid::new_v4();
+        let workload_id = Uuid::new_v4().to_string();
+        store
+            .issue_workload_binding(&WorkloadBindingIssueV1 {
+                version: 1,
+                operation_id: Uuid::new_v4().to_string(),
+                credential_id: workload_id.clone(),
+                expected_revision: 0,
+                subject: WorkloadSubjectV1::Broker {
+                    broker_id: broker_id.to_string(),
+                    incarnation_id: incarnation_id.to_string(),
+                },
+                sha256_digest: hex::encode(Sha256::digest(token)),
+                expires_at: DEADLINE.into(),
+            })
+            .unwrap();
+        store
+            .mutate_broker_grant(&BrokerGrantMutationV1 {
+                version: 1,
+                operation_id: Uuid::new_v4().to_string(),
+                broker_id: broker_id.to_string(),
+                expected_revision: None,
+                credential_id: workload_id,
+                incarnation_id: incarnation_id.to_string(),
+                authorities: vec![BrokerAuthorityV1 {
+                    authority_id: authority_id.into(),
+                    runtime_kind: BrokerRuntimeKindV1::Docker,
+                }],
+                lease_seconds: 120,
+                not_after: DEADLINE.into(),
+            })
+            .unwrap();
+        (broker_id, incarnation_id)
+    }
+}
+
+#[tokio::test]
+async fn confirmed_plan_is_private_and_requires_current_initiator() {
+    use crate::api::{GatewayState, TenantGateway, gateway_router};
+    use axum::{
+        body::{Body, to_bytes},
+        http::{Request, StatusCode, header},
+    };
+    use std::sync::Arc;
+    use tower::ServiceExt;
+
+    let fixture = Fixture::new();
+    let prepared = fixture
+        .store
+        .legacy_session_prepare_local(fixture.proof(), fixture.request())
+        .unwrap();
+    let operation_id = Uuid::new_v4();
+    let confirmation = fixture
+        .store
+        .legacy_session_confirm_local(
+            fixture.proof(),
+            SessionLaunchRequestV1 {
+                version: 1,
+                operation_id,
+                launch_target_id: fixture.target_id,
+                expected_target_revision: 1,
+                preparation_operation_id: prepared.operation_id,
+                preparation_input_hash: prepared.input_hash,
+            },
+        )
+        .unwrap();
+    let mut launch = fixture.worker.launch.clone();
+    launch.session_id = confirmation.session_id.clone();
+    let target_id = fixture.target_id;
+    let foreign_broker = "synthetic-other-broker-authentication-fixture";
+    Fixture::issue_broker(&fixture.store, &Uuid::new_v4().to_string(), foreign_broker);
+    let path = fixture
+        .directory
+        .path()
+        .canonicalize()
+        .unwrap()
+        .join("legacy.sqlite");
+    drop(fixture.store);
+    let store = Arc::new(Fixture::open(&path, Redactor::new(vec![])));
+    let runner = "fixture-runner-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let state = GatewayState::for_tenants(
+        vec![TenantGateway {
+            tenant_id: "tenant-a".into(),
+            store: Arc::clone(&store),
+            runner_token: runner.into(),
+            viewer_token: "fixture-viewer-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+        }],
+        Policy::default(),
+        None,
+        Redactor::new(vec![]),
+    )
+    .unwrap();
+    let app = gateway_router(state);
+    let path = format!(
+        "/api/v1/control/session-confirmations/{}",
+        confirmation.binding_ref
+    );
+    let private = format!("/control{path}");
+    let get = |path: &str, bearer: &str| {
+        app.clone().oneshot(
+            Request::get(path)
+                .header(header::AUTHORIZATION, format!("Bearer {bearer}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+    };
+    let before = store.head().unwrap();
+    assert_eq!(
+        get(&path, BROKER_TOKEN).await.unwrap().status(),
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        get(&private, runner).await.unwrap().status(),
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        get(&private, foreign_broker).await.unwrap().status(),
+        StatusCode::NOT_FOUND
+    );
+    let response = get(&private, BROKER_TOKEN).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let context: crate::control::session_control::LegacyConfirmedPlanV1 =
+        serde_json::from_slice(&to_bytes(response.into_body(), 4096).await.unwrap()).unwrap();
+    assert_eq!(context.version, 1);
+    assert_eq!(
+        Some(context.control_namespace_uuid.as_str()),
+        store
+            .supervision_state()
+            .unwrap()
+            .control_namespace_uuid
+            .as_deref()
+    );
+    assert_eq!(context.operation_id, operation_id);
+    assert_eq!(context.session_id.to_string(), confirmation.session_id);
+    assert_eq!(context.binding_ref.to_string(), confirmation.binding_ref);
+    assert_eq!(context.launch_target_id, target_id);
+    assert_eq!(context.target_revision, 1);
+    assert_eq!(context.broker_profile_id, "fixture-profile");
+    assert_eq!(context.launch_spec_hash, launch.spec_hash().unwrap());
+    assert_eq!(
+        context.expires_at,
+        crate::broker_registry::parse_time(DEADLINE).unwrap()
+    );
+    assert_eq!(store.head().unwrap(), before);
+
+    store
+        .mutate_identity(&IdentityMutationV1 {
+            version: 1,
+            operation_id: Uuid::new_v4().to_string(),
+            actor: PrincipalRefV1::LegacyControl {
+                credential_id: "fixture-control".into(),
+                role: LegacyControlRoleV1::Runner,
+            },
+            change: IdentityChangeV1::Credential {
+                expected_revision: 1,
+                binding: LocalCredentialV1 {
+                    version: 1,
+                    credential_id: fixture.credential_id,
+                    principal: fixture.scope.principal().clone(),
+                    sha256_digest: hex::encode(fixture.digest),
+                    revision: 2,
+                    active: false,
+                    expires_at: None,
+                },
+            },
+        })
+        .unwrap();
+    let after_revocation = store.head().unwrap();
+    assert_eq!(
+        get(&private, BROKER_TOKEN).await.unwrap().status(),
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(store.head().unwrap(), after_revocation);
 }
 
 fn mutation(worker: &WorkerV1, transition: WorkerTransitionV1) -> WorkerMutationV1 {
@@ -707,6 +851,19 @@ fn legacy_confirmation_replays_the_v1_receipt_after_reopen() {
     assert_eq!(replay.session_id, original.session_id);
     assert_eq!(replay.binding_ref, original.binding_ref);
     assert_eq!(replay.audit_hash, original.audit_hash);
+    let Some(crate::workload::AuthenticatedWorkload::Broker(broker)) =
+        f.store.authenticate_workload_token(BROKER_TOKEN).unwrap()
+    else {
+        panic!("fixture must authenticate its broker");
+    };
+    let error = f
+        .store
+        .legacy_confirmed_plan(&broker, canonical_uuid(&replay.binding_ref).unwrap())
+        .unwrap_err();
+    assert_eq!(
+        error.downcast_ref::<ControlFailure>(),
+        Some(&ControlFailure::NotFound)
+    );
     assert_eq!(f.store.head().unwrap(), head);
 }
 

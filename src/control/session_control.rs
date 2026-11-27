@@ -120,6 +120,23 @@ pub struct LegacySessionConfirmationReceiptV1 {
     pub replayed: bool,
 }
 
+/// Current preparation facts for the broker bound to a Legacy confirmation.
+/// Admission still resolves the retained confirmation in its write transaction.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct LegacyConfirmedPlanV1 {
+    pub version: u32,
+    pub binding_ref: Uuid,
+    pub control_namespace_uuid: String,
+    pub operation_id: Uuid,
+    pub session_id: Uuid,
+    pub launch_target_id: Uuid,
+    pub target_revision: u64,
+    pub broker_profile_id: String,
+    pub launch_spec_hash: String,
+    pub expires_at: chrono::DateTime<chrono::Utc>,
+}
+
 /// The exact launch commit of one retained preparation. It names the launch
 /// operation (the idempotency key), the opaque target and its expected server
 /// revision, and the preparation it consumes by reference and exact fingerprint.

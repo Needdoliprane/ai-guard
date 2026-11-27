@@ -1,13 +1,15 @@
 use super::*;
 use crate::{
+    broker_registry::BrokerIdentityV1,
     control::{
         ControlFailure,
         session_control::{
-            LegacySessionConfirmationReceiptV1, SessionLaunchPrepareRequestV1,
-            SessionLaunchRequestV1, SessionPrepareReceiptV1, canonical_uuid,
+            LegacyConfirmedPlanV1, LegacySessionConfirmationReceiptV1,
+            SessionLaunchPrepareRequestV1, SessionLaunchRequestV1, SessionPrepareReceiptV1,
+            canonical_uuid,
         },
     },
-    identity::{AuthorizedScopeV1, ContextModeV1, HumanCapabilityV1},
+    identity::{AuthorizedScopeV1, ContextModeV1, HumanCapabilityV1, LocalCredentialV1},
 };
 use chrono::{DateTime, Utc};
 
@@ -294,6 +296,19 @@ fn matching_prepare(record: &Prepared, request: &SessionLaunchRequestV1) -> anyh
     Ok(())
 }
 
+fn plan_lookup_failure(error: anyhow::Error) -> anyhow::Error {
+    match error.downcast_ref::<IdentityFailureV1>() {
+        Some(
+            IdentityFailureV1::NotFound
+            | IdentityFailureV1::PermissionDenied
+            | IdentityFailureV1::IdentityRevoked
+            | IdentityFailureV1::ContextRevoked
+            | IdentityFailureV1::Conflict,
+        ) => ControlFailure::NotFound.into(),
+        _ => error,
+    }
+}
+
 pub(in crate::audit) fn validate_reference_event(
     tx: &Connection,
     version: i64,
@@ -408,6 +423,121 @@ pub(in crate::audit) fn validate_reference_event(
 }
 
 impl Store {
+    pub(crate) fn legacy_confirmed_plan(
+        &self,
+        broker: &BrokerIdentityV1,
+        binding_ref: Uuid,
+    ) -> anyhow::Result<LegacyConfirmedPlanV1> {
+        let mut db = self
+            .db
+            .lock()
+            .map_err(|_| IdentityFailureV1::IdentityUnavailable)?;
+        let tx = self.begin_checked(&mut db)?;
+        let version = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        anyhow::ensure!(
+            format_admits(version) && capability_present(&tx)?,
+            ControlFailure::MigrationRequired
+        );
+        let clock = workload::capture_control_time(&tx)?;
+        let plan = self.resolve_legacy_confirmed_plan(&tx, broker, binding_ref, &clock)?;
+        self.commit_authorized(tx, &clock)?;
+        anyhow::ensure!(plan.expires_at > Utc::now(), ControlFailure::NotFound);
+        Ok(plan)
+    }
+
+    fn resolve_legacy_confirmed_plan(
+        &self,
+        tx: &CheckedTransaction<'_>,
+        broker: &BrokerIdentityV1,
+        binding_ref: Uuid,
+        clock: &workload::AuthorizedControlTimeV1,
+    ) -> anyhow::Result<LegacyConfirmedPlanV1> {
+        workload::revalidate_broker_identity_checked(tx, broker, clock.at())?;
+        let confirmed = event_by_id(tx, &binding_ref.to_string())?
+            .filter(|stored| stored.event.kind == CONFIRMED)
+            .ok_or(ControlFailure::NotFound)?;
+        let record: Confirmed = decoded(&confirmed, CONFIRMED)?;
+        let authority = record
+            .admission_authority
+            .as_ref()
+            .filter(|authority| record.version == 2 && authority.expires_at > clock.at())
+            .ok_or(ControlFailure::NotFound)?;
+        let preparation =
+            event_by_id(tx, &record.preparation_id)?.context("missing Legacy preparation")?;
+        let prepared: Prepared = decoded(&preparation, PREPARED)?;
+        let (target_event, target) =
+            require_current_target(tx, record.request.selection()?, &prepared.initiator, clock)
+                .map_err(plan_lookup_failure)?;
+        let target = target.command.target;
+        anyhow::ensure!(
+            target.catalogue.tenant_id == broker.tenant_id()
+                && target.broker_id.to_string() == broker.broker_id()
+                && target.broker_grant_revision == broker.grant_revision(),
+            ControlFailure::NotFound
+        );
+        matching_prepare(&prepared, &record.request)?;
+        anyhow::ensure!(
+            preparation.hash == record.preparation_audit_hash
+                && target_event.hash == prepared.target_audit_hash
+                && prepared.namespace == supervision::namespace(tx)?
+                && target.launch.spec_hash()? == prepared.launch_template_hash
+                && record.session_id == session_id(record.request.operation_id)?,
+            ControlFailure::Conflict
+        );
+        let initiator = &prepared.initiator;
+        let credential: LocalCredentialV1 = identity::json_row(
+            tx,
+            "SELECT payload_json FROM identity_credentials WHERE credential_id=?1",
+            &initiator.credential_id,
+        )?
+        .ok_or(ControlFailure::NotFound)?;
+        credential.validate()?;
+        anyhow::ensure!(
+            credential.active
+                && credential.credential_id == initiator.credential_id
+                && credential.revision == initiator.credential_revision
+                && credential.principal == initiator.principal,
+            ControlFailure::NotFound
+        );
+        let expires_at = match credential.expires_at.as_deref() {
+            Some(expiry) => authority
+                .expires_at
+                .min(crate::broker_registry::parse_time(expiry)?),
+            None => authority.expires_at,
+        };
+        let scope = self
+            .authorize_human_context_checked(
+                tx,
+                &initiator.principal,
+                &initiator.principal.key()?,
+                &initiator.membership_id,
+                initiator.membership_revision,
+                ContextModeV1::Personal,
+            )
+            .map_err(plan_lookup_failure)?;
+        anyhow::ensure!(
+            scope.has_capability(HumanCapabilityV1::LaunchSession)
+                && scope.organization_scope() == initiator.organization
+                && scope.authorization_revision() >= authority.authorization_revision
+                && expires_at > clock.at(),
+            ControlFailure::NotFound
+        );
+        let mut launch = target.launch;
+        launch.session_id = record.session_id.to_string();
+        Ok(LegacyConfirmedPlanV1 {
+            version: 1,
+            binding_ref,
+            control_namespace_uuid: prepared.namespace,
+            operation_id: record.request.operation_id,
+            session_id: record.session_id,
+            launch_target_id: target.catalogue.launch_target_id,
+            target_revision: target.catalogue.revision,
+            broker_profile_id: target.broker_profile_id,
+            launch_spec_hash: launch.spec_hash()?,
+            expires_at,
+        })
+    }
+
     fn legacy_local_initiator(
         &self,
         tx: &CheckedTransaction<'_>,

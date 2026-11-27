@@ -4,6 +4,7 @@ use crate::control::{
     AdmissionResultV1, ArmResultV1, ArmV1, ArmedStartClaimV1, ControlCapabilitiesV1,
     ControlProtocolV1, ExportRequestV1, HelperClaimResultV1, HelperCleanupV1, HelperObservationV1,
     HelperStartClaimV1, MutationReceiptV1, MutationResultV1, SupervisedAdmissionV1,
+    session_control::{LegacyConfirmedPlanV1, canonical_uuid},
 };
 use axum::{extract::FromRequestParts, http::request::Parts};
 
@@ -12,6 +13,10 @@ pub(super) fn routes() -> Router<GatewayState> {
     Router::new()
         .route("/control/protocol", get(protocol))
         .route("/control/capabilities", get(capabilities))
+        .route(
+            "/control/session-confirmations/{binding_ref}",
+            get(confirmed_plan),
+        )
         .route("/workers/supervised-reservations", post(reserve))
         .route("/workers/{id}/arms", post(arm))
         .route("/workers/{id}/arms/{arm_id}", get(read_arm))
@@ -91,6 +96,39 @@ impl FromRequestParts<GatewayState> for PrivateControlTransport {
             .map(|_| Self)
             .ok_or_else(|| error(StatusCode::NOT_FOUND, "Route inconnue."))
     }
+}
+
+async fn confirmed_plan(
+    _private: PrivateControlTransport,
+    broker: workload::VerifiedBroker,
+    Path(binding_ref): Path<String>,
+) -> ApiResult<Json<LegacyConfirmedPlanV1>> {
+    let binding_ref = canonical_uuid(&binding_ref).map_err(control_error)?;
+    broker
+        .blocking(move |tenant, broker, redactor| {
+            let store = tenant.store.sqlite_api()?;
+            let plan = store
+                .legacy_confirmed_plan(&broker, binding_ref)
+                .map_err(|error| {
+                    if error.downcast_ref::<ControlFailure>() == Some(&ControlFailure::NotFound) {
+                        workload::response(
+                            StatusCode::NOT_FOUND,
+                            "session_confirmation_not_found",
+                            "Confirmation de session introuvable.",
+                        )
+                    } else {
+                        workload::store_failure(&tenant.store, error)
+                    }
+                })?;
+            let value = serde_json::to_value(&plan).map_err(|error| control_error(error.into()))?;
+            if redactor.value_unclipped(&value) != value {
+                return Err(control_error(anyhow::anyhow!(
+                    "confirmed broker plan requires redaction"
+                )));
+            }
+            Ok(Json(plan))
+        })
+        .await
 }
 
 async fn capabilities(
