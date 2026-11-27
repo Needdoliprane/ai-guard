@@ -19,7 +19,8 @@ mod tests;
 
 pub(crate) use admission::LegacyNamedCancelReservationV1;
 pub(in crate::audit) use admission::{
-    ADMITTED, LEGACY_NAMED_ARM_KIND, LEGACY_NAMED_IMPORT_CLAIM_KIND, legacy_named_arm_predecessor,
+    ADMITTED, LEGACY_NAMED_ARM_KIND, LEGACY_NAMED_IMPORT_CLAIM_KIND,
+    LEGACY_NAMED_IMPORT_VERIFICATION_ARM_KIND, legacy_named_arm_predecessor,
     legacy_named_import_claim_predecessor, require_named_admission_link,
     validate_admission_initiator, validate_legacy_named_cancel, validate_named_arm_initiator,
     validate_named_import_claim_initiator,

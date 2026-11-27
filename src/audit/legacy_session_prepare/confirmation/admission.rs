@@ -23,7 +23,8 @@ mod execution;
 mod initial_decision;
 pub(crate) use arm::LegacyNamedArmV1;
 pub(in crate::audit) use arm::{
-    LEGACY_NAMED_ARM_KIND, legacy_named_arm_predecessor, validate_named_arm_initiator,
+    LEGACY_NAMED_ARM_KIND, LEGACY_NAMED_IMPORT_VERIFICATION_ARM_KIND, legacy_named_arm_predecessor,
+    validate_named_arm_initiator,
 };
 pub(crate) use cancel::LegacyNamedCancelReservationV1;
 pub(crate) use cancel::LegacyNamedCancelV1;

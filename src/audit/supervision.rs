@@ -2,8 +2,9 @@
 use super::*;
 use crate::audit::{
     legacy_session_prepare::{
-        LEGACY_NAMED_ARM_KIND, LEGACY_NAMED_IMPORT_CLAIM_KIND, LegacyNamedArmV1,
-        LegacyNamedCancelV1, LegacyNamedImportClaimV1, legacy_named_import_claim_predecessor,
+        LEGACY_NAMED_ARM_KIND, LEGACY_NAMED_IMPORT_CLAIM_KIND,
+        LEGACY_NAMED_IMPORT_VERIFICATION_ARM_KIND, LegacyNamedArmV1, LegacyNamedCancelV1,
+        LegacyNamedImportClaimV1, legacy_named_import_claim_predecessor,
     },
     supervision_admission::{self as admission_codec, Binding, receipt_for},
     supervision_genesis,
@@ -85,6 +86,7 @@ pub(crate) enum Input {
     Bind(Box<BindLegacyIntentV1>),
     Arm(Box<ArmV1>),
     LegacyNamedArm(Box<LegacyNamedArmV1>),
+    LegacyNamedImportVerificationArm(Box<LegacyNamedArmV1>),
     LegacyNamedCancel(Box<LegacyNamedCancelV1>),
     WorkerClaim(Box<ArmedStartClaimV1>),
     HelperClaim(Box<HelperStartClaimV1>),
@@ -144,7 +146,9 @@ impl Input {
             Self::Admission(r) => &r.admission.operation_id,
             Self::Bind(r) => &r.operation_id,
             Self::Arm(r) => &r.operation_id,
-            Self::LegacyNamedArm(r) => &r.arm.operation_id,
+            Self::LegacyNamedArm(r) | Self::LegacyNamedImportVerificationArm(r) => {
+                &r.arm.operation_id
+            }
             Self::LegacyNamedCancel(r) => &r.request.mutation.operation_id,
             Self::WorkerClaim(r) => &r.operation_id,
             Self::HelperClaim(r) => &r.operation_id,
@@ -159,7 +163,7 @@ impl Input {
         match self {
             Self::Admission(_) => admission_codec::ACTION,
             Self::Bind(_) => "bind_intent",
-            Self::Arm(_) => "arm",
+            Self::Arm(_) | Self::LegacyNamedImportVerificationArm(_) => "arm",
             // The existing snapshot index includes this state transition.
             Self::LegacyNamedArm(_) => "prepare",
             Self::LegacyNamedCancel(_) => "cancel_reserved",
@@ -174,6 +178,7 @@ impl Input {
         match self {
             Self::Arm(_) => "control.execution.arm",
             Self::LegacyNamedArm(_) => LEGACY_NAMED_ARM_KIND,
+            Self::LegacyNamedImportVerificationArm(_) => LEGACY_NAMED_IMPORT_VERIFICATION_ARM_KIND,
             Self::LegacyNamedImportClaim(_) => LEGACY_NAMED_IMPORT_CLAIM_KIND,
             Self::LegacyNamedImportObservation(_) => LEGACY_NAMED_IMPORT_OBSERVATION_KIND,
             _ => admission_codec::KIND,
@@ -185,6 +190,7 @@ impl Input {
             Self::Bind(r) => r.input_hash(),
             Self::Arm(r) => r.input_hash(),
             Self::LegacyNamedArm(r) => r.input_hash(),
+            Self::LegacyNamedImportVerificationArm(r) => r.verification_input_hash(),
             Self::LegacyNamedCancel(r) => r.input_hash(),
             Self::WorkerClaim(r) => r.input_hash(),
             Self::HelperClaim(r) => r.input_hash(),
@@ -204,7 +210,9 @@ impl Input {
                 .map(|w| w.worker_id.as_str()),
             Self::Bind(r) => Some(&r.worker_id),
             Self::Arm(r) => Some(&r.worker_id),
-            Self::LegacyNamedArm(r) => Some(&r.arm.worker_id),
+            Self::LegacyNamedArm(r) | Self::LegacyNamedImportVerificationArm(r) => {
+                Some(&r.arm.worker_id)
+            }
             Self::LegacyNamedCancel(r) => Some(&r.request.mutation.worker_id),
             Self::WorkerClaim(r) => Some(&r.worker_id),
             Self::HelperClaim(r) => Some(&r.arm_receipt.worker_id),
@@ -244,6 +252,7 @@ pub(in crate::audit) fn load_record(
                 stored.event.kind.as_str(),
                 "control.execution.arm"
                     | LEGACY_NAMED_ARM_KIND
+                    | LEGACY_NAMED_IMPORT_VERIFICATION_ARM_KIND
                     | LEGACY_NAMED_IMPORT_CLAIM_KIND
                     | LEGACY_NAMED_IMPORT_OBSERVATION_KIND
                     | "control.supervision.transition"
@@ -295,7 +304,9 @@ fn arm_entry(db: &Connection, id: &str) -> anyhow::Result<Option<ArmEntry>> {
     };
     let (request, legacy_named) = match record.input {
         Input::Arm(request) => (*request, false),
-        Input::LegacyNamedArm(request) => (request.arm, true),
+        Input::LegacyNamedArm(request) | Input::LegacyNamedImportVerificationArm(request) => {
+            (request.arm, true)
+        }
         _ => return Err(ControlFailure::Conflict.into()),
     };
     let receipt = arm_receipt(&request, &namespace(db)?, &stored)?;
@@ -944,6 +955,14 @@ impl Replay {
                 let worker = prepared.worker.as_ref().ok_or(ControlFailure::Conflict)?;
                 self.record_arm(db, stored, worker, &request.arm, true)?;
             }
+            Input::LegacyNamedImportVerificationArm(request) => {
+                invalid(record.worker_record.is_none())?;
+                let parent = self.parent(workers, &request.arm.worker_id)?;
+                Store::validate_named_import_verification_arm_predecessor(
+                    db, stored, request, parent,
+                )?;
+                self.record_arm(db, stored, parent, &request.arm, true)?;
+            }
             Input::LegacyNamedCancel(cancel) => {
                 let parent = self.parent(workers, &cancel.request.mutation.worker_id)?;
                 // Every supervised claim resolves an earlier arm. The immutable
@@ -1273,8 +1292,12 @@ impl Store {
         if let Some(id) = manual_arm {
             let named: bool = tx.query_row(
                 "SELECT EXISTS(SELECT 1 FROM worker_mutations m JOIN events e ON e.seq=m.event_seq
-                 WHERE m.operation_id=?1 AND e.kind=?2)",
-                params![id, LEGACY_NAMED_ARM_KIND],
+                 WHERE m.operation_id=?1 AND e.kind IN (?2,?3))",
+                params![
+                    id,
+                    LEGACY_NAMED_ARM_KIND,
+                    LEGACY_NAMED_IMPORT_VERIFICATION_ARM_KIND
+                ],
                 |row| row.get(0),
             )?;
             conflict(!named)?;

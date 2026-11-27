@@ -12,10 +12,11 @@ pub(super) mod bootstrap;
 mod confirmation;
 pub(crate) use confirmation::LegacyNamedCancelReservationV1;
 pub(super) use confirmation::{
-    ADMITTED, LEGACY_NAMED_ARM_KIND, LEGACY_NAMED_IMPORT_CLAIM_KIND, REFERENCE_KINDS,
-    legacy_named_arm_predecessor, legacy_named_import_claim_predecessor, protect_manual,
-    protect_manual_at, require_named_admission_link, session_is_fenced,
-    validate_admission_initiator, validate_legacy_named_cancel, validate_named_arm_initiator,
+    ADMITTED, LEGACY_NAMED_ARM_KIND, LEGACY_NAMED_IMPORT_CLAIM_KIND,
+    LEGACY_NAMED_IMPORT_VERIFICATION_ARM_KIND, REFERENCE_KINDS, legacy_named_arm_predecessor,
+    legacy_named_import_claim_predecessor, protect_manual, protect_manual_at,
+    require_named_admission_link, session_is_fenced, validate_admission_initiator,
+    validate_legacy_named_cancel, validate_named_arm_initiator,
     validate_named_import_claim_initiator, validate_reference_event,
 };
 pub(crate) use confirmation::{

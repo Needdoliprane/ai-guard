@@ -430,7 +430,7 @@ pub(super) fn validate(db: &Connection) -> anyhow::Result<()> {
     let mut projection = Projection::default();
     let mut statement = db.prepare(
         "SELECT seq,received_at,prev_hash,hash,payload FROM events \
-         WHERE kind GLOB 'control.identity.*' OR kind IN (?1,?2,?3) ORDER BY seq",
+         WHERE kind GLOB 'control.identity.*' OR kind IN (?1,?2,?3,?4) ORDER BY seq",
     )?;
     let mut seen_genesis = false;
     let mut seen_human_access = false;
@@ -442,6 +442,7 @@ pub(super) fn validate(db: &Connection) -> anyhow::Result<()> {
             legacy_session_prepare::ADMITTED,
             legacy_session_prepare::LEGACY_NAMED_ARM_KIND,
             legacy_session_prepare::LEGACY_NAMED_IMPORT_CLAIM_KIND,
+            legacy_session_prepare::LEGACY_NAMED_IMPORT_VERIFICATION_ARM_KIND,
         ],
         row_event,
     )? {
@@ -451,7 +452,11 @@ pub(super) fn validate(db: &Connection) -> anyhow::Result<()> {
             legacy_session_prepare::validate_admission_initiator(db, &stored, &projection)?;
             continue;
         }
-        if stored.event.kind == legacy_session_prepare::LEGACY_NAMED_ARM_KIND {
+        if matches!(
+            stored.event.kind.as_str(),
+            legacy_session_prepare::LEGACY_NAMED_ARM_KIND
+                | legacy_session_prepare::LEGACY_NAMED_IMPORT_VERIFICATION_ARM_KIND
+        ) {
             invalid(seen_rights_access && legacy_session_prepare::format_admits(version))?;
             legacy_session_prepare::validate_named_arm_initiator(db, &stored, &projection)?;
             continue;

@@ -1159,6 +1159,15 @@ async fn legacy_named_cancel_releases_an_unarmed_reservation_after_revocation() 
 
 #[tokio::test]
 async fn legacy_named_import_arm_preserves_its_prefix_and_closes_manual_claims() {
+    named_import_arm_fixture(false).await;
+}
+
+#[tokio::test]
+async fn legacy_named_import_verification_arm_requires_exact_named_terminal_and_authority() {
+    named_import_arm_fixture(true).await;
+}
+
+async fn named_import_arm_fixture(verify_import_arm: bool) {
     use crate::{
         api::{GatewayState, TenantGateway, gateway_router},
         audit::supervision_admission as admission_codec,
@@ -1169,7 +1178,7 @@ async fn legacy_named_import_arm_preserves_its_prefix_and_closes_manual_claims()
                 LEGACY_NAMED_IMPORT_ARM_RECEIPT_NOT_FOUND,
                 LEGACY_NAMED_IMPORT_OBSERVATION_RECEIPT_NOT_FOUND, LegacyNamedImportArmRequestV1,
                 LegacyNamedImportClaimRequestV1, LegacyNamedImportObservationPhaseV1,
-                LegacyNamedImportObservationRequestV1,
+                LegacyNamedImportObservationRequestV1, LegacyNamedImportVerificationArmRequestV2,
             },
         },
     };
@@ -1788,6 +1797,163 @@ async fn legacy_named_import_arm_preserves_its_prefix_and_closes_manual_claims()
     started.validate_receipt(&observed).unwrap();
     assert_eq!(observed.audit_seq, historical_cleanup_receipt.audit_seq + 1);
 
+    let terminal_fact = || {
+        let mut terminal = started.clone();
+        terminal.phase = LegacyNamedImportObservationPhaseV1::Terminal;
+        terminal.observation.operation_id = operation_id(terminal.phase);
+        let snapshot = &mut terminal.observation.observation;
+        snapshot.status = RuntimeStatusV1::Exited;
+        snapshot.running = Some(false);
+        snapshot.started_at = Some("2026-11-27T13:00:00+01:00".into());
+        snapshot.finished_at = Some("2026-11-27T12:00:03.250Z".into());
+        snapshot.observed_at = "2026-11-27T12:00:04Z".into();
+        snapshot.exit_code = Some(0);
+        terminal
+    };
+    let verification = if verify_import_arm {
+        let terminal = terminal_fact();
+        let import_terminal = store
+            .observe_legacy_named_import(&broker, &terminal, |receipt, replayed| {
+                assert!(!replayed);
+                Ok(receipt.clone())
+            })
+            .unwrap();
+        let verify_id = Uuid::new_v4();
+        let policy =
+            helper_execution_policy_v1(&prepared, HelperPurposeV1::ImportVerification, verify_id)
+                .unwrap();
+        let verification = LegacyNamedImportVerificationArmRequestV2 {
+            version: 2,
+            binding_ref: named_claim.binding_ref,
+            namespace: namespace.clone(),
+            arm: ArmV1 {
+                operation_id: LegacyNamedImportVerificationArmRequestV2::operation_id(
+                    named_claim.binding_ref,
+                    Uuid::parse_str(&prepared.attempt.attempt_id).unwrap(),
+                ),
+                subject: ArmSubjectV1::Helper {
+                    helper_id: verify_id.to_string(),
+                    purpose: HelperPurposeV1::ImportVerification,
+                    policy_version: 1,
+                    permission: Box::new(HelperPermissionV1::ImportVerification {
+                        import_helper_id: helper_id.to_string(),
+                        import_arm: armed.receipt.clone(),
+                        import_terminal: import_terminal.clone(),
+                        manifest_digest: prepared.launch.workspace_manifest_digest.clone(),
+                    }),
+                },
+                inspection: RuntimeInspectionV1 {
+                    container_id: "c".repeat(64),
+                    stable_name: policy.stable_name.clone(),
+                    spec_hash: policy.spec_hash().unwrap(),
+                    ..arm.inspection.clone()
+                },
+                configuration_fingerprint: "c".repeat(64),
+                ..arm.clone()
+            },
+        };
+        assert_ne!(verification.arm.operation_id, arm.operation_id);
+        assert!(
+            store
+                .read_legacy_named_import_verification_arm(&broker, &verification)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            store
+                .read_legacy_named_import_verification_arm(&other_broker, &verification)
+                .unwrap_err()
+                .downcast_ref::<ControlFailure>(),
+            Some(&ControlFailure::NotFound)
+        );
+        let mut reused_container = verification.clone();
+        reused_container.arm.inspection.container_id = arm.inspection.container_id.clone();
+        assert_eq!(
+            store
+                .arm_legacy_named_import_verification(&broker, &reused_container)
+                .unwrap_err()
+                .downcast_ref::<ControlFailure>(),
+            Some(&ControlFailure::Conflict)
+        );
+        let mut altered_terminal = import_terminal.clone();
+        altered_terminal.audit_hash = "e".repeat(64);
+        for predecessor in [
+            observed.clone(),
+            historical_receipt.clone(),
+            altered_terminal,
+        ] {
+            let mut wrong_terminal = verification.clone();
+            let ArmSubjectV1::Helper { permission, .. } = &mut wrong_terminal.arm.subject else {
+                panic!("fixture requires the verification helper");
+            };
+            let HelperPermissionV1::ImportVerification {
+                import_terminal, ..
+            } = permission.as_mut()
+            else {
+                panic!("fixture requires an exact Import terminal");
+            };
+            *import_terminal = predecessor;
+            assert_eq!(
+                store
+                    .arm_legacy_named_import_verification(&broker, &wrong_terminal)
+                    .unwrap_err()
+                    .downcast_ref::<ControlFailure>(),
+                Some(&ControlFailure::Conflict)
+            );
+        }
+        let mut old_version = verification.clone();
+        old_version.version = 1;
+        assert!(old_version.validate().is_err());
+        assert!(store.arm_execution(&verification.arm).is_err());
+        *store.named_control_commit_observation.lock().unwrap() = Some(expiry);
+        assert_eq!(
+            store
+                .arm_legacy_named_import_verification(&broker, &verification)
+                .unwrap_err()
+                .downcast_ref::<ControlFailure>(),
+            Some(&ControlFailure::NotFound)
+        );
+        assert_eq!(store.head().unwrap(), import_terminal.audit_seq);
+        let accepted = store
+            .arm_legacy_named_import_verification(&broker, &verification)
+            .unwrap();
+        assert!(!accepted.replayed);
+        assert_eq!(accepted.receipt.audit_seq, import_terminal.audit_seq + 1);
+        accepted
+            .receipt
+            .validate_for_arm(&verification.arm)
+            .unwrap();
+        assert!(
+            store
+                .execution_arm(&verification.arm.operation_id)
+                .unwrap()
+                .is_none()
+        );
+        let helper_claim = HelperStartClaimV1 {
+            operation_id: Uuid::new_v4().to_string(),
+            helper_id: verify_id.to_string(),
+            arm_receipt: accepted.receipt.clone(),
+            ..named_claim.claim.clone()
+        };
+        assert!(store.claim_helper_start(&helper_claim).is_err());
+        assert!(
+            store
+                .mutate_worker(&WorkerMutationV1 {
+                    version: 1,
+                    operation_id: Uuid::new_v4().to_string(),
+                    worker_id: prepared.worker_id.clone(),
+                    attempt_id: prepared.attempt.attempt_id.clone(),
+                    expected_revision: prepared.revision,
+                    transition: WorkerTransitionV1::CreateIssued,
+                })
+                .is_err()
+        );
+        assert_eq!(store.head().unwrap(), accepted.receipt.audit_seq);
+        Some((verification, accepted.receipt))
+    } else {
+        None
+    };
+
     credential.active = false;
     credential.revision += 1;
     let revoked = store
@@ -1804,6 +1970,39 @@ async fn legacy_named_import_arm_preserves_its_prefix_and_closes_manual_claims()
     drop(store);
 
     let reopened = Arc::new(f.reopen());
+    if let Some((verification, expected)) = verification {
+        let read = reopened
+            .read_legacy_named_import_verification_arm(&broker, &verification)
+            .unwrap()
+            .unwrap();
+        let replay = reopened
+            .arm_legacy_named_import_verification(&broker, &verification)
+            .unwrap();
+        for result in [read, replay] {
+            assert!(result.replayed);
+            assert_eq!(
+                serde_json::to_value(result.receipt).unwrap(),
+                serde_json::to_value(&expected).unwrap()
+            );
+        }
+        let mut divergent = verification;
+        divergent.arm.configuration_fingerprint = "f".repeat(64);
+        assert_eq!(
+            reopened
+                .read_legacy_named_import_verification_arm(&broker, &divergent)
+                .unwrap_err()
+                .downcast_ref::<ControlFailure>(),
+            Some(&ControlFailure::Conflict)
+        );
+        assert!(reopened.integrity().unwrap().valid);
+        assert_eq!(reopened.head().unwrap(), revoked.audit_seq);
+        assert_eq!(reopened.worker_quota(&quota).unwrap().held_workers, 1);
+        assert_eq!(
+            serde_json::to_value(reopened.worker(&prepared.worker_id).unwrap().unwrap()).unwrap(),
+            serde_json::to_value(prepared).unwrap()
+        );
+        return;
+    }
     let app = router(Arc::clone(&reopened));
     assert_eq!(
         reopened.observe_helper(&historical).unwrap(),
@@ -1931,16 +2130,7 @@ async fn legacy_named_import_arm_preserves_its_prefix_and_closes_manual_claims()
     assert_eq!(reopened.worker_quota(&quota).unwrap().held_workers, 1);
 
     // An already consumed claim may produce a later terminal fact after human revocation.
-    let mut terminal = started;
-    terminal.phase = LegacyNamedImportObservationPhaseV1::Terminal;
-    terminal.observation.operation_id = operation_id(terminal.phase);
-    let snapshot = &mut terminal.observation.observation;
-    snapshot.status = RuntimeStatusV1::Exited;
-    snapshot.running = Some(false);
-    snapshot.started_at = Some("2026-11-27T13:00:00+01:00".into());
-    snapshot.finished_at = Some("2026-11-27T12:00:03.250Z".into());
-    snapshot.observed_at = "2026-11-27T12:00:04Z".into();
-    snapshot.exit_code = Some(0);
+    let terminal = terminal_fact();
     let mut contradictory_terminal = terminal.clone();
     contradictory_terminal.observation.observation.started_at = Some("2026-11-27T12:00:01Z".into());
     let refused = app

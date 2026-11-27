@@ -5,11 +5,18 @@ use crate::{
     control::{
         ArmResultV1, ArmSubjectV1, ArmV1, HelperPermissionV1, HelperPurposeV1, WorkerMutationV1,
         WorkerStateV1, WorkerTransitionV1, WorkerV1,
-        session_control::LegacyNamedImportArmRequestV1,
+        session_control::{
+            LegacyNamedImportArmRequestV1, LegacyNamedImportVerificationArmRequestV2,
+        },
     },
 };
 
+#[path = "verification_arm.rs"]
+mod verification;
+
 pub(in crate::audit) const LEGACY_NAMED_ARM_KIND: &str = "control.execution.arm.legacy_named";
+pub(in crate::audit) const LEGACY_NAMED_IMPORT_VERIFICATION_ARM_KIND: &str =
+    "control.execution.arm.legacy_named_import_verification";
 
 /// An inspected helper and its exact retained admission. A claim requires
 /// separate authorization. Safe closure requires independent effect evidence.
@@ -28,25 +35,39 @@ pub(crate) struct LegacyNamedArmV1 {
 }
 
 impl LegacyNamedArmV1 {
-    pub(in crate::audit) fn input_hash(&self) -> anyhow::Result<String> {
+    fn validate_authorization(&self) -> anyhow::Result<()> {
         crate::control::invalid(
             self.version == 1
                 && !self.binding_ref.is_nil()
                 && self.admission_fact_seq > 0
-                && workload::canonical_control_time(self.authorized_at)? == self.authorized_at
-                && matches!(
-                    &self.arm.subject,
-                    ArmSubjectV1::Helper {
-                        purpose: HelperPurposeV1::Import,
-                        ..
-                    }
-                ),
+                && workload::canonical_control_time(self.authorized_at)? == self.authorized_at,
         )?;
         canonical_uuid(&self.namespace)?;
         canonical_uuid(&self.session_id)?;
-        crate::control::hash(&self.admission_fact_hash)?;
+        crate::control::hash(&self.admission_fact_hash)
+    }
+
+    pub(in crate::audit) fn input_hash(&self) -> anyhow::Result<String> {
+        self.validate_authorization()?;
+        crate::control::invalid(matches!(
+            &self.arm.subject,
+            ArmSubjectV1::Helper {
+                purpose: HelperPurposeV1::Import,
+                ..
+            }
+        ))?;
         self.arm.validate()?;
         crate::control::content_hash("ai-guard:legacy-named-import-arm:v1", self)
+    }
+
+    pub(in crate::audit) fn verification_input_hash(&self) -> anyhow::Result<String> {
+        self.validate_authorization()?;
+        LegacyNamedImportVerificationArmRequestV2::validate_arm(
+            self.binding_ref,
+            &self.namespace,
+            &self.arm,
+        )?;
+        crate::control::content_hash("ai-guard:legacy-named-import-verification-arm:v2", self)
     }
 }
 
@@ -212,24 +233,52 @@ fn authorize_named_import_lookup(
     broker: &BrokerIdentityV1,
     request: &LegacyNamedImportArmRequestV1,
 ) -> anyhow::Result<(workload::AuthorizedControlTimeV1, StoredEvent)> {
-    let version = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    anyhow::ensure!(
-        format_admits(version) && capability_present(tx)?,
-        ControlFailure::MigrationRequired
-    );
+    let lookup = authorize_named_arm_subject(
+        tx,
+        broker,
+        request.binding_ref,
+        &request.namespace,
+        &request.arm,
+    )?;
+    conflict(
+        lookup.admitted_revision.checked_add(1) == Some(request.arm.expected_revision)
+            && matches!(
+                &request.arm.subject,
+                ArmSubjectV1::Helper { permission, .. }
+                    if matches!(permission.as_ref(), HelperPermissionV1::Admission { receipt } if receipt == &lookup.receipt)
+            ),
+    )?;
+    Ok((lookup.clock, lookup.admission))
+}
+
+struct AuthorizedNamedArmSubject {
+    clock: workload::AuthorizedControlTimeV1,
+    admission: StoredEvent,
+    admitted_revision: u64,
+    receipt: MutationReceiptV1,
+}
+
+fn authorize_named_arm_subject(
+    tx: &CheckedTransaction<'_>,
+    broker: &BrokerIdentityV1,
+    binding_ref: Uuid,
+    namespace: &str,
+    arm: &ArmV1,
+) -> anyhow::Result<AuthorizedNamedArmSubject> {
+    Store::require_legacy_named_admission_format(tx)?;
     let clock = workload::capture_control_time(tx)?;
     workload::revalidate_broker_identity_checked(tx, broker, clock.at())?;
-    let stored = event_by_id(tx, &fact_id(request.binding_ref))?.ok_or(ControlFailure::NotFound)?;
+    let stored = event_by_id(tx, &fact_id(binding_ref))?.ok_or(ControlFailure::NotFound)?;
     let fact: AdmissionFact = decoded(&stored, ADMITTED)?;
     anyhow::ensure!(
         fact.actor.matches_binding(broker)
             && fact.grant.is_some()
-            && request.namespace == supervision::namespace(tx)?,
+            && namespace == supervision::namespace(tx)?,
         ControlFailure::NotFound
     );
     conflict(
         fact.version == 1
-            && fact.binding_ref == request.binding_ref
+            && fact.binding_ref == binding_ref
             && fact.admission.audit_seq < stored.seq,
     )?;
     let (_, record) = admission_record(tx, &fact)?;
@@ -238,21 +287,17 @@ fn authorize_named_import_lookup(
         .worker
         .as_ref()
         .ok_or(ControlFailure::NotFound)?;
-    let arm = &request.arm;
     anyhow::ensure!(
         arm.worker_id == worker.worker_id && arm.attempt_id == worker.attempt.attempt_id,
         ControlFailure::NotFound
     );
-    conflict(
-        arm.intent_hash == admission.intent_hash
-            && worker.revision.checked_add(1) == Some(arm.expected_revision)
-            && matches!(
-                &arm.subject,
-                ArmSubjectV1::Helper { permission, .. }
-                    if matches!(permission.as_ref(), HelperPermissionV1::Admission { receipt } if receipt == &fact.admission)
-            ),
-    )?;
-    Ok((clock, stored))
+    conflict(arm.intent_hash == admission.intent_hash)?;
+    Ok(AuthorizedNamedArmSubject {
+        clock,
+        admission: stored,
+        admitted_revision: worker.revision,
+        receipt: fact.admission,
+    })
 }
 
 fn retained_named_import_arm(
@@ -306,6 +351,26 @@ pub(in crate::audit) fn legacy_named_arm_predecessor(
     parent: &WorkerV1,
     before_seq: i64,
 ) -> anyhow::Result<()> {
+    validate_named_arm_authority(db, arm, parent, before_seq, |fact, admitted_revision| {
+        conflict(
+            parent.state == WorkerStateV1::Reserved
+                && parent.revision == admitted_revision
+                && matches!(
+                    &arm.arm.subject,
+                    ArmSubjectV1::Helper { purpose: HelperPurposeV1::Import, permission, .. }
+                        if matches!(permission.as_ref(), HelperPermissionV1::Admission { receipt } if receipt == &fact.admission)
+                ),
+        )
+    })
+}
+
+fn validate_named_arm_authority(
+    db: &Connection,
+    arm: &LegacyNamedArmV1,
+    parent: &WorkerV1,
+    before_seq: i64,
+    validate_phase: impl FnOnce(&AdmissionFact, u64) -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
     let version = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
     conflict(format_admits(version))?;
     let fact = arm_admission(db, arm, before_seq)?;
@@ -340,8 +405,6 @@ pub(in crate::audit) fn legacy_named_arm_predecessor(
             && admitted.worker_id == parent.worker_id
             && admitted.attempt.attempt_id == parent.attempt.attempt_id
             && admitted.spec_hash == parent.spec_hash
-            && parent.state == WorkerStateV1::Reserved
-            && parent.revision == admitted.revision
             && parent.quota_held
             && arm.arm.worker_id == parent.worker_id
             && arm.arm.attempt_id == parent.attempt.attempt_id
@@ -349,13 +412,9 @@ pub(in crate::audit) fn legacy_named_arm_predecessor(
             && arm.authorized_at < authority.expires_at
             && fact.authorization_revision <= arm.authorization_revision
             && arm.authorization_revision
-                == identity::authorization_revision_before(db, before_seq)?
-            && matches!(
-                &arm.arm.subject,
-                ArmSubjectV1::Helper { purpose: HelperPurposeV1::Import, permission, .. }
-                    if matches!(permission.as_ref(), HelperPermissionV1::Admission { receipt } if receipt == &fact.admission)
-            ),
+                == identity::authorization_revision_before(db, before_seq)?,
     )?;
+    validate_phase(&fact, admitted.revision)?;
     conflict(target_broker_at(db, &target.command, arm.authorized_at, before_seq)?.is_some())?;
     workload::validate_broker_identity_at(
         db,
@@ -371,7 +430,9 @@ pub(in crate::audit) fn validate_named_arm_initiator(
     projection: &Projection,
 ) -> anyhow::Result<()> {
     let record = admission_codec::decode(stored)?;
-    let admission_codec::Input::LegacyNamedArm(arm) = record.input else {
+    let (admission_codec::Input::LegacyNamedArm(arm)
+    | admission_codec::Input::LegacyNamedImportVerificationArm(arm)) = record.input
+    else {
         return Err(ControlFailure::Conflict.into());
     };
     let fact = arm_admission(db, &arm, stored.seq)?;
