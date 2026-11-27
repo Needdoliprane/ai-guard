@@ -257,6 +257,128 @@ pub(super) async fn reconcile(
     Ok(outcome)
 }
 
+pub(super) async fn arm_import(
+    presence: &PresenceAuthority,
+    writer: &WriterClient,
+    plan: &LegacyConfirmedPlanV1,
+    archive_digest: &str,
+    arm: ArmV1,
+    generation: (&CancelGeneration, u64),
+) -> Result<ArmResultV1> {
+    validate_scope(presence, writer.scope())?;
+    let client = Client::new(presence)?;
+    checked_identity(&client, presence).await?;
+    let (cancel, expected) = generation;
+    cancel
+        .with_current_generation(expected, || ())
+        .map_err(|_| PresenceError::Stopped)?;
+    let request = writer
+        .record_legacy_named_import_arm(plan, archive_digest, arm)
+        .await
+        .map_err(named_write_error)?
+        .into_request();
+    let result = send_import_arm(&client, presence, &request, Some(generation))
+        .await?
+        .ok_or(PresenceError::AdmissionOutcomeUnknown)?;
+    writer
+        .acknowledge_legacy_named_import_arm(plan.operation_id, &request, result.clone())
+        .await
+        .map_err(|_| PresenceError::AdmissionOutcomeUnknown)?;
+    Ok(result)
+}
+
+pub(super) async fn reconcile_import_arm(
+    presence: &PresenceAuthority,
+    writer: &WriterClient,
+    operation: Uuid,
+) -> Result<Option<ArmResultV1>> {
+    validate_scope(presence, writer.scope())?;
+    let Some((request, _)) = writer
+        .load_legacy_named_import_arm(operation)
+        .await
+        .map_err(named_write_error)?
+    else {
+        return Ok(None);
+    };
+    let client = Client::new(presence)?;
+    checked_identity(&client, presence).await?;
+    let result = send_import_arm(&client, presence, &request, None).await?;
+    if let Some(result) = &result {
+        writer
+            .acknowledge_legacy_named_import_arm(operation, &request, result.clone())
+            .await
+            .map_err(|_| PresenceError::AdmissionOutcomeUnknown)?;
+    }
+    Ok(result)
+}
+
+async fn send_import_arm(
+    client: &Client,
+    presence: &PresenceAuthority,
+    request: &LegacyNamedImportArmRequestV1,
+    generation: Option<(&CancelGeneration, u64)>,
+) -> Result<Option<ArmResultV1>> {
+    request.validate().map_err(|_| PresenceError::Protocol)?;
+    if request.namespace != presence.scope.control_namespace_uuid.to_string() {
+        return Err(PresenceError::Forbidden);
+    }
+    presence.revalidate()?;
+    let value = serde_json::to_value(request).map_err(|_| PresenceError::Protocol)?;
+    presence.screen(&value)?;
+    let body = serde_json::to_vec(request).map_err(|_| PresenceError::Protocol)?;
+    let suffix = if generation.is_some() {
+        ""
+    } else {
+        "/reconcile"
+    };
+    let path = format!(
+        "/api/v1/control/session-confirmations/{}/admission/import-arm{suffix}",
+        request.binding_ref
+    );
+    let send = async {
+        client
+            .send_session_bounded(
+                Method::POST,
+                &path,
+                Some(body),
+                Limits {
+                    request: LEGACY_NAMED_ADMISSION_REQUEST_BYTES as u64,
+                    success: LEGACY_NAMED_IMPORT_ARM_RESPONSE_BYTES as u64,
+                    error: RESPONSE_BYTES,
+                },
+            )
+            .await
+            .map_err(|_| PresenceError::AdmissionOutcomeUnknown)
+    };
+    let (status, bytes) = match generation {
+        Some((cancel, expected)) => dispatch_before_stop(cancel, expected, send).await?,
+        None => send.await?,
+    };
+    let value = crate::json::decode_unique(&bytes, 64)
+        .map_err(|_| PresenceError::AdmissionOutcomeUnknown)?;
+    if generation.is_none()
+        && status == StatusCode::NOT_FOUND
+        && value["error"]["code"] == LEGACY_NAMED_IMPORT_ARM_RECEIPT_NOT_FOUND
+    {
+        return Ok(None);
+    }
+    if !matches!(status, StatusCode::OK | StatusCode::CREATED) {
+        return Err(PresenceError::AdmissionOutcomeUnknown);
+    }
+    presence
+        .screen(&value)
+        .map_err(|_| PresenceError::AdmissionOutcomeUnknown)?;
+    let result: ArmResultV1 =
+        serde_json::from_value(value).map_err(|_| PresenceError::AdmissionOutcomeUnknown)?;
+    if (generation.is_none() && !result.replayed) || result.replayed != (status == StatusCode::OK) {
+        return Err(PresenceError::AdmissionOutcomeUnknown);
+    }
+    presence
+        .revalidate()
+        .map_err(|_| PresenceError::AdmissionOutcomeUnknown)?;
+    Ok(Some(result))
+}
+
 pub(super) async fn cancel_reserved(
     presence: &Arc<PresenceAuthority>,
     stop: &Arc<CancelStopProjectionV1>,

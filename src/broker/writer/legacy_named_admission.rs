@@ -39,10 +39,6 @@ impl RecordedLegacyNamedAdmission {
 pub(in crate::broker) struct RecordedLegacyNamedImportArm(LegacyNamedImportArmRequestV1);
 
 impl RecordedLegacyNamedImportArm {
-    #[allow(
-        dead_code,
-        reason = "the named import transport is composed separately"
-    )]
     pub(in crate::broker) fn into_request(self) -> LegacyNamedImportArmRequestV1 {
         self.0
     }
@@ -180,10 +176,6 @@ impl WriterClient {
         Ok(())
     }
 
-    #[allow(
-        dead_code,
-        reason = "the named import transport is composed separately"
-    )]
     pub(in crate::broker) async fn record_legacy_named_import_arm(
         &self,
         plan: &LegacyConfirmedPlanV1,
@@ -229,10 +221,6 @@ impl WriterClient {
 
     /// A reloaded request is for reconciliation. Only the original CAS
     /// acknowledgement can authorize its first submission.
-    #[allow(
-        dead_code,
-        reason = "the named import transport is composed separately"
-    )]
     pub(in crate::broker) async fn load_legacy_named_import_arm(
         &self,
         operation: Uuid,
@@ -249,10 +237,6 @@ impl WriterClient {
     }
 
     /// Retain the exact response to a prior request, including after STOP.
-    #[allow(
-        dead_code,
-        reason = "the named import transport is composed separately"
-    )]
     pub(in crate::broker) async fn acknowledge_legacy_named_import_arm(
         &self,
         operation: Uuid,

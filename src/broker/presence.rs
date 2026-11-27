@@ -3,8 +3,11 @@
 use crate::{
     broker::{enforcer::CancelGeneration, journal::CancelStopProjectionV1, writer::WriterClient},
     broker_registry::{BrokerAuthorityV1, BrokerRuntimeKindV1},
-    control::session_control::{
-        LegacyConfirmedLaunchSpecV1, LegacyConfirmedPlanV1, LegacyNamedInitialDecisionV1,
+    control::{
+        ArmResultV1, ArmV1,
+        session_control::{
+            LegacyConfirmedLaunchSpecV1, LegacyConfirmedPlanV1, LegacyNamedInitialDecisionV1,
+        },
     },
     control_fs::{Directory, PrivateFile},
     redaction::Redactor,
@@ -454,6 +457,38 @@ impl LegacyNamedControl {
         self.0.revalidate()?;
         legacy_named_admission::reconcile(&self.0, writer, operation).await
     }
+    /// Record the unique named import Arm and dispatch that exact request.
+    #[allow(
+        dead_code,
+        reason = "the named import runtime preparation is a separate lot"
+    )]
+    pub(crate) async fn arm_legacy_named_import(
+        &self,
+        writer: &WriterClient,
+        plan: &LegacyConfirmedPlanV1,
+        archive_digest: &str,
+        arm: ArmV1,
+        generation: (&CancelGeneration, u64),
+    ) -> Result<ArmResultV1> {
+        self.0.revalidate()?;
+        legacy_named_admission::arm_import(&self.0, writer, plan, archive_digest, arm, generation)
+            .await
+    }
+
+    /// Read back the exact retained Arm after a lost acknowledgement.
+    #[allow(
+        dead_code,
+        reason = "the named import runtime preparation is a separate lot"
+    )]
+    pub(crate) async fn reconcile_legacy_named_import(
+        &self,
+        writer: &WriterClient,
+        operation: Uuid,
+    ) -> Result<Option<ArmResultV1>> {
+        self.0.revalidate()?;
+        legacy_named_admission::reconcile_import_arm(&self.0, writer, operation).await
+    }
+
     /// Reconcile a reservation already frozen by a confirmed broker STOP.
     pub(crate) async fn cancel_legacy_named_reservation(
         &self,
