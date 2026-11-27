@@ -19,6 +19,7 @@ use crate::{
 mod arm;
 mod cancel;
 mod execution;
+mod initial_decision;
 pub(crate) use arm::LegacyNamedArmV1;
 pub(in crate::audit) use arm::{
     LEGACY_NAMED_ARM_KIND, legacy_named_arm_predecessor, validate_named_arm_initiator,
@@ -27,6 +28,7 @@ pub(in crate::audit) use arm::{
 pub(in crate::audit) use cancel::LegacyNamedCancelReservationV1;
 pub(crate) use cancel::LegacyNamedCancelV1;
 pub(in crate::audit) use cancel::validate_legacy_named_cancel;
+pub(crate) use initial_decision::LegacyNamedInitialDecision;
 
 pub(in crate::audit) const ADMITTED: &str = "control.legacy_session_prepare.admission";
 
@@ -363,6 +365,7 @@ impl Store {
         // The launch confirmation does not approve a separate policy review.
         let admission = &request.admission.admission;
         conflict(admission.receipt.phase == DecisionPhaseV1::Initial)?;
+        initial_decision::require_named_origin_when_used(tx, broker, &resolved, admission)?;
         conflict(supervision::operation_receipt(tx, &admission.operation_id)?.is_none())?;
         Ok(resolved)
     }

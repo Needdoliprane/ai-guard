@@ -230,7 +230,8 @@ pub fn control_route(method: &Method, path: &str) -> Option<ControlRouteIdentity
         {
             Some(BrokerSession)
         }
-        (&Method::POST, ["control", "session-confirmations", id, "admission"])
+        (&Method::POST, ["control", "session-confirmations", id, "initial-decision"])
+        | (&Method::POST, ["control", "session-confirmations", id, "admission"])
         | (
             &Method::POST,
             [

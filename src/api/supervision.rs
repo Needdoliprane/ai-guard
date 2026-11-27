@@ -1,5 +1,6 @@
 //! HTTP bindings for the versioned, tenant-scoped supervision Store.
 use super::*;
+use crate::audit::legacy_session_prepare::LegacyNamedInitialDecision;
 use crate::control::{
     AdmissionResultV1, ArmResultV1, ArmV1, ArmedStartClaimV1, ControlCapabilitiesV1,
     ControlProtocolV1, ExportRequestV1, HelperClaimResultV1, HelperCleanupV1, HelperObservationV1,
@@ -11,7 +12,7 @@ use crate::control::{
     },
 };
 use crate::tenant_store::StoreHealth;
-use axum::{extract::FromRequestParts, http::request::Parts};
+use axum::{body::Bytes, extract::FromRequestParts, http::request::Parts};
 
 // Deliberately merged only into /api/v1, preserving historical /api aliases.
 pub(super) fn routes() -> Router<GatewayState> {
@@ -25,6 +26,10 @@ pub(super) fn routes() -> Router<GatewayState> {
         .route(
             "/control/session-confirmations/{binding_ref}/launch-spec",
             get(confirmed_launch_spec),
+        )
+        .route(
+            "/control/session-confirmations/{binding_ref}/initial-decision",
+            post(initial_named_decision),
         )
         .route(
             "/control/session-confirmations/{binding_ref}/admission",
@@ -192,6 +197,111 @@ fn named_admission_store(tenant: &TenantState, redactor: &Redactor) -> ApiResult
         .sqlite_api()?
         .with_additional_redaction(redactor)
         .map_err(|error| named_admission_error(&tenant.store, error))
+}
+
+enum InitialDecisionResponse {
+    Evaluate(DecisionRequest),
+    Recorded(Response),
+}
+
+fn prepare_initial_decision_response(
+    state: LegacyNamedInitialDecision,
+    redactor: &Redactor,
+) -> anyhow::Result<InitialDecisionResponse> {
+    match state {
+        LegacyNamedInitialDecision::Evaluate(request) => {
+            Ok(InitialDecisionResponse::Evaluate(request))
+        }
+        LegacyNamedInitialDecision::Recorded(decision) => {
+            let value = serde_json::to_value(&decision)?;
+            anyhow::ensure!(
+                redactor.value_unclipped(&value) == value,
+                "initial named decision requires redaction"
+            );
+            let bytes = serde_json::to_vec(&decision)?;
+            anyhow::ensure!(
+                bytes.len() <= LEGACY_CONFIRMED_LAUNCH_SPEC_RESPONSE_BYTES,
+                "initial named decision exceeds its response bound"
+            );
+            let status = if decision.replayed {
+                StatusCode::OK
+            } else {
+                StatusCode::CREATED
+            };
+            Ok(InitialDecisionResponse::Recorded(
+                (status, [(header::CONTENT_TYPE, "application/json")], bytes).into_response(),
+            ))
+        }
+    }
+}
+
+fn initial_decision_error(store: &TenantStore, error: anyhow::Error) -> (StatusCode, Json<Value>) {
+    if error.downcast_ref::<ControlFailure>() == Some(&ControlFailure::NotFound) {
+        confirmed_plan_error(store, error)
+    } else if store.store_healthy() && error.is::<DecisionFailure>() {
+        decision_error(error)
+    } else {
+        named_admission_error(store, error)
+    }
+}
+
+async fn initial_named_decision(
+    _private: PrivateControlTransport,
+    broker: workload::VerifiedBroker,
+    State(state): State<GatewayState>,
+    Path(binding_ref): Path<String>,
+    body: Bytes,
+) -> ApiResult<Response> {
+    let binding_ref = canonical_uuid(&binding_ref).map_err(control_error)?;
+    if !body.is_empty() {
+        return Err(control_error(ControlFailure::InvalidRequest.into()));
+    }
+    let pending = broker
+        .clone()
+        .blocking_on(
+            store_io::Lane::Control,
+            move |tenant, identity, redactor| {
+                let store = named_admission_store(&tenant, &redactor)?;
+                let prepared = store
+                    .prepare_legacy_named_initial_decision(&identity, binding_ref, None, |result| {
+                        prepare_initial_decision_response(result, &redactor)
+                    })
+                    .map_err(|error| initial_decision_error(&tenant.store, error))?;
+                if matches!(&prepared, InitialDecisionResponse::Evaluate(_)) {
+                    tenant.write_quota()?;
+                }
+                Ok(prepared)
+            },
+        )
+        .await?;
+    let request = match pending {
+        InitialDecisionResponse::Recorded(response) => return Ok(response),
+        InitialDecisionResponse::Evaluate(request) => request,
+    };
+    let hash = policy::request_hash(&request);
+    let (decision, jev) = fresh_policy(&state, &request).await;
+    broker
+        .blocking_on(
+            store_io::Lane::Control,
+            move |tenant, identity, redactor| {
+                let store = named_admission_store(&tenant, &redactor)?;
+                let response = store
+                    .prepare_legacy_named_initial_decision(
+                        &identity,
+                        binding_ref,
+                        Some((hash, decision, jev)),
+                        |result| prepare_initial_decision_response(result, &redactor),
+                    )
+                    .map_err(|error| initial_decision_error(&tenant.store, error))?;
+                match response {
+                    InitialDecisionResponse::Recorded(response) => Ok(response),
+                    InitialDecisionResponse::Evaluate(_) => Err(control_error(anyhow::anyhow!(
+                        "initial named decision has no retained receipt"
+                    ))),
+                }
+            },
+        )
+        .await
 }
 
 fn named_admission_response(

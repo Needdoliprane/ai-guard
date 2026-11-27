@@ -9,8 +9,9 @@ use crate::{
         SupervisionProtocolV1, WorkerMutationV1, WorkerStateV1, WorkerTransitionV1, WorkerV1,
         helper_execution_policy_v1,
         session_control::{
-            LegacyNamedSupervisedAdmissionV1, LegacySessionTargetV1, SessionLaunchPrepareRequestV1,
-            SessionLaunchRequestV1, SessionLaunchTargetRecordV1,
+            LegacyNamedSupervisedAdmissionV1, LegacySessionConfirmationReceiptV1,
+            LegacySessionTargetV1, SessionLaunchPrepareRequestV1, SessionLaunchRequestV1,
+            SessionLaunchTargetRecordV1,
         },
     },
     identity::{
@@ -185,6 +186,24 @@ impl Fixture {
         &self,
         store: &Store,
     ) -> (LegacyNamedSupervisedAdmissionV1, LocalCredentialV1) {
+        let (confirmation, credential) = self.confirm_target(store);
+        let request = LegacyNamedSupervisedAdmissionV1 {
+            version: 1,
+            binding_ref: Uuid::parse_str(&confirmation.binding_ref).unwrap(),
+            broker_profile_id: self.target.target.broker_profile_id.clone(),
+            admission: self.supervised_request(
+                store,
+                confirmation.operation_id,
+                confirmation.session_id,
+            ),
+        };
+        (request, credential)
+    }
+
+    fn confirm_target(
+        &self,
+        store: &Store,
+    ) -> (LegacySessionConfirmationReceiptV1, LocalCredentialV1) {
         let catalogue = &self.target.target.catalogue;
         let principal = &catalogue.launchers[0];
         let membership_id = Uuid::new_v4().to_string();
@@ -272,17 +291,7 @@ impl Fixture {
                 },
             )
             .unwrap();
-        let request = LegacyNamedSupervisedAdmissionV1 {
-            version: 1,
-            binding_ref: Uuid::parse_str(&confirmation.binding_ref).unwrap(),
-            broker_profile_id: self.target.target.broker_profile_id.clone(),
-            admission: self.supervised_request(
-                store,
-                confirmation.operation_id,
-                confirmation.session_id,
-            ),
-        };
-        (request, credential)
+        (confirmation, credential)
     }
 
     fn supervised_request(
@@ -515,6 +524,195 @@ fn legacy_named_admission_commits_a_grant_and_replays_after_reopen() {
     assert_eq!(reopened.integrity().unwrap().head_hash, retired.audit_hash);
     assert_eq!(reopened.worker_quota(&quota).unwrap().held_workers, 1);
     assert!(apply(&reopened, &divergent).is_err());
+}
+
+#[tokio::test]
+async fn legacy_named_initial_decision_commits_once_and_is_usable_for_admission() {
+    use crate::{
+        api::{GatewayState, TenantGateway, gateway_router},
+        audit::legacy_session_prepare::LegacyNamedInitialDecision,
+        control::session_control::{LegacyNamedAdmissionReceiptV1, LegacyNamedInitialDecisionV1},
+    };
+    use axum::{
+        body::{Body, to_bytes},
+        http::{Request, StatusCode, header},
+    };
+    use std::sync::Arc;
+    use tower::ServiceExt;
+
+    const RUNNER: &str = "synthetic-bootstrap-runner-identity-fixture";
+    let make_router = |store: Arc<Store>| {
+        gateway_router(
+            GatewayState::for_tenants(
+                vec![TenantGateway {
+                    tenant_id: TENANT.into(),
+                    store,
+                    runner_token: RUNNER.into(),
+                    viewer_token: "synthetic-bootstrap-viewer-identity-fixture".into(),
+                }],
+                Policy::default(),
+                None,
+                Redactor::new(vec![]),
+            )
+            .unwrap(),
+        )
+    };
+    let post = |path: &str, token: &str, body: Body| {
+        Request::post(path)
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(body)
+            .unwrap()
+    };
+
+    let f = Fixture::new();
+    let (store, _) = f.provision(f.create().unwrap()).unwrap();
+    let (confirmed, _) = f.confirm_target(&store);
+    let binding_ref = Uuid::parse_str(&confirmed.binding_ref).unwrap();
+    let store = Arc::new(store);
+    let path = format!("/api/v1/control/session-confirmations/{binding_ref}/initial-decision");
+    let private = format!("/control{path}");
+    let app = make_router(Arc::clone(&store));
+    let before = store.head().unwrap();
+
+    for (uri, token, body, expected) in [
+        (
+            path.as_str(),
+            BROKER_TOKEN,
+            Body::empty(),
+            StatusCode::NOT_FOUND,
+        ),
+        (
+            private.as_str(),
+            RUNNER,
+            Body::empty(),
+            StatusCode::FORBIDDEN,
+        ),
+        (
+            private.as_str(),
+            BROKER_TOKEN,
+            Body::from("{}"),
+            StatusCode::BAD_REQUEST,
+        ),
+    ] {
+        let response = app.clone().oneshot(post(uri, token, body)).await.unwrap();
+        assert_eq!(response.status(), expected);
+    }
+    assert_eq!(store.head().unwrap(), before);
+
+    let Some(AuthenticatedWorkload::Broker(broker)) =
+        store.authenticate_workload_token(BROKER_TOKEN).unwrap()
+    else {
+        panic!("fixture broker identity");
+    };
+    let pending = store
+        .prepare_legacy_named_initial_decision(&broker, binding_ref, None, Ok)
+        .unwrap();
+    let LegacyNamedInitialDecision::Evaluate(request) = pending else {
+        panic!("fixture has no initial decision yet");
+    };
+    *store.named_control_commit_observation.lock().unwrap() =
+        Some(crate::broker_registry::parse_time(DEADLINE).unwrap());
+    let refused = store
+        .prepare_legacy_named_initial_decision(
+            &broker,
+            binding_ref,
+            Some((
+                policy::request_hash(&request),
+                policy::evaluate(&Policy::default(), &request),
+                Value::Null,
+            )),
+            |_| Ok(()),
+        )
+        .unwrap_err();
+    assert_eq!(
+        refused.downcast_ref::<ControlFailure>(),
+        Some(&ControlFailure::NotFound)
+    );
+    assert_eq!(store.head().unwrap(), before);
+
+    let response = app
+        .clone()
+        .oneshot(post(&private, BROKER_TOKEN, Body::empty()))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let committed: LegacyNamedInitialDecisionV1 =
+        serde_json::from_slice(&to_bytes(response.into_body(), 128 * 1024).await.unwrap()).unwrap();
+    assert_eq!(committed.binding_ref, binding_ref);
+    assert_eq!(committed.decision.outcome, Outcome::Allow);
+    assert_eq!(committed.request.command, f.target.target.launch.command);
+    assert_eq!(
+        committed.request.session_id.as_ref(),
+        Some(&confirmed.session_id)
+    );
+    assert!(!committed.replayed);
+    assert_eq!(committed.receipt.audit_seq, before + 1);
+    assert_eq!(store.head().unwrap(), before + 1);
+    assert_eq!(
+        store.integrity().unwrap().head_hash,
+        committed.receipt.audit_hash
+    );
+    assert_eq!(
+        store
+            .worker_quota(&QuotaPolicyV1::default())
+            .unwrap()
+            .held_workers,
+        0
+    );
+
+    let mut launch = f.target.target.launch.clone();
+    launch.session_id = confirmed.session_id;
+    let admission = LegacyNamedSupervisedAdmissionV1 {
+        version: 1,
+        binding_ref,
+        broker_profile_id: f.target.target.broker_profile_id.clone(),
+        admission: SupervisedAdmissionV1 {
+            version: 1,
+            protocol: SupervisionProtocolV1::BrokerSupervisionV1,
+            intent_hash: "c".repeat(64),
+            admission: AdmissionV1 {
+                version: 1,
+                operation_id: confirmed.operation_id.to_string(),
+                decision_request: committed.request.clone(),
+                receipt: committed.receipt.clone(),
+                launch,
+            },
+        },
+    };
+    let reserve = format!("/control/api/v1/control/session-confirmations/{binding_ref}/admission");
+    let response = app
+        .oneshot(post(
+            &reserve,
+            BROKER_TOKEN,
+            Body::from(serde_json::to_vec(&admission).unwrap()),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let reserved: LegacyNamedAdmissionReceiptV1 =
+        serde_json::from_slice(&to_bytes(response.into_body(), 128 * 1024).await.unwrap()).unwrap();
+    assert_eq!(
+        reserved.admission.worker.unwrap().state,
+        WorkerStateV1::Reserved
+    );
+    assert_eq!(reserved.audit_seq, before + 4);
+    drop(store);
+
+    let reopened = Arc::new(f.reopen());
+    let response = make_router(Arc::clone(&reopened))
+        .oneshot(post(&private, BROKER_TOKEN, Body::empty()))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let replayed: LegacyNamedInitialDecisionV1 =
+        serde_json::from_slice(&to_bytes(response.into_body(), 128 * 1024).await.unwrap()).unwrap();
+    assert!(replayed.replayed);
+    assert_eq!(
+        serde_json::to_value(&replayed.receipt).unwrap(),
+        serde_json::to_value(&committed.receipt).unwrap()
+    );
+    assert_eq!(reopened.head().unwrap(), reserved.audit_seq);
 }
 
 #[test]

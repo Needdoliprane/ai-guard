@@ -1,10 +1,13 @@
 //! Session control contracts shared by the catalogue and launch.
 
 use super::{
-    AdmissionResultV1, ControlFailure, LaunchSpecV1, SupervisedAdmissionV1, bounded, conflict,
-    content_hash, invalid, uuid,
+    AdmissionResultV1, ControlFailure, DecisionPhaseV1, DecisionReceiptV1, LaunchSpecV1,
+    SupervisedAdmissionV1, bounded, conflict, content_hash, hash, invalid, uuid,
 };
-use crate::identity::{IdentityReceiptV1, PrincipalRefV1};
+use crate::{
+    identity::{IdentityReceiptV1, PrincipalRefV1},
+    model::{Decision, DecisionRequest},
+};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -172,6 +175,38 @@ pub(crate) const LEGACY_CONFIRMED_LAUNCH_SPEC_RESPONSE_BYTES: usize = 128 * 1024
 pub(crate) const LEGACY_NAMED_ADMISSION_REQUEST_BYTES: usize = 65_536;
 pub(crate) const LEGACY_NAMED_ADMISSION_RECEIPT_NOT_FOUND: &str =
     "named_admission_receipt_not_found";
+
+/// The exact server-derived policy input and its durable Initial result.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct LegacyNamedInitialDecisionV1 {
+    pub version: u32,
+    pub binding_ref: Uuid,
+    pub request: DecisionRequest,
+    pub decision: Decision,
+    pub receipt: DecisionReceiptV1,
+    pub replayed: bool,
+}
+
+impl LegacyNamedInitialDecisionV1 {
+    pub(crate) fn validate(&self) -> anyhow::Result<()> {
+        let binding_ref = self.binding_ref.to_string();
+        invalid(
+            self.version == 1
+                && !self.binding_ref.is_nil()
+                && self.receipt.version == 1
+                && self.receipt.phase == DecisionPhaseV1::Initial
+                && self.receipt.audit_seq > 0
+                && !self.request.human_approved
+                && self.request.approval_hash.is_none()
+                && self.request.correlation_id.as_deref() == Some(binding_ref.as_str())
+                && self.request.request_id == self.receipt.request_id
+                && self.receipt.request_hash == crate::policy::request_hash(&self.request),
+        )?;
+        canonical_uuid(&self.receipt.request_id)?;
+        hash(&self.receipt.audit_hash)
+    }
+}
 
 /// Versioned input for the Legacy named admission transaction.
 #[derive(Clone, Serialize, Deserialize)]

@@ -17,7 +17,9 @@ pub(super) use confirmation::{
     protect_manual_at, session_is_fenced, validate_admission_initiator,
     validate_legacy_named_cancel, validate_named_arm_initiator, validate_reference_event,
 };
-pub(crate) use confirmation::{LegacyNamedArmV1, LegacyNamedCancelV1, LegacySessionLocalProof};
+pub(crate) use confirmation::{
+    LegacyNamedArmV1, LegacyNamedCancelV1, LegacyNamedInitialDecision, LegacySessionLocalProof,
+};
 
 pub(super) const GENESIS_KIND: &str = "control.legacy_session_prepare.genesis";
 pub(super) const TARGET_KIND: &str = "control.legacy_session_prepare.target";
