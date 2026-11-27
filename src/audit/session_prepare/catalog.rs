@@ -141,6 +141,10 @@ pub(super) fn validate_historical_projections(
             TARGET_PROVISION_KIND => {
                 let command: ProvisionSessionLaunchTargetV1 =
                     serde_json::from_value(stored.event.data)?;
+                anyhow::ensure!(
+                    command.target.tenant_id == tenant,
+                    "historical session target does not belong to the store tenant"
+                );
                 let operation = target_operation(db, &command.operation_id.to_string())?
                     .context("historical session target operation is missing")?;
                 let previous = targets

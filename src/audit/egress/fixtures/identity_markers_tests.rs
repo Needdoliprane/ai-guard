@@ -1259,6 +1259,53 @@ fn historical_session_prepare_refuses_a_lost_projection_before_backup() {
     assert_eq!(table_count(store, "session_preparations"), 0);
 }
 
+#[test]
+fn historical_session_prepare_refuses_a_foreign_target_in_the_audit_history() {
+    let adopted = adopted(14);
+    seed_session_prepare(&adopted);
+    let retained = adopted.retained(0, "before-foreign-target.json", 14);
+    let (principal, _) = provision_membership(
+        &retained,
+        &[crate::identity::HumanCapabilityV1::LaunchSession],
+    )
+    .unwrap();
+    let target_id = Uuid::new_v4();
+    let mut foreign = target_command(Uuid::new_v4(), target_id, 1, 0, &principal);
+    foreign.target.tenant_id = "B".into();
+    foreign.target.active = false;
+    let mut local = target_command(Uuid::new_v4(), target_id, 2, 1, &principal);
+    local.target.active = false;
+    // The unused target's latest projection is local. Its first audited
+    // revision still belongs to a different tenant.
+    for command in [foreign, local] {
+        let epoch = retained.owner.try_write_epoch().unwrap();
+        retained
+            .store
+            .provision_session_launch_target_scoped(&epoch, &retained.source, &command)
+            .unwrap();
+    }
+    drop(retained);
+    let store = &adopted.base.stores[0];
+    leave_historical_session_catalog(store, false);
+    let original = maintenance_source_state(&adopted.base);
+
+    let error = run_historical_maintenance(&adopted, "foreign-target", false).unwrap_err();
+    assert_eq!(
+        error.downcast_ref::<OwnedIdentityMarkersRefusalV1>(),
+        Some(&OwnedIdentityMarkersRefusalV1::FormatUnsupported)
+    );
+    assert!(
+        format!("{error:#}")
+            .contains("historical session target does not belong to the store tenant")
+    );
+    let maintenance = adopted.base.root.path().join("foreign-target");
+    for child in ["journal", "backups"] {
+        let directory = Directory::open_existing(&maintenance.join(child)).unwrap();
+        assert!(journal_names(&directory).is_empty());
+    }
+    assert_eq!(maintenance_source_state(&adopted.base), original);
+}
+
 fn historical_session_rows(
     db: &rusqlite::Connection,
     preparation: Uuid,
