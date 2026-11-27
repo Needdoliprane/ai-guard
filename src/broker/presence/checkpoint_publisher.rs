@@ -40,7 +40,7 @@ fn validate_remote(
     view: &BrokerCheckpointViewV1,
     head: &checkpoint_storage::Head,
 ) -> Result<()> {
-    actor::validate_handshake(p, identity, &view.broker)?;
+    actor::validate_handshake(&p.authority, identity, &view.broker)?;
     if !matches!(identity.schema_version, 12 | 13) || view.version != 1 {
         return Err(PresenceError::Forbidden);
     }

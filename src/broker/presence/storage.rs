@@ -402,7 +402,7 @@ fn validate_pending(p: &PreparedPresence, pending: &Pending) -> Result<()> {
     if pending.version != 1 {
         return Err(PresenceError::UnsafeState);
     }
-    super::actor::validate_handshake(p, &pending.identity, &pending.prior)?;
+    super::actor::validate_handshake(&p.authority, &pending.identity, &pending.prior)?;
     let hb = &pending.heartbeat;
     hb.validate().map_err(|_| PresenceError::UnsafeState)?;
     let previous = pending

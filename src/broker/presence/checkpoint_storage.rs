@@ -286,6 +286,7 @@ impl Stream {
             fs(directory.durable_bootstrap())?;
         }
         let max = p
+            .authority
             .config
             .checkpoint_max_state_bytes
             .ok_or(PresenceError::InvalidConfig)?;
@@ -322,6 +323,7 @@ impl Stream {
         }
         let bytes = encode(p, &pending)?;
         let max = p
+            .authority
             .config
             .checkpoint_max_state_bytes
             .ok_or(PresenceError::InvalidConfig)?;
