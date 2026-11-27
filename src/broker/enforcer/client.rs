@@ -40,6 +40,7 @@ const MAX_LEGACY_RETAINED_STOPS: usize = 16_384;
 
 #[path = "client_legacy.rs"]
 mod legacy;
+pub(crate) use legacy::LegacyNamedProspectiveFailure;
 use legacy::LegacyTransport;
 
 #[derive(Clone)]
@@ -304,6 +305,58 @@ impl CancelGeneration {
     ) -> EnforcerResult<T> {
         self.with_current_generation(expected, action)?
     }
+}
+
+async fn write_request_in_generation(
+    stream: &mut UnixStream,
+    request: &Request,
+    generation: Option<(&CancelGeneration, u64)>,
+) -> Result<(), LegacyNamedProspectiveFailure> {
+    use std::task::Poll;
+
+    let write = write_frame(stream, request, MAX_FRAME, IO_TIMEOUT);
+    let written = if let Some((cancel, expected)) = generation {
+        tokio::pin!(write);
+        // Connect, authenticate and negotiate first. Order only the first
+        // poll of the business frame with invalidation of this exact guard.
+        let first = std::future::poll_fn(|context| {
+            Poll::Ready(cancel.with_current_generation(expected, || write.as_mut().poll(context)))
+        })
+        .await
+        .map_err(LegacyNamedProspectiveFailure::BeforeSend)?;
+        match first {
+            Poll::Ready(result) => result,
+            Poll::Pending => write.await,
+        }
+    } else {
+        write.await
+    };
+    written.map_err(|error| LegacyNamedProspectiveFailure::OutcomeUnknown(error.into()))
+}
+
+#[cfg(test)]
+#[tokio::test]
+async fn stale_named_generation_writes_no_business_frame() -> anyhow::Result<()> {
+    let (mut writer, reader) = UnixStream::pair()?;
+    let generation = CancelGeneration::new();
+    let expected = generation.current();
+    generation.invalidate();
+    assert_eq!(
+        write_request_in_generation(
+            &mut writer,
+            &Request::Status {},
+            Some((&generation, expected))
+        )
+        .await,
+        Err(LegacyNamedProspectiveFailure::BeforeSend(
+            EnforcerError::NotReady
+        )),
+    );
+    assert_eq!(
+        reader.try_read(&mut [0]).unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock
+    );
+    Ok(())
 }
 
 impl EnforcerFullClientV3 {
@@ -2217,10 +2270,29 @@ impl Client {
         Ok(())
     }
     async fn request(&self, request: Request, timeout: Duration) -> EnforcerResult<Response> {
+        self.request_in_generation(request, timeout, None)
+            .await
+            .map_err(LegacyNamedProspectiveFailure::code)
+    }
+
+    async fn request_in_generation(
+        &self,
+        request: Request,
+        timeout: Duration,
+        generation: Option<(&CancelGeneration, u64)>,
+    ) -> Result<Response, LegacyNamedProspectiveFailure> {
+        use LegacyNamedProspectiveFailure::{BeforeSend, OutcomeUnknown};
+
         if let SlotAuthorityV1::Full3(full) = &self.authority {
-            return self.request_full_legacy(full, request, timeout).await;
+            if generation.is_some() {
+                return Err(BeforeSend(EnforcerError::Unauthorized));
+            }
+            return self
+                .request_full_legacy(full, request, timeout)
+                .await
+                .map_err(OutcomeUnknown);
         }
-        let request = self.adapt_legacy_request(request)?;
+        let request = self.adapt_legacy_request(request).map_err(BeforeSend)?;
         #[cfg(test)]
         let is_bind = matches!(&request, Request::BindProspective { .. });
         #[cfg(test)]
@@ -2233,19 +2305,25 @@ impl Client {
                     .swap(false, Ordering::SeqCst)
             })
         {
-            return Err(EnforcerError::Unavailable);
+            return Err(BeforeSend(EnforcerError::Unavailable));
         }
-        let mut stream = self.endpoint.connect_checked(&self.endpoint_root).await?;
+        let mut stream = self
+            .endpoint
+            .connect_checked(&self.endpoint_root)
+            .await
+            .map_err(|error| BeforeSend(error.into()))?;
         #[cfg(test)]
         if self
             .owned_peer_pid_for_test
             .is_some_and(|expected| peer_pid(&stream) != Some(expected))
         {
-            return Err(EnforcerError::Unauthorized);
+            return Err(BeforeSend(EnforcerError::Unauthorized));
         }
-        self.authenticate(&mut stream).await?;
-        write_frame(&mut stream, &request, MAX_FRAME, IO_TIMEOUT).await?;
-        let response = read_frame(&mut stream, MAX_FRAME, timeout).await?;
+        self.authenticate(&mut stream).await.map_err(BeforeSend)?;
+        write_request_in_generation(&mut stream, &request, generation).await?;
+        let response = read_frame(&mut stream, MAX_FRAME, timeout)
+            .await
+            .map_err(|error| OutcomeUnknown(error.into()))?;
         #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
         retained_cancel_tests::hold_register_reply(&request, &response).await;
         #[cfg(test)]
@@ -2256,7 +2334,7 @@ impl Client {
                 .as_ref()
                 .is_some_and(|legacy| legacy.lose_next_begin_reply.swap(false, Ordering::SeqCst))
         {
-            return Err(EnforcerError::Unavailable);
+            return Err(OutcomeUnknown(EnforcerError::Unavailable));
         }
         #[cfg(test)]
         if is_bind
@@ -2266,7 +2344,7 @@ impl Client {
                 .as_ref()
                 .is_some_and(|legacy| legacy.lose_next_bind_reply.swap(false, Ordering::SeqCst))
         {
-            return Err(EnforcerError::Unavailable);
+            return Err(OutcomeUnknown(EnforcerError::Unavailable));
         }
         Ok(response)
     }
@@ -2303,36 +2381,56 @@ impl Client {
         &self,
         request: Request,
         timeout: Duration,
-    ) -> EnforcerResult<(Response, bool)> {
+        generation: Option<(&CancelGeneration, u64)>,
+    ) -> Result<(Response, bool), LegacyNamedProspectiveFailure> {
+        use LegacyNamedProspectiveFailure::{BeforeSend, OutcomeUnknown};
+
         if let SlotAuthorityV1::Full3(full) = &self.authority {
+            if generation.is_some() {
+                return Err(BeforeSend(EnforcerError::Unauthorized));
+            }
             return self
                 .request_full_legacy(full, request, timeout)
                 .await
+                .map_err(OutcomeUnknown)
                 .map(|response| (response, false));
         }
-        let mut stream = self.endpoint.connect_checked(&self.endpoint_root).await?;
+        let mut stream = self
+            .endpoint
+            .connect_checked(&self.endpoint_root)
+            .await
+            .map_err(|error| BeforeSend(error.into()))?;
         #[cfg(test)]
         if self
             .owned_peer_pid_for_test
             .is_some_and(|expected| peer_pid(&stream) != Some(expected))
         {
-            return Err(EnforcerError::Unauthorized);
+            return Err(BeforeSend(EnforcerError::Unauthorized));
         }
-        self.authenticate(&mut stream).await?;
-        let negotiated = self.negotiate_reservation_motif(&mut stream).await?;
+        self.authenticate(&mut stream).await.map_err(BeforeSend)?;
+        let negotiated = self
+            .negotiate_reservation_motif(&mut stream)
+            .await
+            .map_err(BeforeSend)?;
         if !negotiated {
-            stream = self.endpoint.connect_checked(&self.endpoint_root).await?;
+            stream = self
+                .endpoint
+                .connect_checked(&self.endpoint_root)
+                .await
+                .map_err(|error| BeforeSend(error.into()))?;
             #[cfg(test)]
             if self
                 .owned_peer_pid_for_test
                 .is_some_and(|expected| peer_pid(&stream) != Some(expected))
             {
-                return Err(EnforcerError::Unauthorized);
+                return Err(BeforeSend(EnforcerError::Unauthorized));
             }
-            self.authenticate(&mut stream).await?;
+            self.authenticate(&mut stream).await.map_err(BeforeSend)?;
         }
-        write_frame(&mut stream, &request, MAX_FRAME, IO_TIMEOUT).await?;
-        let response = read_frame(&mut stream, MAX_FRAME, timeout).await?;
+        write_request_in_generation(&mut stream, &request, generation).await?;
+        let response = read_frame(&mut stream, MAX_FRAME, timeout)
+            .await
+            .map_err(|error| OutcomeUnknown(error.into()))?;
         #[cfg(test)]
         if matches!(
             &response,
@@ -2342,7 +2440,7 @@ impl Client {
             .as_ref()
             .is_some_and(|legacy| legacy.lose_next_reserve_reply.swap(false, Ordering::SeqCst))
         {
-            return Err(EnforcerError::Unavailable);
+            return Err(OutcomeUnknown(EnforcerError::Unavailable));
         }
         Ok((response, negotiated))
     }

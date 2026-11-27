@@ -1,6 +1,39 @@
 //! Legacy prospective process custody. No Full3 ledger or retirement authority.
 use super::*;
 
+/// Result of one exact native attempt. A native refusal can report a site
+/// after installation. Only BeforeSend proves the business frame was not sent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LegacyNamedProspectiveFailure {
+    BeforeSend(EnforcerError),
+    Refused(LegacyReservationRefusalV1),
+    StaleAcknowledged(EnforcerError),
+    OutcomeUnknown(EnforcerError),
+}
+
+impl LegacyNamedProspectiveFailure {
+    fn refusal(self) -> LegacyReservationRefusalV1 {
+        match self {
+            Self::Refused(refusal) => refusal,
+            Self::BeforeSend(code) | Self::StaleAcknowledged(code) | Self::OutcomeUnknown(code) => {
+                code.into()
+            }
+        }
+    }
+
+    pub(super) fn code(self) -> EnforcerError {
+        self.refusal().code()
+    }
+}
+
+/// Live ACK of this client's exact reservation. The original job arbiter
+/// remains in the retained target, and journal reads cannot mint this value.
+pub(crate) struct LegacyNamedProspectiveReservation {
+    client: EnforcerClient,
+    retained: Arc<LocalProspective>,
+    expected: u64,
+}
+
 pub(super) struct LegacyTransport {
     pub(super) recovery_budget: u32,
     prospective: Mutex<BTreeMap<String, Arc<LocalProspective>>>,
@@ -138,34 +171,81 @@ impl EnforcerClient {
         generation: CancelGeneration,
         replay_only: bool,
     ) -> Result<(), LegacyReservationRefusalV1> {
-        target.validate()?;
-        let expected = generation.current();
+        self.reserve_legacy_prospective(target, &generation, replay_only, None)
+            .await
+            .map(|_| ())
+            .map_err(LegacyNamedProspectiveFailure::refusal)
+    }
+
+    /// Reserve one exact named target. A stale ACK is retained for the later
+    /// durable STOP path and never produces a reservation capability.
+    #[allow(
+        dead_code,
+        reason = "the named Legacy service caller is composed separately"
+    )]
+    pub(crate) async fn legacy_reserve_named_prospective(
+        &self,
+        target: ProspectiveRegistrationV1,
+        generation: &CancelGeneration,
+        expected: u64,
+    ) -> Result<LegacyNamedProspectiveReservation, LegacyNamedProspectiveFailure> {
+        let retained = self
+            .reserve_legacy_prospective(target, generation, false, Some(expected))
+            .await?;
+        generation
+            .with_current_generation(expected, || LegacyNamedProspectiveReservation {
+                client: self.clone(),
+                retained,
+                expected,
+            })
+            .map_err(LegacyNamedProspectiveFailure::StaleAcknowledged)
+    }
+
+    async fn reserve_legacy_prospective(
+        &self,
+        target: ProspectiveRegistrationV1,
+        generation: &CancelGeneration,
+        replay_only: bool,
+        named_expected: Option<u64>,
+    ) -> Result<Arc<LocalProspective>, LegacyNamedProspectiveFailure> {
+        use LegacyNamedProspectiveFailure::{
+            BeforeSend, OutcomeUnknown, Refused, StaleAcknowledged,
+        };
+
+        target.validate().map_err(BeforeSend)?;
+        let expected = named_expected.unwrap_or_else(|| generation.current());
         if expected == u64::MAX {
-            return Err(EnforcerError::NotReady.into());
+            return Err(BeforeSend(EnforcerError::NotReady));
+        }
+        if named_expected.is_some() {
+            generation
+                .with_current_generation(expected, || ())
+                .map_err(BeforeSend)?;
         }
         if !replay_only {
-            self.legacy_require_new_prearm_identity()?;
+            self.legacy_require_new_prearm_identity()
+                .map_err(BeforeSend)?;
         }
-        let digest = target.digest()?;
-        let legacy = self.legacy_transport()?;
+        let digest = target.digest().map_err(BeforeSend)?;
+        let legacy = self.legacy_transport().map_err(BeforeSend)?;
         let retained = {
             let mut map = legacy
                 .prospective
                 .lock()
-                .map_err(|_| EnforcerError::Unhealthy)?;
+                .map_err(|_| BeforeSend(EnforcerError::Unhealthy))?;
             if let Some(old) = map.get(target.arm_id()) {
                 if old.digest != digest || !Arc::ptr_eq(&old.generation.0, &generation.0) {
-                    return Err(EnforcerError::Conflict.into());
+                    return Err(BeforeSend(EnforcerError::Conflict));
                 }
                 Arc::clone(old)
             } else {
                 if map.len() >= self.0.max_slots as usize {
-                    return Err(EnforcerError::Capacity.into());
+                    return Err(BeforeSend(EnforcerError::Capacity));
                 }
                 let retained = Arc::new(LocalProspective {
                     target,
                     digest,
-                    generation,
+                    generation: generation.clone(),
                     reservation: Mutex::new(None),
                     bound: AtomicBool::new(false),
                     original_exchange_nonce: Mutex::new(None),
@@ -176,12 +256,12 @@ impl EnforcerClient {
         };
         // The exact target is retained before capability/factory transport.
         // Failure or a dropped waiter cannot erase this unknown admission.
-        self.legacy_capabilities().await?;
+        self.legacy_capabilities().await.map_err(BeforeSend)?;
         // A fresh reservation can already have lost its local generation
         // while capabilities was in flight. Keep the post-ACK check for
         // invalidation after this sample.
         if !replay_only && retained.generation.current() != expected {
-            return Err(EnforcerError::NotReady.into());
+            return Err(BeforeSend(EnforcerError::NotReady));
         }
         let (reply, negotiated) = self
             .0
@@ -192,6 +272,7 @@ impl EnforcerClient {
                     replay_only,
                 },
                 REGISTER_TIMEOUT,
+                named_expected.map(|expected| (&retained.generation, expected)),
             )
             .await?;
         let reservation = match reply {
@@ -200,43 +281,49 @@ impl EnforcerClient {
                 // The closed motif is only meaningful on this negotiated
                 // connection, and only for the not_ready refusal sites.
                 if !negotiated || code != EnforcerError::NotReady {
-                    return Err(EnforcerError::Unavailable.into());
+                    return Err(OutcomeUnknown(EnforcerError::Unavailable));
                 }
-                return Err(LegacyReservationRefusalV1::with_motif(code, motif));
+                return Err(Refused(LegacyReservationRefusalV1::with_motif(code, motif)));
             }
-            reply => return Err(response_error(reply).into()),
+            Response::Error { code } => return Err(Refused(code.into())),
+            reply => return Err(OutcomeUnknown(response_error(reply))),
         };
-        reservation.validate_for(
-            &retained.target,
-            self.0.endpoint.epoch(),
-            reservation.cancel_generation,
-        )?;
+        reservation
+            .validate_for(
+                &retained.target,
+                self.0.endpoint.epoch(),
+                reservation.cancel_generation,
+            )
+            .map_err(OutcomeUnknown)?;
         if (!replay_only && reservation.cancel_generation != expected)
             || (replay_only && reservation.cancel_generation > expected)
         {
-            return Err(EnforcerError::Conflict.into());
+            return Err(OutcomeUnknown(EnforcerError::Conflict));
         }
         {
             let mut previous = retained
                 .reservation
                 .lock()
-                .map_err(|_| EnforcerError::Unhealthy)?;
+                .map_err(|_| OutcomeUnknown(EnforcerError::Unhealthy))?;
             if let Some(old) = &*previous {
-                if serde_json::to_vec(old).map_err(|_| EnforcerError::InvalidInput)?
-                    != serde_json::to_vec(&reservation).map_err(|_| EnforcerError::InvalidInput)?
+                if serde_json::to_vec(old)
+                    .map_err(|_| OutcomeUnknown(EnforcerError::InvalidInput))?
+                    != serde_json::to_vec(&reservation)
+                        .map_err(|_| OutcomeUnknown(EnforcerError::InvalidInput))?
                 {
-                    return Err(EnforcerError::Conflict.into());
+                    return Err(OutcomeUnknown(EnforcerError::Conflict));
                 }
             } else {
                 *previous = Some(reservation);
             }
         }
-        if retained.generation.current() != expected {
+        if named_expected.is_none() && retained.generation.current() != expected {
             self.legacy_cancel_prospective(&retained.target, retained.generation.current())
-                .await?;
-            return Err(EnforcerError::NotReady.into());
+                .await
+                .map_err(OutcomeUnknown)?;
+            return Err(StaleAcknowledged(EnforcerError::NotReady));
         }
-        Ok(())
+        Ok(retained)
     }
     fn retained_prospective(
         &self,
@@ -263,56 +350,113 @@ impl EnforcerClient {
         target: &ProspectiveRegistrationV1,
         generation: &CancelGeneration,
     ) -> EnforcerResult<ProspectiveArmExchange> {
+        self.begin_legacy_prospective_arm_exchange(target, generation, None)
+            .await
+            .map_err(LegacyNamedProspectiveFailure::code)
+    }
+
+    /// Consume the original named reservation and its exact arbiter. A stale
+    /// ACK has no exchange capability and leaves native STOP to the journal.
+    #[allow(
+        dead_code,
+        reason = "the named Legacy service caller is composed separately"
+    )]
+    pub(crate) async fn legacy_begin_named_prospective_arm_exchange(
+        &self,
+        reserved: LegacyNamedProspectiveReservation,
+    ) -> Result<ProspectiveArmExchange, LegacyNamedProspectiveFailure> {
+        if !Arc::ptr_eq(&self.0, &reserved.client.0) {
+            return Err(LegacyNamedProspectiveFailure::BeforeSend(
+                EnforcerError::Conflict,
+            ));
+        }
+        self.begin_legacy_prospective_arm_exchange(
+            &reserved.retained.target,
+            &reserved.retained.generation,
+            Some(reserved.expected),
+        )
+        .await
+    }
+
+    async fn begin_legacy_prospective_arm_exchange(
+        &self,
+        target: &ProspectiveRegistrationV1,
+        generation: &CancelGeneration,
+        named_expected: Option<u64>,
+    ) -> Result<ProspectiveArmExchange, LegacyNamedProspectiveFailure> {
+        use LegacyNamedProspectiveFailure::{
+            BeforeSend, OutcomeUnknown, Refused, StaleAcknowledged,
+        };
+
         if self.0.failed.load(Ordering::SeqCst) {
-            return Err(EnforcerError::Unhealthy);
+            return Err(BeforeSend(EnforcerError::Unhealthy));
         }
-        let expected = generation.current();
+        let expected = named_expected.unwrap_or_else(|| generation.current());
         if expected == u64::MAX {
-            return Err(EnforcerError::NotReady);
+            return Err(BeforeSend(EnforcerError::NotReady));
         }
-        let retained = self.retained_prospective(target, generation)?;
+        if named_expected.is_some() {
+            generation
+                .with_current_generation(expected, || ())
+                .map_err(BeforeSend)?;
+        }
+        let retained = self
+            .retained_prospective(target, generation)
+            .map_err(BeforeSend)?;
         let reservation = retained
             .reservation
             .lock()
-            .map_err(|_| EnforcerError::Unhealthy)?
+            .map_err(|_| BeforeSend(EnforcerError::Unhealthy))?
             .clone()
-            .ok_or(EnforcerError::NotReady)?;
+            .ok_or(BeforeSend(EnforcerError::NotReady))?;
+        if named_expected.is_some() && reservation.cancel_generation != expected {
+            return Err(BeforeSend(EnforcerError::Conflict));
+        }
         retained
             .original_exchange_nonce
             .lock()
-            .map_err(|_| EnforcerError::Unhealthy)?
+            .map_err(|_| BeforeSend(EnforcerError::Unhealthy))?
             .take();
         let reply = self
             .0
-            .request(
+            .request_in_generation(
                 Request::BeginProspectiveArmExchange {
                     reservation,
                     generation: expected,
                 },
                 REGISTER_TIMEOUT,
+                named_expected.map(|expected| (generation, expected)),
             )
             .await?;
-        let Response::ProspectiveArmExchange {
-            original_exchange_nonce,
-        } = reply
-        else {
-            return Err(response_error(reply));
+        let original_exchange_nonce = match reply {
+            Response::ProspectiveArmExchange {
+                original_exchange_nonce,
+            } => original_exchange_nonce,
+            Response::Error { code } => return Err(Refused(code.into())),
+            reply => return Err(OutcomeUnknown(response_error(reply))),
         };
         if original_exchange_nonce.is_some_and(|nonce| nonce.is_nil()) {
-            return Err(EnforcerError::Unauthorized);
+            return Err(OutcomeUnknown(EnforcerError::Unauthorized));
         }
-        if generation.current() != expected {
-            self.legacy_cancel_prospective(target, generation.current())
-                .await?;
-            return Err(EnforcerError::NotReady);
-        }
-        Ok(ProspectiveArmExchange {
+        let exchange = || ProspectiveArmExchange {
             epoch: self.0.endpoint.epoch(),
             arm_id: target.arm_id().into(),
             prospective_hash: retained.digest.clone(),
             generation: expected,
             original_exchange_nonce,
-        })
+        };
+        if named_expected.is_some() {
+            return generation
+                .with_current_generation(expected, exchange)
+                .map_err(StaleAcknowledged);
+        }
+        if generation.current() != expected {
+            self.legacy_cancel_prospective(target, generation.current())
+                .await
+                .map_err(OutcomeUnknown)?;
+            return Err(StaleAcknowledged(EnforcerError::NotReady));
+        }
+        Ok(exchange())
     }
     pub(crate) async fn legacy_bind_prospective(
         &self,
@@ -536,3 +680,82 @@ mod tests;
 #[cfg(test)]
 #[path = "reservation_motif_tests.rs"]
 mod reservation_motif_tests;
+
+#[cfg(test)]
+#[tokio::test]
+async fn named_reservation_retains_stale_ack_without_issuing_stop() -> anyhow::Result<()> {
+    use super::super::server::test_support::{LegacyIpcFixture, registration};
+
+    let fixture = LegacyIpcFixture::start(1, 0).await;
+    let root = fixture.root();
+    let client = EnforcerClient::connect(
+        root,
+        &std::env::current_exe()?,
+        load_endpoint(root)?.ok_or(EnforcerError::NotReady)?,
+        capability(root, false)?,
+        1,
+        0,
+        false,
+    )
+    .await
+    .map_err(|failure| match failure {
+        ConnectFailure::Absent => EnforcerError::Unavailable,
+        ConnectFailure::Other(error) => error,
+    })?;
+    let target = registration(root.path()).prospective()?;
+    let generation = CancelGeneration::new();
+    let expected = generation.current();
+    let (held, resume) = fixture.pause_reserve_ack();
+    let observation = async {
+        let reserve =
+            client.legacy_reserve_named_prospective(target.clone(), &generation, expected);
+        tokio::pin!(reserve);
+        tokio::select! {
+            _ = &mut reserve => anyhow::bail!("reservation did not reach the native ACK barrier"),
+            held = tokio::time::timeout(IO_TIMEOUT, held) => held??,
+        }
+        generation.invalidate();
+        resume.send(()).map_err(|_| EnforcerError::Unavailable)?;
+        let failure = tokio::time::timeout(REGISTER_TIMEOUT, reserve).await?.err();
+        let retained = client.retained_prospective(&target, &generation)?;
+        let reservation = retained
+            .reservation
+            .lock()
+            .map_err(|_| EnforcerError::Unhealthy)?
+            .clone()
+            .ok_or(EnforcerError::NotReady)?;
+        // Inspect the native actor at the retained generation. A premature
+        // CancelProspective would have closed its original exchange.
+        let reply = client
+            .0
+            .request(
+                Request::BeginProspectiveArmExchange {
+                    reservation,
+                    generation: expected,
+                },
+                IO_TIMEOUT,
+            )
+            .await?;
+        Ok::<_, anyhow::Error>((
+            failure,
+            matches!(
+                reply,
+                Response::ProspectiveArmExchange {
+                    original_exchange_nonce: Some(_)
+                }
+            ),
+        ))
+    }
+    .await;
+    drop(client);
+    fixture.finish().await;
+    let (failure, original_native_exchange) = observation?;
+    assert_eq!(
+        failure,
+        Some(LegacyNamedProspectiveFailure::StaleAcknowledged(
+            EnforcerError::NotReady
+        ))
+    );
+    assert!(original_native_exchange);
+    Ok(())
+}
