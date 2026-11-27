@@ -2186,7 +2186,12 @@ mod tests {
             .await?;
         assert!(started_pending.receipt().is_none());
         assert!(equal(started_pending.request(), &started_request)?);
-        let head_with_started_pending = observation_writer.load(operation).await?.unwrap().head();
+        let head_with_started_pending = observation_writer
+            .load(operation)
+            .await?
+            .unwrap()
+            .head()
+            .clone();
         assert!(matches!(
             observation_writer
                 .record_legacy_named_import_observation(&plan, terminal_request.clone())
@@ -2195,9 +2200,14 @@ mod tests {
         ));
         assert_eq!(
             observation_writer.load(operation).await?.unwrap().head(),
-            head_with_started_pending
+            &head_with_started_pending
         );
-        let head_before_divergence = observation_writer.load(operation).await?.unwrap().head();
+        let head_before_divergence = observation_writer
+            .load(operation)
+            .await?
+            .unwrap()
+            .head()
+            .clone();
         let mut divergent_started = started_request.clone();
         divergent_started.observation.observation.observed_at =
             (now + chrono::Duration::seconds(1)).to_rfc3339();
@@ -2209,7 +2219,7 @@ mod tests {
         ));
         assert_eq!(
             observation_writer.load(operation).await?.unwrap().head(),
-            head_before_divergence
+            &head_before_divergence
         );
 
         let started_receipt = MutationReceiptV1 {
