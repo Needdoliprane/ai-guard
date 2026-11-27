@@ -16,7 +16,7 @@ use crate::{
     provider::AuthPreference,
     runner::RunOptions,
     runtime::{NetworkMode, RuntimeKind, validate_command},
-    workspace::{AuthorizedSource, Limits, PreparedWorkspace},
+    workspace::{AuthorizedSource, Limits, PreparedNamedWorkspace},
 };
 use anyhow::{Result, anyhow, ensure};
 use serde::{Deserialize, Serialize};
@@ -525,7 +525,7 @@ impl Registry {
         scope: &JournalScopeV1,
         material: &LegacyConfirmedLaunchSpecV1,
         excluded_roots: &[&File],
-    ) -> std::result::Result<PreparedWorkspace, BrokerErrorCodeV1> {
+    ) -> std::result::Result<PreparedNamedWorkspace, BrokerErrorCodeV1> {
         let plan = &material.plan;
         if plan.broker_profile_id != scope.profile_id()
             || plan.control_namespace_uuid != scope.control_namespace_uuid().to_string()
@@ -535,27 +535,21 @@ impl Registry {
         material
             .validate()
             .map_err(|_| BrokerErrorCodeV1::InvalidInput)?;
+        let expected_identity = material
+            .source_identity_hash
+            .as_deref()
+            .ok_or(BrokerErrorCodeV1::IncompatibleControl)?;
         let target =
             SessionLaunchTargetSelectionV1::new(plan.launch_target_id, plan.target_revision)
                 .map_err(|_| BrokerErrorCodeV1::InvalidInput)?;
         let source = self
             .open_legacy_named_source(scope, target)
             .map_err(|_| BrokerErrorCodeV1::Unavailable)?;
-        let expected_identity = material
-            .source_identity_hash
-            .as_deref()
-            .ok_or(BrokerErrorCodeV1::IncompatibleControl)?;
-        if source
-            .identity_hash()
-            .map_err(|_| BrokerErrorCodeV1::Unavailable)?
-            != expected_identity
-        {
-            return Err(BrokerErrorCodeV1::Conflict);
-        }
         let workspace = source
-            .prepare(Limits::default(), excluded_roots)
-            .map_err(|_| BrokerErrorCodeV1::Unavailable)?;
-        let digest = content_hash("ai-guard:workspace-manifest:v1", &workspace.manifest)
+            .prepare_named(expected_identity, Limits::default(), excluded_roots)
+            .map_err(|_| BrokerErrorCodeV1::Unavailable)?
+            .ok_or(BrokerErrorCodeV1::Conflict)?;
+        let digest = content_hash("ai-guard:workspace-manifest:v1", workspace.manifest())
             .map_err(|_| BrokerErrorCodeV1::Unavailable)?;
         if digest != material.launch.workspace_manifest_digest {
             return Err(BrokerErrorCodeV1::Conflict);
@@ -993,7 +987,7 @@ mod tests {
             source_identity_hash: Some(identity),
         };
         let workspace = registry.prepare_legacy_named_workspace(scope, &material, &[&excluded])?;
-        assert_eq!(workspace.manifest, manifest);
+        assert_eq!(workspace.manifest(), &manifest);
         material.version = 1;
         let identity = material.source_identity_hash.take();
         assert!(matches!(
@@ -1012,6 +1006,7 @@ mod tests {
             registry.prepare_legacy_named_workspace(scope, &material, &[&excluded]),
             Err(BrokerErrorCodeV1::Conflict)
         ));
+        let (_, workspace) = workspace.into_parts();
         let retained = scan_workspace_archive(workspace.archive.reopen()?, Limits::default())?;
         assert_eq!(retained, manifest);
         Ok(())

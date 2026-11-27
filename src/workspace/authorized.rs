@@ -5,8 +5,8 @@
 //! does not provide an atomic snapshot against concurrent same-UID/root changes.
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-use super::{ExportReport, Manifest, anchored_export, read_workspace_archive};
-use super::{Limits, PreparedWorkspace, collect_workspace_from_root};
+use super::{ExportReport, anchored_export, read_workspace_archive};
+use super::{Limits, Manifest, PreparedWorkspace, collect_workspace_from_root};
 use anyhow::{Context, Result, ensure};
 use sha2::{Digest, Sha256};
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -59,6 +59,23 @@ pub(crate) struct AuthorizedSource {
     path: PathBuf,
     chain: Vec<RetainedDirectory>,
     boundary_index: usize,
+}
+
+/// A collection made through the same source descriptor that proved its
+/// identity. Generic workspace collections cannot supply this evidence.
+pub(crate) struct PreparedNamedWorkspace {
+    identity_hash: String,
+    workspace: PreparedWorkspace,
+}
+
+impl PreparedNamedWorkspace {
+    pub(crate) fn manifest(&self) -> &Manifest {
+        &self.workspace.manifest
+    }
+
+    pub(crate) fn into_parts(self) -> (String, PreparedWorkspace) {
+        (self.identity_hash, self.workspace)
+    }
 }
 
 impl AuthorizedSource {
@@ -198,6 +215,23 @@ impl AuthorizedSource {
         // authority remains in the retained chain, even after a failed check.
         self.revalidate()
             .context("export parent path or ancestry changed during permission checks")
+    }
+
+    pub(crate) fn prepare_named(
+        &self,
+        expected_identity: &str,
+        limits: Limits,
+        excluded_roots: &[&File],
+    ) -> Result<Option<PreparedNamedWorkspace>> {
+        let identity_hash = self.identity_hash()?;
+        if identity_hash != expected_identity {
+            return Ok(None);
+        }
+        let workspace = self.prepare(limits, excluded_roots)?;
+        Ok(Some(PreparedNamedWorkspace {
+            identity_hash,
+            workspace,
+        }))
     }
 
     pub(crate) fn prepare(

@@ -901,10 +901,23 @@ mod tests {
         fs::create_dir(&source)?;
         let original = source.join("tracked.txt");
         fs::write(&original, b"confirmed contents")?;
-        let workspace = workspace::prepare_workspace(&source, Limits::default())?;
-        let retry = workspace::prepare_workspace(&source, Limits::default())?;
-        let digest = hex::encode(Sha256::digest(fs::read(workspace.archive.path())?));
-        let manifest = workspace.manifest.clone();
+        let authorized = workspace::AuthorizedSource::open(&source, std::slice::from_ref(&path))?;
+        let identity = authorized.identity_hash()?;
+        let workspace = authorized
+            .prepare_named(&identity, Limits::default(), &[])?
+            .unwrap();
+        let retry = authorized
+            .prepare_named(&identity, Limits::default(), &[])?
+            .unwrap();
+        let manifest = workspace.manifest().clone();
+        let other = path.join("other-source");
+        fs::create_dir(&other)?;
+        fs::copy(&original, other.join("tracked.txt"))?;
+        let other = workspace::AuthorizedSource::open(&other, std::slice::from_ref(&path))?;
+        let foreign = other
+            .prepare_named(&other.identity_hash()?, Limits::default(), &[])?
+            .unwrap();
+        assert_eq!(foreign.manifest(), &manifest);
         let config = crate::control_fs::Directory::open_or_create(&path.join("config"))?;
         let operation = Uuid::new_v4();
         let session = Uuid::new_v4();
@@ -937,7 +950,7 @@ mod tests {
             egress: None,
         };
         let material = LegacyConfirmedLaunchSpecV1 {
-            version: 1,
+            version: 2,
             plan: LegacyConfirmedPlanV1 {
                 version: 1,
                 binding_ref: Uuid::new_v4(),
@@ -951,12 +964,16 @@ mod tests {
                 expires_at: chrono::DateTime::from_timestamp(4_102_444_800, 0).unwrap(),
             },
             launch,
-            source_identity_hash: None,
+            source_identity_hash: Some(identity),
         };
 
         fs::remove_file(original)?;
+        assert!(retain_legacy_named_archive(&config, operation, &material, foreign).is_err());
+        assert!(!config.path().join("sessions").exists());
         let retained = retain_legacy_named_archive(&config, operation, &material, workspace)?;
         assert_eq!(retained.archive_name, format!("{operation}.tar"));
+        let bytes = fs::read(config.path().join("sessions").join(&retained.archive_name))?;
+        let digest = hex::encode(Sha256::digest(bytes));
         assert_eq!(retained.archive_digest, digest);
         assert_eq!(retained.manifest, manifest);
         let error = retain_legacy_named_archive(&config, operation, &material, retry)
@@ -1767,12 +1784,13 @@ fn require_new_archive_sessions(
 }
 
 /// Private evidence for the exact archive retained before named admission.
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[cfg_attr(test, derive(Serialize, Deserialize))]
+#[cfg_attr(test, serde(deny_unknown_fields))]
 pub(crate) struct LegacyNamedWorkspaceArchiveV1 {
     version: u32,
     archive_name: String,
     archive_digest: String,
+    source_identity_hash: String,
     manifest: Manifest,
 }
 
@@ -1781,7 +1799,10 @@ impl LegacyNamedWorkspaceArchiveV1 {
         let operation = material.plan.operation_id;
         require_named_archive_manifest(operation, material, &self.manifest)?;
         anyhow::ensure!(
-            self.version == 1 && self.archive_name == format!("{operation}.tar"),
+            self.version == 1
+                && self.archive_name == format!("{operation}.tar")
+                && material.source_identity_hash.as_deref()
+                    == Some(self.source_identity_hash.as_str()),
             "workspace archive identity differs from the confirmed operation"
         );
         hash(&self.archive_digest)?;
@@ -1821,9 +1842,14 @@ pub(super) fn retain_legacy_named_archive(
     config: &crate::control_fs::Directory,
     operation: Uuid,
     material: &LegacyConfirmedLaunchSpecV1,
-    workspace: workspace::PreparedWorkspace,
+    workspace: workspace::PreparedNamedWorkspace,
 ) -> Result<LegacyNamedWorkspaceArchiveV1> {
+    let (source_identity_hash, workspace) = workspace.into_parts();
     require_named_archive_manifest(operation, material, &workspace.manifest)?;
+    anyhow::ensure!(
+        material.source_identity_hash.as_deref() == Some(source_identity_hash.as_str()),
+        "workspace source differs from the confirmed operation"
+    );
     let archive_name = format!("{operation}.tar");
     let sessions = require_new_archive_sessions(config, &archive_name)
         .and_then(Directory::from_control)
@@ -1835,6 +1861,7 @@ pub(super) fn retain_legacy_named_archive(
         version: 1,
         archive_name,
         archive_digest,
+        source_identity_hash,
         manifest: workspace.manifest,
     };
     retained

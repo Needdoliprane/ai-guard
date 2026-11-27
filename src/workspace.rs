@@ -14,7 +14,7 @@ mod authorized;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) use authorized::AuthorizedExportParent;
 #[cfg(unix)]
-pub(crate) use authorized::AuthorizedSource;
+pub(crate) use authorized::{AuthorizedSource, PreparedNamedWorkspace};
 #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 mod export_durability_tests;
 
