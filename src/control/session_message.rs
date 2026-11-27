@@ -301,6 +301,7 @@ impl StdioConversation {
         args: &[std::ffi::OsString],
         env: &[(std::ffi::OsString, std::ffi::OsString)],
     ) -> std::io::Result<Self> {
+        require_waitable_children()?;
         let mut command = std::process::Command::new(program);
         command
             .args(args)
@@ -314,7 +315,9 @@ impl StdioConversation {
         // hands off its child without waiting under the caller's locks.
         let (retire, abandoned) = std::sync::mpsc::channel::<std::process::Child>();
         let reaper = std::thread::Builder::new().spawn(move || {
-            if let Ok(mut child) = abandoned.recv() {
+            if let Ok(mut child) = abandoned.recv()
+                && matches!(child.try_wait(), Ok(None))
+            {
                 let _ = child.kill();
                 let _ = child.wait();
             }
@@ -445,6 +448,25 @@ impl StdioConversation {
         self.child = None;
         Ok(())
     }
+}
+
+/// Retaining a Child must retain the exited process's status and PID until
+/// its owner waits. Query the inherited disposition without changing it.
+fn require_waitable_children() -> io::Result<()> {
+    let mut action = std::mem::MaybeUninit::<libc::sigaction>::uninit();
+    // SAFETY: the null action queries SIGCHLD into the writable out-pointer.
+    if unsafe { libc::sigaction(libc::SIGCHLD, std::ptr::null(), action.as_mut_ptr()) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: the successful query initialized action.
+    let action = unsafe { action.assume_init() };
+    if action.sa_sigaction == libc::SIG_IGN || action.sa_flags & libc::SA_NOCLDWAIT != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "conversation requires waitable children (SIGCHLD)",
+        ));
+    }
+    Ok(())
 }
 
 impl ConversationInput<'_> {
