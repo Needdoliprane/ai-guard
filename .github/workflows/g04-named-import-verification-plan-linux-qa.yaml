@@ -81,6 +81,10 @@ jobs:
           else
             rc=$?
             printf 'build=FAIL\nbuild_exit=%s\n' "$rc"
+            jq -Rr 'fromjson? | objects
+              | select(.reason == "compiler-message" and .message.level == "error")
+              | .message.code.code // empty | strings | select(test("^E[0-9]{4}$"))
+              | "compiler_error=" + .' "$build_json" 2>/dev/null | sort -u || true
             report_not_run
             exit 1
           fi
@@ -114,6 +118,6 @@ jobs:
             printf 'test=%s status=PASS\ntest_exit=0\ntest_pass_count=1\ntest_fail_count=0\n' "$selector"
           else
             printf 'test=%s status=FAIL\ntest_exit=%s\n' "$selector" "$test_exit"
-            cat "$log"
+            rg -o 'panicked at src/[A-Za-z0-9_./-]+[.]rs:[0-9]+:[0-9]+' "$log" || true
             exit 1
           fi
