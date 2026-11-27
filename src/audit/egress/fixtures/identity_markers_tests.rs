@@ -1054,6 +1054,8 @@ const PAST_DEADLINE: &str = "2000-01-01T00:00:00Z";
 // e3c9f82f added this table to the three in 9ba8b9b6 without changing
 // session_prepare_v1. Keep the historical DDL independent of later installers.
 const HISTORICAL_LAUNCHES: &str = "CREATE TABLE session_launches(operation_id TEXT PRIMARY KEY,input_hash TEXT NOT NULL,session_id TEXT NOT NULL,preparation_operation_id TEXT NOT NULL,event_seq INTEGER NOT NULL REFERENCES events(seq),event_hash TEXT NOT NULL,receipt_json TEXT NOT NULL)";
+const HISTORICAL_SESSION_CATALOGS: [(&str, bool); 2] = [("9ba8b9b6", false), ("e3c9f82f", true)];
+const HISTORICAL_UPGRADE_DIRECTORY: &str = "historical-upgrade";
 
 fn seed_session_prepare(adopted: &Adopted) {
     let (plan, _guard) = adopted.in_place(0);
@@ -1333,11 +1335,127 @@ fn historical_session_rows(
     (preparation, launch)
 }
 
+fn install_historical_session_catalog(
+    adopted: &Adopted,
+    format: u32,
+    before: &MaintenanceSourceState,
+) -> anyhow::Result<(OwnedIdentityMarkersReportV1, rusqlite::Connection)> {
+    let open_owned = |manifest| {
+        let owner = adopted.base.owner(&adopted.anchors, manifest, format);
+        let source = owner.source_token(adopted.source_id(0)).unwrap();
+        Store::open_review_startup_for_tenant(
+            &source.descriptor().storage_binding.path(),
+            "A",
+            Redactor::new(vec![]),
+            10_000,
+            &source,
+        )
+        .map(drop)
+    };
+    assert!(open_owned("before-historical-maintenance.json").is_err());
+    assert_eq!(&maintenance_source_state(&adopted.base), before);
+
+    let installed = match run_historical_maintenance(adopted, HISTORICAL_UPGRADE_DIRECTORY, false) {
+        Ok(report) => report,
+        Err(error) => {
+            assert_eq!(&maintenance_source_state(&adopted.base), before);
+            return Err(error);
+        }
+    };
+    assert_eq!(installed.state, "installed");
+    assert_eq!(installed.store_format, format);
+    assert_eq!(installed.source_id, adopted.source_id(0));
+    let [extension] = installed.markers.as_slice() else {
+        panic!("historical upgrade should append exactly one marker");
+    };
+    assert_eq!(extension.marker, "session_prepare_catalog_upgrade_v1");
+    assert_eq!(extension.seq, before.head.0 + 1);
+
+    let backup = rusqlite::Connection::open_with_flags(
+        &installed.backup_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    assert_eq!(audit_head(&backup).unwrap(), before.head);
+    assert!(Store::check_integrity(&backup).unwrap().valid);
+    let store = &adopted.base.stores[0];
+    let previous_hash: String = store
+        .db
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT prev_hash FROM events WHERE seq=?1",
+            [extension.seq],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(previous_hash, before.head.1);
+
+    open_owned("after-historical-maintenance.json").unwrap();
+    let upgraded = maintenance_source_state(&adopted.base);
+    assert_eq!(upgraded.head, (extension.seq, extension.hash.clone()));
+    assert_eq!(upgraded.format, before.format);
+    assert_eq!(table_count(store, "session_messages"), 0);
+    Ok((installed, backup))
+}
+
+fn confirm_historical_session_catalog(
+    adopted: &Adopted,
+    installed: &OwnedIdentityMarkersReportV1,
+    before_confirmation: &MaintenanceSourceState,
+) {
+    let confirmed =
+        run_historical_maintenance(adopted, HISTORICAL_UPGRADE_DIRECTORY, true).unwrap();
+    assert_eq!(confirmed.state, "confirmed");
+    assert_eq!(confirmed.backup_path, installed.backup_path);
+    assert_eq!(confirmed.markers, installed.markers);
+    assert_eq!(
+        &maintenance_source_state(&adopted.base),
+        before_confirmation
+    );
+}
+
+#[test]
+fn historical_session_prepare_empty_catalogs_upgrade_through_owned_operator() {
+    for format in [14, 15] {
+        for (catalog, with_launches) in HISTORICAL_SESSION_CATALOGS {
+            let adopted = adopted(format);
+            seed_session_prepare(&adopted);
+            let store = &adopted.base.stores[0];
+            leave_historical_session_catalog(store, with_launches);
+            let before = maintenance_source_state(&adopted.base);
+            let (installed, backup) = install_historical_session_catalog(&adopted, format, &before)
+                .unwrap_or_else(|error| panic!("Store{format} {catalog}: {error:#}"));
+            let old_preparations: i64 = backup
+                .query_row("SELECT count(*) FROM session_preparations", [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(old_preparations, 0);
+            drop(backup);
+
+            for table in [
+                "session_preparations",
+                "session_launches",
+                "session_conversations",
+            ] {
+                assert_eq!(
+                    table_count(store, table),
+                    0,
+                    "Store{format} {catalog} {table}"
+                );
+            }
+            let before_confirmation = maintenance_source_state(&adopted.base);
+            confirm_historical_session_catalog(&adopted, &installed, &before_confirmation);
+        }
+    }
+}
+
 #[test]
 fn historical_session_prepare_catalogs_upgrade_through_owned_operator() {
     let mut refused_history = Vec::new();
     for format in [14, 15] {
-        for (catalog, with_launches) in [("9ba8b9b6", false), ("e3c9f82f", true)] {
+        for (catalog, with_launches) in HISTORICAL_SESSION_CATALOGS {
             let adopted = adopted(format);
             seed_session_prepare(&adopted);
             let store = &adopted.base.stores[0];
@@ -1355,46 +1473,14 @@ fn historical_session_prepare_catalogs_upgrade_through_owned_operator() {
             );
             leave_historical_session_catalog(store, with_launches);
             let before = maintenance_source_state(&adopted.base);
-            let open_owned = |manifest| {
-                let owner = adopted.base.owner(&adopted.anchors, manifest, format);
-                let source = owner.source_token(adopted.source_id(0)).unwrap();
-                Store::open_review_startup_for_tenant(
-                    &source.descriptor().storage_binding.path(),
-                    "A",
-                    Redactor::new(vec![]),
-                    10_000,
-                    &source,
-                )
-                .map(drop)
-            };
-            assert!(open_owned("before-historical-maintenance.json").is_err());
-            assert_eq!(maintenance_source_state(&adopted.base), before);
-
-            let run = |resume| run_historical_maintenance(&adopted, "historical-upgrade", resume);
-            let installed = match run(false) {
-                Ok(report) => report,
-                Err(error) => {
-                    assert_eq!(maintenance_source_state(&adopted.base), before);
-                    refused_history.push(format!("Store{format} {catalog}: {error:#}"));
-                    continue;
-                }
-            };
-            assert_eq!(installed.state, "installed");
-            assert_eq!(installed.store_format, format);
-            assert_eq!(installed.source_id, adopted.source_id(0));
-            let [extension] = installed.markers.as_slice() else {
-                panic!("historical upgrade should append exactly one marker");
-            };
-            assert_eq!(extension.marker, "session_prepare_catalog_upgrade_v1");
-            assert_eq!(extension.seq, before.head.0 + 1);
-
-            let backup = rusqlite::Connection::open_with_flags(
-                &installed.backup_path,
-                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-            )
-            .unwrap();
-            assert_eq!(audit_head(&backup).unwrap(), before.head);
-            assert!(Store::check_integrity(&backup).unwrap().valid);
+            let (installed, backup) =
+                match install_historical_session_catalog(&adopted, format, &before) {
+                    Ok(outcome) => outcome,
+                    Err(error) => {
+                        refused_history.push(format!("Store{format} {catalog}: {error:#}"));
+                        continue;
+                    }
+                };
             assert_eq!(
                 historical_session_rows(&backup, preparation.operation_id, launch_id),
                 original
@@ -1402,14 +1488,6 @@ fn historical_session_prepare_catalogs_upgrade_through_owned_operator() {
             drop(backup);
             {
                 let db = store.db.lock().unwrap();
-                let previous_hash: String = db
-                    .query_row(
-                        "SELECT prev_hash FROM events WHERE seq=?1",
-                        [extension.seq],
-                        |row| row.get(0),
-                    )
-                    .unwrap();
-                assert_eq!(previous_hash, before.head.1);
                 assert_eq!(
                     historical_session_rows(&db, preparation.operation_id, launch_id),
                     original
@@ -1431,33 +1509,26 @@ fn historical_session_prepare_catalogs_upgrade_through_owned_operator() {
                 }
             }
 
-            open_owned("after-historical-maintenance.json").unwrap();
-            let upgraded = maintenance_source_state(&adopted.base);
-            assert_eq!(upgraded.head, (extension.seq, extension.hash.clone()));
-            assert_eq!(upgraded.format, before.format);
             assert_eq!(
                 table_count(store, "session_conversations"),
                 i64::from(with_launches)
             );
-            assert_eq!(table_count(store, "session_messages"), 0);
 
             if with_launches && format == 15 {
                 let retained = adopted.retained(0, "after-upgrade-new-work.json", format);
                 let _ = historical_session_work(&retained, false);
             }
             let before_confirmation = maintenance_source_state(&adopted.base);
-            let confirmed = run(true).unwrap();
-            assert_eq!(confirmed.state, "confirmed");
-            assert_eq!(confirmed.backup_path, installed.backup_path);
-            assert_eq!(confirmed.markers, installed.markers);
-            assert_eq!(maintenance_source_state(&adopted.base), before_confirmation);
+            confirm_historical_session_catalog(&adopted, &installed, &before_confirmation);
 
+            let resume =
+                || run_historical_maintenance(&adopted, HISTORICAL_UPGRADE_DIRECTORY, true);
             if with_launches && format == 14 {
                 // The audit extension now proves that these tables existed.
                 // Their later loss must refuse even with the old SQL shape.
                 leave_historical_session_catalog(store, true);
                 let damaged = maintenance_source_state(&adopted.base);
-                assert!(run(true).is_err());
+                assert!(resume().is_err());
                 assert_eq!(maintenance_source_state(&adopted.base), damaged);
             } else if let Some(launch) = launch {
                 // The same backup, with the same catalog and audit prefix,
@@ -1479,7 +1550,7 @@ fn historical_session_prepare_catalogs_upgrade_through_owned_operator() {
                 assert_eq!(audit_head(&backup).unwrap(), before.head);
                 assert!(Store::check_integrity(&backup).unwrap().valid);
                 drop(backup);
-                let error = run(true).unwrap_err();
+                let error = resume().unwrap_err();
                 assert!(format!("{error:#}").contains("historical session launch grant differs"));
                 assert_eq!(maintenance_source_state(&adopted.base), before_confirmation);
             }
