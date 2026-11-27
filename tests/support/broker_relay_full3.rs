@@ -27,8 +27,9 @@ use std::{
     collections::BTreeMap,
     io,
     os::unix::fs::{OpenOptionsExt, PermissionsExt},
+    os::unix::process::ExitStatusExt,
     path::{Path, PathBuf},
-    process::Stdio,
+    process::{ExitStatus, Stdio},
     sync::{
         Arc, Mutex as StdMutex,
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -662,6 +663,16 @@ fn private_file(path: &Path, bytes: &[u8]) -> Result<()> {
     file.sync_all()?;
     Ok(())
 }
+
+fn child_exit_status(status: ExitStatus) -> String {
+    if let Some(code) = status.code() {
+        format!("exit_code={code}")
+    } else if let Some(signal) = status.signal() {
+        format!("signal={signal}")
+    } else {
+        "termination=unknown".into()
+    }
+}
 fn fresh(root: &Path, tenant: &str) -> Result<Arc<Store>> {
     let store = Store::create_supervised_for_tenant(
         &root.join(format!("{tenant}.sqlite")),
@@ -1164,10 +1175,12 @@ impl Fixture {
         timeout(Duration::from_secs(10), async {
             loop {
                 let process = &mut self.enforcers.last_mut().context("guardian owner")?.1;
-                ensure!(
-                    process.child.try_wait()?.is_none(),
-                    "real guardian exited before announcement"
-                );
+                if let Some(status) = process.child.try_wait()? {
+                    bail!(
+                        "phase=guardian_announcement_wait {}",
+                        child_exit_status(status)
+                    );
+                }
                 if self
                     .broker_root
                     .join(role.name())
@@ -1192,7 +1205,8 @@ impl Fixture {
                 sleep(Duration::from_millis(20)).await;
             }
         })
-        .await?
+        .await
+        .context("phase=guardian_announcement_wait timed out")?
     }
     async fn start_broker(&mut self, role: Role) -> Result<()> {
         self.start_broker_mode(role, false).await

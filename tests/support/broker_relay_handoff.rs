@@ -29,8 +29,9 @@ use std::{
     collections::BTreeMap,
     io,
     os::unix::fs::{OpenOptionsExt, PermissionsExt},
+    os::unix::process::ExitStatusExt,
     path::{Path, PathBuf},
-    process::Stdio,
+    process::{ExitStatus, Stdio},
     sync::{
         Arc,
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -147,6 +148,16 @@ fn diagnostic(path: &Path) -> Result<Stdio> {
             .open(path)?,
     ))
 }
+
+fn child_exit_status(status: ExitStatus) -> String {
+    if let Some(code) = status.code() {
+        format!("exit_code={code}")
+    } else if let Some(signal) = status.signal() {
+        format!("signal={signal}")
+    } else {
+        "termination=unknown".into()
+    }
+}
 fn fresh(root: &Path, tenant: &str) -> Result<Arc<Store>> {
     let store = Store::create_supervised_for_tenant(
         &root.join(format!("{tenant}.sqlite")),
@@ -184,10 +195,12 @@ async fn start_fixture_enforcer(root: &Path, broker_root: &Path) -> Result<Child
         .spawn()?;
     timeout(Duration::from_secs(10), async {
         loop {
-            ensure!(
-                enforcer.try_wait()?.is_none(),
-                "native fixture enforcer exited"
-            );
+            if let Some(status) = enforcer.try_wait()? {
+                bail!(
+                    "phase=enforcer_announcement_wait {}",
+                    child_exit_status(status)
+                );
+            }
             if std::fs::read_dir(enforcer_root.join("announcements"))
                 .is_ok_and(|mut entries| entries.next().is_some())
             {
@@ -196,7 +209,8 @@ async fn start_fixture_enforcer(root: &Path, broker_root: &Path) -> Result<Child
             sleep(Duration::from_millis(20)).await;
         }
     })
-    .await??;
+    .await
+    .context("phase=enforcer_announcement_wait timed out")??;
     Ok(enforcer)
 }
 #[path = "broker_relay_runtime.rs"]
