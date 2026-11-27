@@ -135,6 +135,15 @@ fn session_fence_id(session: Uuid) -> String {
     key("ai-guard:legacy-named-session-fence:v1", session)
 }
 
+/// Occupancy check for new placements in another ledger.
+pub(in crate::audit) fn session_is_fenced(
+    tx: &CheckedTransaction<'_>,
+    session: Uuid,
+) -> anyhow::Result<bool> {
+    Ok(event_by_id(tx, &session_fence_id(session))?
+        .is_some_and(|stored| stored.event.kind == FENCED))
+}
+
 fn target(
     db: &Connection,
     selection: crate::control::session_control::SessionLaunchTargetSelectionV1,
@@ -580,11 +589,24 @@ impl Store {
                 && event_by_id(&tx, &session_fence_id(session_id))?.is_none(),
             IdentityFailureV1::Conflict
         );
+        let session = session_id.to_string();
         let occupied: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM worker_mutations WHERE operation_id=?1) OR EXISTS(SELECT 1 FROM workers WHERE session_id=?2)",
-            params![operation, session_id.to_string()], |row| row.get(0),
+            "SELECT EXISTS(SELECT 1 FROM worker_mutations WHERE operation_id=?1)
+             OR EXISTS(SELECT 1 FROM workers WHERE session_id=?2)
+             OR EXISTS(SELECT 1 FROM kubernetes_creates WHERE session_id=?2)",
+            params![operation, session],
+            |row| row.get(0),
         )?;
         anyhow::ensure!(!occupied, IdentityFailureV1::Conflict);
+        let schema: i64 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if matches!(schema, 11..=13) {
+            let reserved: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM kubernetes_session_reservations WHERE session_id=?1)",
+                [&session],
+                |row| row.get(0),
+            )?;
+            anyhow::ensure!(!reserved, IdentityFailureV1::Conflict);
+        }
         let record = Confirmed {
             version: 2,
             request,

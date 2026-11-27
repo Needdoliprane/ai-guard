@@ -1,10 +1,15 @@
 use super::*;
 use crate::{
+    audit::{
+        kubernetes_admission_state_tests::Fixture as KubernetesFixture,
+        kubernetes_session::tests as session_fixture,
+    },
     broker_registry::{BrokerAuthorityV1, BrokerGrantMutationV1},
     control::{
         AdmissionV1, DecisionPhaseV1, DecisionReceiptV1, LaunchSpecV1, NetworkV1, QuotaPolicyV1,
         RestartPolicyV1, RuntimeInspectionV1, SecurityPresetV1, WorkerMutationV1, WorkerStateV1,
         WorkerTransitionV1, WorkerV1,
+        kubernetes_admission::{KubernetesHeldCreateApprovalV1, KubernetesHeldCreatePolicyV1},
         session_control::{LegacySessionTargetV1, SessionLaunchTargetRecordV1},
     },
     identity::{
@@ -35,20 +40,8 @@ impl Fixture {
         Store::open_existing_for_tenant(path, "tenant-a", redactor, MAX_EVENTS).unwrap()
     }
 
-    fn new() -> Self {
-        let directory = tempfile::Builder::new()
-            .permissions(std::fs::Permissions::from_mode(0o700))
-            .tempdir()
-            .unwrap();
-        let path = directory
-            .path()
-            .canonicalize()
-            .unwrap()
-            .join("legacy.sqlite");
-        let store =
-            Store::open_for_tenant(&path, "tenant-a", Redactor::new(vec![]), MAX_EVENTS).unwrap();
-        let target_id = Uuid::new_v4();
-        let launch = LaunchSpecV1 {
+    fn launch(target_id: Uuid) -> LaunchSpecV1 {
+        LaunchSpecV1 {
             version: 1,
             session_id: target_id.to_string(),
             command: CommandSpec {
@@ -75,7 +68,23 @@ impl Fixture {
             credential_names: vec![],
             provider_resolution: None,
             egress: None,
-        };
+        }
+    }
+
+    fn new() -> Self {
+        let directory = tempfile::Builder::new()
+            .permissions(std::fs::Permissions::from_mode(0o700))
+            .tempdir()
+            .unwrap();
+        let path = directory
+            .path()
+            .canonicalize()
+            .unwrap()
+            .join("legacy.sqlite");
+        let store =
+            Store::open_for_tenant(&path, "tenant-a", Redactor::new(vec![]), MAX_EVENTS).unwrap();
+        let target_id = Uuid::new_v4();
+        let launch = Self::launch(target_id);
         let worker = historical_created_worker(&store, launch.clone());
         for (index, migrate) in [
             Store::migrate_control_v3
@@ -95,6 +104,44 @@ impl Fixture {
         {
             migrate(&store, &path.with_extension(format!("before-{index}"))).unwrap();
         }
+        let (scope, credential_id, digest) =
+            Self::provision_local_target(&store, target_id, launch);
+        Self {
+            directory,
+            store,
+            scope,
+            credential_id,
+            digest,
+            target_id,
+            worker,
+        }
+    }
+
+    fn proof(&self) -> LegacySessionLocalProof<'_> {
+        LegacySessionLocalProof {
+            scope: &self.scope,
+            digest: &self.digest,
+            credential_id: &self.credential_id,
+            credential_revision: 1,
+            context_expires_at: DEADLINE,
+        }
+    }
+
+    fn request(&self) -> SessionLaunchPrepareRequestV1 {
+        SessionLaunchPrepareRequestV1 {
+            version: 1,
+            operation_id: Uuid::new_v4(),
+            launch_target_id: self.target_id,
+            expected_target_revision: 1,
+            expires_at: DEADLINE.into(),
+        }
+    }
+
+    fn provision_local_target(
+        store: &Store,
+        target_id: Uuid,
+        launch: LaunchSpecV1,
+    ) -> (AuthorizedScopeV1, String, [u8; 32]) {
         let actor = PrincipalRefV1::LegacyControl {
             credential_id: "fixture-control".into(),
             role: LegacyControlRoleV1::Runner,
@@ -216,35 +263,7 @@ impl Fixture {
         let scope = store
             .authorize_human_context(&principal, &membership_id, 1, ContextModeV1::Personal)
             .unwrap();
-        Self {
-            directory,
-            store,
-            scope,
-            credential_id,
-            digest,
-            target_id,
-            worker,
-        }
-    }
-
-    fn proof(&self) -> LegacySessionLocalProof<'_> {
-        LegacySessionLocalProof {
-            scope: &self.scope,
-            digest: &self.digest,
-            credential_id: &self.credential_id,
-            credential_revision: 1,
-            context_expires_at: DEADLINE,
-        }
-    }
-
-    fn request(&self) -> SessionLaunchPrepareRequestV1 {
-        SessionLaunchPrepareRequestV1 {
-            version: 1,
-            operation_id: Uuid::new_v4(),
-            launch_target_id: self.target_id,
-            expected_target_revision: 1,
-            expires_at: DEADLINE.into(),
-        }
+        (scope, credential_id, digest)
     }
 }
 
@@ -495,6 +514,127 @@ fn legacy_confirmation_keeps_its_shorter_deadline_after_reopen_and_replay() {
     let replayed = f.store.events(&query).unwrap();
     assert_eq!(replayed.len(), 1);
     assert_eq!(replayed[0].event.data, event.data);
+}
+
+#[test]
+fn legacy_confirmation_refuses_retained_kubernetes_session_ids() {
+    let mut kubernetes = KubernetesFixture::new();
+    session_fixture::prepare(&kubernetes);
+    let quota = QuotaPolicyV1::default();
+    let held_operation = Uuid::new_v4();
+    kubernetes.intent.session_id = session_id(held_operation).unwrap().to_string();
+    let policy = KubernetesHeldCreatePolicyV1 {
+        version: 1,
+        decision_ttl_seconds: 60,
+        approvals: vec![KubernetesHeldCreateApprovalV1 {
+            authority_fingerprint: kubernetes.intent.authority.fingerprint(),
+            image: kubernetes.intent.image.clone(),
+            profile: kubernetes.intent.profile.clone(),
+        }],
+    };
+    let authorization = kubernetes
+        .store
+        .authorize_kubernetes_create_admission(
+            &kubernetes.identity,
+            &kubernetes.intent,
+            &policy,
+            &quota,
+        )
+        .unwrap();
+    let (_, held, replayed) = kubernetes
+        .store
+        .reserve_kubernetes_create(&kubernetes.identity, &authorization, &kubernetes.intent)
+        .unwrap();
+    assert!(held.quota_held);
+    assert!(!replayed);
+
+    let reservation_operation = Uuid::new_v4();
+    let intent = session_fixture::intent(&kubernetes, session_id(reservation_operation).unwrap());
+    let policy = session_fixture::policy(&intent);
+    let authorization = kubernetes
+        .store
+        .authorize_kubernetes_session_reservation(&kubernetes.identity, &intent, &policy, &quota)
+        .unwrap();
+    let reservation = kubernetes
+        .store
+        .reserve_kubernetes_session(
+            &kubernetes.identity,
+            &authorization,
+            &intent,
+            &policy,
+            &quota,
+        )
+        .unwrap();
+    assert!(!reservation.replayed);
+    let path = kubernetes._directory.path().join("tenant.sqlite");
+    drop(kubernetes.store);
+
+    let store =
+        Store::open_existing_for_tenant(&path, "tenant-a", Redactor::new(vec![]), 10_000).unwrap();
+    assert!(store.integrity().unwrap().valid);
+    assert_eq!(store.worker_quota(&quota).unwrap().held_workers, 2);
+    store
+        .migrate_human_rights_v2(&path.with_extension("before-rights"))
+        .unwrap();
+    store
+        .enable_legacy_session_prepare_v1(&path.with_extension("before-prepare"))
+        .unwrap();
+    let target_id = Uuid::new_v4();
+    let (scope, credential_id, digest) =
+        Fixture::provision_local_target(&store, target_id, Fixture::launch(target_id));
+    let proof = || LegacySessionLocalProof {
+        scope: &scope,
+        digest: &digest,
+        credential_id: &credential_id,
+        credential_revision: 1,
+        context_expires_at: DEADLINE,
+    };
+    let prepared = store
+        .legacy_session_prepare_local(
+            proof(),
+            SessionLaunchPrepareRequestV1 {
+                version: 1,
+                operation_id: Uuid::new_v4(),
+                launch_target_id: target_id,
+                expected_target_revision: 1,
+                expires_at: DEADLINE.into(),
+            },
+        )
+        .unwrap();
+    let before = store.integrity().unwrap();
+    let mut request = SessionLaunchRequestV1 {
+        version: 1,
+        operation_id: held_operation,
+        launch_target_id: target_id,
+        expected_target_revision: 1,
+        preparation_operation_id: prepared.operation_id,
+        preparation_input_hash: prepared.input_hash,
+    };
+    for operation_id in [held_operation, reservation_operation] {
+        request.operation_id = operation_id;
+        let error = store
+            .legacy_session_confirm_local(proof(), request.clone())
+            .unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<IdentityFailureV1>(),
+            Some(&IdentityFailureV1::Conflict)
+        );
+        assert_eq!(store.integrity().unwrap().head_hash, before.head_hash);
+        assert_eq!(store.worker_quota(&quota).unwrap().held_workers, 2);
+    }
+
+    request.operation_id = Uuid::new_v4();
+    let confirmed = store
+        .legacy_session_confirm_local(proof(), request.clone())
+        .unwrap();
+    let head = store.head().unwrap();
+    let replay = store
+        .legacy_session_confirm_local(proof(), request)
+        .unwrap();
+    assert!(replay.replayed);
+    assert_eq!(replay.audit_hash, confirmed.audit_hash);
+    assert_eq!(store.head().unwrap(), head);
+    assert!(store.integrity().unwrap().valid);
 }
 
 #[test]

@@ -373,6 +373,10 @@ impl Store {
             return Err(KubernetesCreateFailureV1::NotFound.into());
         }
         if matches!(change, Change::Reserve { .. }) {
+            let session = crate::control::session_control::canonical_uuid(&intent.session_id)?;
+            conflict(!super::super::legacy_session_prepare::session_is_fenced(
+                &tx, session,
+            )?)?;
             let duplicate: bool = tx.query_row(
                 "SELECT EXISTS(SELECT 1 FROM workers WHERE session_id=?1) OR EXISTS(SELECT 1 FROM kubernetes_creates WHERE session_id=?1)",
                 [&intent.session_id], |row| row.get(0))?;

@@ -225,6 +225,10 @@ impl Store {
             if !tx.lease.active {
                 return Err(Failure::SupervisionInactive.into());
             }
+            conflict(!super::super::legacy_session_prepare::session_is_fenced(
+                &tx,
+                intent.ids()?.session_id,
+            )?)?;
             replay::ensure_no_legacy_identity(&tx, intent)?;
             let usage = control::quota_usage(&tx, &evidence.quota)?;
             replay::ensure_quota(&usage, intent, true)?;
