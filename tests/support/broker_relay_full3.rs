@@ -27,9 +27,8 @@ use std::{
     collections::BTreeMap,
     io,
     os::unix::fs::{OpenOptionsExt, PermissionsExt},
-    os::unix::process::ExitStatusExt,
     path::{Path, PathBuf},
-    process::{ExitStatus, Stdio},
+    process::Stdio,
     sync::{
         Arc, Mutex as StdMutex,
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -664,15 +663,6 @@ fn private_file(path: &Path, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
-fn child_exit_status(status: ExitStatus) -> String {
-    if let Some(code) = status.code() {
-        format!("exit_code={code}")
-    } else if let Some(signal) = status.signal() {
-        format!("signal={signal}")
-    } else {
-        "termination=unknown".into()
-    }
-}
 fn fresh(root: &Path, tenant: &str) -> Result<Arc<Store>> {
     let store = Store::create_supervised_for_tenant(
         &root.join(format!("{tenant}.sqlite")),
@@ -1176,10 +1166,7 @@ impl Fixture {
             loop {
                 let process = &mut self.enforcers.last_mut().context("guardian owner")?.1;
                 if let Some(status) = process.child.try_wait()? {
-                    bail!(
-                        "phase=guardian_announcement_wait {}",
-                        child_exit_status(status)
-                    );
+                    bail!("phase=guardian_announcement_wait child_status={status}");
                 }
                 if self
                     .broker_root
