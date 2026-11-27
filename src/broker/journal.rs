@@ -1758,6 +1758,18 @@ impl Journal {
             None | Some(JournalStatusV1::Rejected(_)) => return Err(JournalError::InvalidInput),
             Some(_) => return Err(JournalError::Interrupted),
         };
+        // The first exact pending write is a single-use emission boundary.
+        // A replayed transition must never hand a second caller that boundary.
+        if next
+            .broker()
+            .supervision()
+            .legacy_named_admission()
+            .and_then(|named| named.pending_v2())
+            .is_some()
+            && loaded.head() != &expected
+        {
+            return Err(JournalError::Conflict);
+        }
         let next = if let Some(current) = loaded.broker_checkpoint_v5() {
             if loaded.head() != &expected {
                 return Err(JournalError::Conflict);

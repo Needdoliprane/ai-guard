@@ -951,6 +951,7 @@ mod tests {
                 expires_at: chrono::DateTime::from_timestamp(4_102_444_800, 0).unwrap(),
             },
             launch,
+            source_identity_hash: None,
         };
 
         fs::remove_file(original)?;
@@ -1768,7 +1769,7 @@ fn require_new_archive_sessions(
 /// Private evidence for the exact archive retained before named admission.
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct LegacyNamedWorkspaceArchiveV1 {
+pub(crate) struct LegacyNamedWorkspaceArchiveV1 {
     version: u32,
     archive_name: String,
     archive_digest: String,
@@ -1776,23 +1777,33 @@ pub(super) struct LegacyNamedWorkspaceArchiveV1 {
 }
 
 impl LegacyNamedWorkspaceArchiveV1 {
-    pub(super) fn reopen(
-        &self,
-        config: &crate::control_fs::Directory,
-        operation: Uuid,
-        material: &LegacyConfirmedLaunchSpecV1,
-    ) -> Result<fs::File> {
+    pub(crate) fn digest_for_launch(&self, material: &LegacyConfirmedLaunchSpecV1) -> Result<&str> {
+        let operation = material.plan.operation_id;
         require_named_archive_manifest(operation, material, &self.manifest)?;
         anyhow::ensure!(
             self.version == 1 && self.archive_name == format!("{operation}.tar"),
             "workspace archive identity differs from the confirmed operation"
         );
         hash(&self.archive_digest)?;
+        Ok(&self.archive_digest)
+    }
+
+    pub(crate) fn reopen(
+        &self,
+        config: &crate::control_fs::Directory,
+        operation: Uuid,
+        material: &LegacyConfirmedLaunchSpecV1,
+    ) -> Result<fs::File> {
+        anyhow::ensure!(
+            operation == material.plan.operation_id,
+            "workspace archive identity differs from the confirmed operation"
+        );
+        let digest = self.digest_for_launch(material)?;
         let sessions = Directory::from_control(config.open_existing_child("sessions")?)?;
         open_verified_workspace_archive(
             &sessions,
             &self.archive_name,
-            &self.archive_digest,
+            digest,
             &self.manifest,
             &material.launch.workspace_manifest_digest,
         )

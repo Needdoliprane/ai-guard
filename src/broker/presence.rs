@@ -1,6 +1,7 @@
 //! Authenticated presence of the trusted service, independent of job admission.
 //! Local receipts are immutable recovery evidence, never execution authority.
 use crate::{
+    broker::{enforcer::CancelGeneration, writer::WriterClient},
     broker_registry::{BrokerAuthorityV1, BrokerRuntimeKindV1},
     control::session_control::{
         LegacyConfirmedLaunchSpecV1, LegacyConfirmedPlanV1, LegacyNamedInitialDecisionV1,
@@ -8,6 +9,7 @@ use crate::{
     },
     control_fs::{Directory, PrivateFile},
     redaction::Redactor,
+    runner::broker::LegacyNamedWorkspaceArchiveV1,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -365,25 +367,28 @@ impl PreparedPresence {
     )]
     pub(crate) async fn legacy_named_initial_decision(
         &self,
-        expected_broker_profile_id: &str,
+        writer: &WriterClient,
         material: &LegacyConfirmedLaunchSpecV1,
+        generation: (&CancelGeneration, u64),
     ) -> Result<LegacyNamedInitialDecisionV1> {
         self.revalidate()?;
-        legacy_named_admission::initial_decision(self, expected_broker_profile_id, material).await
+        legacy_named_admission::initial_decision(self, writer, material, generation).await
     }
-    /// Submit the exact plan and request after the caller records them durably.
+    /// Send the first admission only after the scoped Writer confirms it.
     #[allow(
         dead_code,
         reason = "the broker admission caller is a separate G04 integration"
     )]
     pub(crate) async fn admit_legacy_named(
         &self,
-        expected_broker_profile_id: &str,
-        plan: &LegacyConfirmedPlanV1,
-        request: &LegacyNamedSupervisedAdmissionV1,
+        writer: &WriterClient,
+        material: &LegacyConfirmedLaunchSpecV1,
+        request: LegacyNamedSupervisedAdmissionV1,
+        archive: (LegacyNamedWorkspaceArchiveV1, Directory),
+        generation: (&CancelGeneration, u64),
     ) -> Result<LegacyNamedAdmissionOutcome> {
         self.revalidate()?;
-        legacy_named_admission::admit(self, expected_broker_profile_id, plan, request).await
+        legacy_named_admission::admit(self, writer, material, request, archive, generation).await
     }
     /// Read a receipt for the exact retained request after a missed reply.
     #[allow(
@@ -392,12 +397,11 @@ impl PreparedPresence {
     )]
     pub(crate) async fn reconcile_legacy_named(
         &self,
-        expected_broker_profile_id: &str,
-        plan: &LegacyConfirmedPlanV1,
-        request: &LegacyNamedSupervisedAdmissionV1,
+        writer: &WriterClient,
+        operation: Uuid,
     ) -> Result<Option<LegacyNamedAdmissionOutcome>> {
         self.revalidate()?;
-        legacy_named_admission::reconcile(self, expected_broker_profile_id, plan, request).await
+        legacy_named_admission::reconcile(self, writer, operation).await
     }
     fn screen_material(&self) -> Result<()> {
         let source = serde_json::from_slice::<Value>(self.files[0].bytes())

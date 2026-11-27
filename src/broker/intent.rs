@@ -499,7 +499,10 @@ impl ExecutionIntentV1 {
         self.egress.as_ref()
     }
     pub(crate) fn legacy_named_plan(&self) -> Option<&LegacyConfirmedPlanV1> {
-        self.legacy_named_launch.as_ref().map(|launch| &launch.plan)
+        self.legacy_named_launch().map(|launch| &launch.plan)
+    }
+    pub(crate) fn legacy_named_launch(&self) -> Option<&LegacyConfirmedLaunchSpecV1> {
+        self.legacy_named_launch.as_deref()
     }
     pub(crate) fn request_data(&self) -> &DecisionRequest {
         &self.initial_request.0

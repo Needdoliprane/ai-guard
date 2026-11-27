@@ -2,7 +2,10 @@
 //! This client has no Runner surface and never starts a runtime.
 use super::*;
 use crate::{
-    broker::presence::http::{Client, Limits},
+    broker::{
+        journal::{JournalError, JournalScopeV1, canonical},
+        presence::http::{Client, Limits},
+    },
     control::{AdmissionRefusalV1, RuntimeKindV1, session_control::*},
 };
 use reqwest::{Method, StatusCode};
@@ -12,6 +15,21 @@ const RESPONSE_BYTES: u64 = 128 * 1024;
 pub(crate) enum Outcome {
     Accepted(LegacyNamedAdmissionReceiptV1),
     Refused(LegacyNamedAdmissionReceiptV1),
+}
+impl Outcome {
+    fn from_receipt(receipt: LegacyNamedAdmissionReceiptV1) -> Self {
+        if receipt.admission.accepted {
+            Self::Accepted(receipt)
+        } else {
+            Self::Refused(receipt)
+        }
+    }
+
+    fn receipt(&self) -> &LegacyNamedAdmissionReceiptV1 {
+        match self {
+            Self::Accepted(receipt) | Self::Refused(receipt) => receipt,
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -31,6 +49,7 @@ pub(super) async fn read_plan(
         binding_ref,
         "",
         RESPONSE_BYTES,
+        None,
         |status, bytes| {
             let value = decode_confirmation(presence, status, bytes, &[StatusCode::OK])?;
             let plan = serde_json::from_value(value).map_err(|_| PresenceError::Protocol)?;
@@ -60,6 +79,7 @@ pub(super) async fn read_launch_spec(
         binding_ref,
         "/launch-spec",
         LEGACY_CONFIRMED_LAUNCH_SPEC_RESPONSE_BYTES as u64,
+        None,
         |status, bytes| decode_launch_spec(presence, binding_ref, status, bytes),
     )
     .await
@@ -67,23 +87,32 @@ pub(super) async fn read_launch_spec(
 
 pub(super) async fn initial_decision(
     presence: &PreparedPresence,
-    expected_broker_profile_id: &str,
+    writer: &WriterClient,
     material: &LegacyConfirmedLaunchSpecV1,
+    generation: (&CancelGeneration, u64),
 ) -> Result<LegacyNamedInitialDecisionV1> {
-    if presence.scope.profile_id != expected_broker_profile_id {
-        return Err(PresenceError::Forbidden);
-    }
+    validate_writer_scope(presence, writer.scope())?;
     let binding_ref = material.plan.binding_ref;
     require_launch_scope(presence, binding_ref, material)?;
-    exchange_confirmation(
+    writer
+        .prepare_legacy_named_initial_decision(&material.plan)
+        .await
+        .map_err(named_write_error)?;
+    let decision = exchange_confirmation(
         presence,
         Method::POST,
         binding_ref,
         "/initial-decision",
         LEGACY_CONFIRMED_LAUNCH_SPEC_RESPONSE_BYTES as u64,
+        Some(generation),
         |status, bytes| decode_initial_decision(presence, material, status, bytes),
     )
-    .await
+    .await?;
+    writer
+        .acknowledge_legacy_named_initial_decision(&material.plan, &decision)
+        .await
+        .map_err(named_write_error)?;
+    Ok(decision)
 }
 
 async fn exchange_confirmation<T>(
@@ -92,26 +121,35 @@ async fn exchange_confirmation<T>(
     binding_ref: Uuid,
     suffix: &str,
     success_bytes: u64,
+    generation: Option<(&CancelGeneration, u64)>,
     decode: impl FnOnce(StatusCode, &[u8]) -> Result<T>,
 ) -> Result<T> {
     if binding_ref.is_nil() {
         return Err(PresenceError::Protocol);
     }
     let path = format!("/api/v1/control/session-confirmations/{binding_ref}{suffix}");
-    let client = Client::new(presence)?;
+    let client = Arc::new(Client::new(presence)?);
     let before = checked_identity(&client, presence).await?;
-    let (status, bytes) = client
-        .send_session_bounded(
-            method,
-            &path,
-            None,
-            Limits {
-                request: 0,
-                success: success_bytes,
-                error: RESPONSE_BYTES,
-            },
-        )
-        .await?;
+    presence.revalidate()?;
+    let transport = Arc::clone(&client);
+    let send = async move {
+        transport
+            .send_session_bounded(
+                method,
+                &path,
+                None,
+                Limits {
+                    request: 0,
+                    success: success_bytes,
+                    error: RESPONSE_BYTES,
+                },
+            )
+            .await
+    };
+    let (status, bytes) = match generation {
+        Some((cancel, expected)) => enqueue_before_stop(cancel, expected, send).await?,
+        None => send.await?,
+    };
     let confirmed = decode(status, &bytes)?;
     let after = checked_identity(&client, presence).await?;
     if before != after {
@@ -123,35 +161,149 @@ async fn exchange_confirmation<T>(
 
 pub(super) async fn admit(
     presence: &PreparedPresence,
-    expected_broker_profile_id: &str,
-    plan: &LegacyConfirmedPlanV1,
-    request: &LegacyNamedSupervisedAdmissionV1,
+    writer: &WriterClient,
+    material: &LegacyConfirmedLaunchSpecV1,
+    request: LegacyNamedSupervisedAdmissionV1,
+    (archive, config): (LegacyNamedWorkspaceArchiveV1, Directory),
+    (cancel, expected_generation): (&CancelGeneration, u64),
 ) -> Result<Outcome> {
-    validate_plan(presence, expected_broker_profile_id, request, plan)?;
-    let client = Client::new(presence)?;
+    validate_writer_scope(presence, writer.scope())?;
+    let plan = &material.plan;
+    require_launch_scope(presence, request.binding_ref, material)?;
+    validate_plan(presence, writer.scope().profile_id(), &request, plan)?;
+    let client = Arc::new(Client::new(presence)?);
     checked_identity(&client, presence).await?;
-    send_request(&client, presence, request, AdmissionOperation::Reserve)
-        .await?
-        .ok_or(PresenceError::AdmissionOutcomeUnknown)
+    let job = writer
+        .load(plan.operation_id)
+        .await
+        .map_err(|_| PresenceError::AdmissionOutcomeUnknown)?
+        .ok_or(PresenceError::Conflict)?;
+    let bound_launch = job
+        .intent()
+        .legacy_named_launch()
+        .ok_or(PresenceError::Conflict)?;
+    if material.source_identity_hash.is_none()
+        || canonical(bound_launch).map_err(named_write_error)?
+            != canonical(material).map_err(named_write_error)?
+        || job.intent().initial_options().run_options().config_dir != config.path()
+    {
+        return Err(PresenceError::Conflict);
+    }
+    let retained_material = material.clone();
+    let (archive_digest, retained_archive) = tokio::task::spawn_blocking(move || {
+        let digest = archive.digest_for_launch(&retained_material)?.to_owned();
+        let archive = archive.reopen(
+            &config,
+            retained_material.plan.operation_id,
+            &retained_material,
+        )?;
+        Ok::<_, anyhow::Error>((digest, archive))
+    })
+    .await
+    .map_err(|_| PresenceError::Unavailable)?
+    .map_err(|_| PresenceError::UnsafeFilesystem)?;
+    presence.revalidate()?;
+    cancel
+        .with_current_generation(expected_generation, || ())
+        .map_err(|_| PresenceError::Stopped)?;
+    let pending = writer
+        .record_legacy_named_admission(plan, request, archive_digest)
+        .await
+        .map_err(named_write_error)?;
+    let request = pending.into_request();
+    let outcome = send_request(
+        &client,
+        presence,
+        &request,
+        Dispatch::Reserve {
+            cancel,
+            expected_generation,
+        },
+    )
+    .await?
+    .ok_or(PresenceError::AdmissionOutcomeUnknown)?;
+    drop(retained_archive);
+    writer
+        .acknowledge_legacy_named_admission(plan, &request, outcome.receipt().clone())
+        .await
+        .map_err(|_| PresenceError::AdmissionOutcomeUnknown)?;
+    Ok(outcome)
 }
 
 pub(super) async fn reconcile(
     presence: &PreparedPresence,
-    expected_broker_profile_id: &str,
-    plan: &LegacyConfirmedPlanV1,
-    request: &LegacyNamedSupervisedAdmissionV1,
+    writer: &WriterClient,
+    operation: Uuid,
 ) -> Result<Option<Outcome>> {
-    validate_plan(presence, expected_broker_profile_id, request, plan)?;
-    let client = Client::new(presence)?;
+    validate_writer_scope(presence, writer.scope())?;
+    let retained = writer
+        .load_legacy_named_admission(operation)
+        .await
+        .map_err(|_| PresenceError::AdmissionOutcomeUnknown)?;
+    let plan = retained.plan();
+    let request = retained.request();
+    validate_plan(presence, writer.scope().profile_id(), request, plan)?;
+    let client = Arc::new(Client::new(presence)?);
     checked_identity(&client, presence).await?;
-    send_request(&client, presence, request, AdmissionOperation::Reconcile).await
+    // Use the gateway to reauthorize the read even if the broker already
+    // holds an acknowledgement. The Store alone resolves the current grant.
+    let outcome = send_request(&client, presence, request, Dispatch::Reconcile).await?;
+    if let Some(outcome) = &outcome {
+        writer
+            .acknowledge_legacy_named_admission(plan, request, outcome.receipt().clone())
+            .await
+            .map_err(|_| PresenceError::AdmissionOutcomeUnknown)?;
+    }
+    Ok(outcome)
+}
+
+fn validate_writer_scope(presence: &PreparedPresence, scope: &JournalScopeV1) -> Result<()> {
+    if scope.installation_id() != presence.scope.installation_id
+        || scope.tenant_id() != presence.scope.expected_tenant_id
+        || scope.gateway_origin() != presence.scope.gateway
+        || scope.profile_id() != presence.scope.profile_id
+        || scope.control_namespace_uuid() != presence.scope.control_namespace_uuid
+    {
+        return Err(PresenceError::Forbidden);
+    }
+    Ok(())
+}
+
+fn named_write_error(error: JournalError) -> PresenceError {
+    match error {
+        JournalError::Interrupted => PresenceError::Stopped,
+        JournalError::Conflict => PresenceError::Conflict,
+        _ => PresenceError::AdmissionOutcomeUnknown,
+    }
+}
+
+async fn enqueue_before_stop<T: Send + 'static>(
+    cancel: &CancelGeneration,
+    expected_generation: u64,
+    send: impl Future<Output = Result<T>> + Send + 'static,
+) -> Result<T> {
+    // Only the enqueue runs under the same gate as STOP invalidation. Once
+    // queued an HTTP result may be lost, so the retained request is reconciled.
+    cancel
+        .with_current_generation(expected_generation, || tokio::spawn(send))
+        .map_err(|_| PresenceError::Stopped)?
+        .await
+        .map_err(|_| PresenceError::AdmissionOutcomeUnknown)?
+}
+
+enum Dispatch<'a> {
+    Reserve {
+        cancel: &'a CancelGeneration,
+        expected_generation: u64,
+    },
+    Reconcile,
 }
 
 async fn send_request(
-    client: &Client,
+    client: &Arc<Client>,
     presence: &PreparedPresence,
     request: &LegacyNamedSupervisedAdmissionV1,
-    operation: AdmissionOperation,
+    dispatch: Dispatch<'_>,
 ) -> Result<Option<Outcome>> {
     presence.revalidate()?;
     let value = serde_json::to_value(request).map_err(|_| PresenceError::Protocol)?;
@@ -160,25 +312,36 @@ async fn send_request(
     if body.len() > LEGACY_NAMED_ADMISSION_REQUEST_BYTES {
         return Err(PresenceError::Protocol);
     }
-    let action = match operation {
-        AdmissionOperation::Reserve => "admission",
-        AdmissionOperation::Reconcile => "admission/reconcile",
+    let (operation, action) = match dispatch {
+        Dispatch::Reserve { .. } => (AdmissionOperation::Reserve, "admission"),
+        Dispatch::Reconcile => (AdmissionOperation::Reconcile, "admission/reconcile"),
     };
     let binding = request.binding_ref;
     let path = format!("/api/v1/control/session-confirmations/{binding}/{action}");
-    let (status, bytes) = client
-        .send_session_bounded(
-            Method::POST,
-            &path,
-            Some(body),
-            Limits {
-                request: LEGACY_NAMED_ADMISSION_REQUEST_BYTES as u64,
-                success: RESPONSE_BYTES,
-                error: RESPONSE_BYTES,
-            },
-        )
-        .await
-        .map_err(|_| PresenceError::AdmissionOutcomeUnknown)?;
+    let client = Arc::clone(client);
+    let send = async move {
+        client
+            .send_session_bounded(
+                Method::POST,
+                &path,
+                Some(body),
+                Limits {
+                    request: LEGACY_NAMED_ADMISSION_REQUEST_BYTES as u64,
+                    success: RESPONSE_BYTES,
+                    error: RESPONSE_BYTES,
+                },
+            )
+            .await
+            .map_err(|_| PresenceError::AdmissionOutcomeUnknown)
+    };
+    let response = match dispatch {
+        Dispatch::Reserve {
+            cancel,
+            expected_generation,
+        } => enqueue_before_stop(cancel, expected_generation, send).await?,
+        Dispatch::Reconcile => send.await?,
+    };
+    let (status, bytes) = response;
     let value = crate::json::decode_unique(&bytes, 64)
         .map_err(|_| PresenceError::AdmissionOutcomeUnknown)?;
     let Some(receipt) = decode_receipt(status, operation, value.clone())? else {
@@ -194,11 +357,10 @@ async fn send_request(
         status,
     )
     .map_err(|_| PresenceError::AdmissionOutcomeUnknown)?;
-    Ok(Some(if receipt.admission.accepted {
-        Outcome::Accepted(receipt)
-    } else {
-        Outcome::Refused(receipt)
-    }))
+    presence
+        .revalidate()
+        .map_err(|_| PresenceError::AdmissionOutcomeUnknown)?;
+    Ok(Some(Outcome::from_receipt(receipt)))
 }
 
 fn decode_receipt(
@@ -387,6 +549,32 @@ fn response_status(admission: &crate::control::AdmissionResultV1) -> StatusCode 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn stopped_generation_never_enqueues_the_named_admission_post() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let cancel = CancelGeneration::new();
+        let expected = cancel.current();
+        cancel.invalidate();
+        let submitted = Arc::new(AtomicBool::new(false));
+        let witness = Arc::clone(&submitted);
+        let blocked = enqueue_before_stop(&cancel, expected, async move {
+            witness.store(true, Ordering::SeqCst);
+            Ok(())
+        })
+        .await;
+        assert!(matches!(blocked, Err(PresenceError::Stopped)));
+        assert!(!submitted.load(Ordering::SeqCst));
+
+        enqueue_before_stop(&cancel, cancel.current(), async move {
+            submitted.store(true, Ordering::SeqCst);
+            Ok(submitted)
+        })
+        .await
+        .map(|submitted| assert!(submitted.load(Ordering::SeqCst)))
+        .unwrap();
+    }
     use crate::broker::presence::preparation_tests::Fixture;
 
     fn plan() -> LegacyConfirmedPlanV1 {
@@ -496,6 +684,7 @@ mod tests {
             version: 1,
             plan,
             launch,
+            source_identity_hash: None,
         };
         (fixture, presence, material)
     }

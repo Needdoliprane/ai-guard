@@ -20,6 +20,8 @@ use sha2::{Digest, Sha256};
 use std::{fmt, path::Path};
 use uuid::Uuid;
 
+pub(crate) use super::managed::LegacyNamedWorkspaceArchiveV1;
+
 mod executor;
 pub(crate) use executor::{BatchExecutor, BatchOutcome, deliver_cancellation};
 #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]

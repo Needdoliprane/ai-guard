@@ -541,6 +541,17 @@ impl Registry {
         let source = self
             .open_legacy_named_source(scope, target)
             .map_err(|_| BrokerErrorCodeV1::Unavailable)?;
+        let expected_identity = material
+            .source_identity_hash
+            .as_deref()
+            .ok_or(BrokerErrorCodeV1::IncompatibleControl)?;
+        if source
+            .identity_hash()
+            .map_err(|_| BrokerErrorCodeV1::Unavailable)?
+            != expected_identity
+        {
+            return Err(BrokerErrorCodeV1::Conflict);
+        }
         let workspace = source
             .prepare(Limits::default(), excluded_roots)
             .map_err(|_| BrokerErrorCodeV1::Unavailable)?;
@@ -960,8 +971,12 @@ mod tests {
             provider_resolution: None,
             egress: None,
         };
-        let material = LegacyConfirmedLaunchSpecV1 {
-            version: 1,
+        let selection = SessionLaunchTargetSelectionV1::new(target_id, 1)?;
+        let identity = registry
+            .open_legacy_named_source(scope, selection)?
+            .identity_hash()?;
+        let mut material = LegacyConfirmedLaunchSpecV1 {
+            version: 2,
             plan: LegacyConfirmedPlanV1 {
                 version: 1,
                 binding_ref: Uuid::new_v4(),
@@ -975,9 +990,23 @@ mod tests {
                 expires_at: chrono::DateTime::from_timestamp(4_102_444_800, 0).unwrap(),
             },
             launch,
+            source_identity_hash: Some(identity),
         };
         let workspace = registry.prepare_legacy_named_workspace(scope, &material, &[&excluded])?;
         assert_eq!(workspace.manifest, manifest);
+        material.version = 1;
+        let identity = material.source_identity_hash.take();
+        assert!(matches!(
+            registry.prepare_legacy_named_workspace(scope, &material, &[&excluded]),
+            Err(BrokerErrorCodeV1::IncompatibleControl)
+        ));
+        material.version = 2;
+        material.source_identity_hash = Some("d".repeat(64));
+        assert!(matches!(
+            registry.prepare_legacy_named_workspace(scope, &material, &[&excluded]),
+            Err(BrokerErrorCodeV1::Conflict)
+        ));
+        material.source_identity_hash = identity;
         std::fs::write(&file, b"changed contents")?;
         assert!(matches!(
             registry.prepare_legacy_named_workspace(scope, &material, &[&excluded]),

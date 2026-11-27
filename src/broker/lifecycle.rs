@@ -358,6 +358,21 @@ impl BrokerCheckpointV3 {
             .commands
             .iter()
             .any(|c| matches!(c.request, LocalCommandRequestV1::CancelRequested));
+        // An already recorded request can still take its Store receipt after
+        // STOP. A new admission request cannot cross that durable boundary.
+        if cancelled
+            && self
+                .broker
+                .supervision()
+                .legacy_named_admission()
+                .and_then(|named| named.pending_v2())
+                .is_some()
+        {
+            require(
+                previous_broker
+                    .is_some_and(|old| old.supervision().legacy_named_admission().is_some()),
+            )?;
+        }
         let current = self.broker.runner().broker_context();
         for command in &self.commands[old_commands.len()..] {
             if let LocalCommandRequestV1::ApprovalSubmitted {

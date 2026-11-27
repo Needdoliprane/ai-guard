@@ -221,11 +221,26 @@ pub(crate) fn validate_legacy_named_admission_receipt(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::control::session_control::LegacyConfirmedLaunchSpecV1;
+    use crate::{
+        broker::{
+            journal::{ControlSecrets, FsExclusions, Journal, JournalLimitsV1, ReserveResult},
+            lifecycle::BrokerCheckpointV3,
+            writer::{CancelInputV1, WriterClient},
+        },
+        control::session_control::{LegacyConfirmedLaunchSpecV1, LegacyNamedInitialDecisionV1},
+        control_fs::Directory,
+        runner::{RunOptions, broker::PreparedSubmission},
+    };
     use serde_json::json;
+    use std::{os::unix::fs::PermissionsExt, time::Duration};
 
-    #[test]
-    fn explicit_named_admission_requires_an_immutable_archive_digest() -> anyhow::Result<()> {
+    #[tokio::test]
+    async fn explicit_named_admission_requires_an_immutable_archive_digest() -> anyhow::Result<()> {
+        let temporary = tempfile::Builder::new()
+            .permissions(std::fs::Permissions::from_mode(0o700))
+            .tempdir()?;
+        let root = temporary.path().canonicalize()?;
+        let config = Directory::open_existing(&root)?;
         let operation = Uuid::new_v4();
         let binding_ref = Uuid::new_v4();
         let session = Uuid::new_v4();
@@ -269,11 +284,12 @@ mod tests {
             version: 1,
             plan: plan.clone(),
             launch: launch.clone(),
+            source_identity_hash: None,
         };
         let gateway = "http://127.0.0.1:8787";
-        let options = serde_json::from_value(json!({
-            "project": "/fixture/project",
-            "config_dir": "/fixture/config",
+        let options: RunOptions = serde_json::from_value(json!({
+            "project": root,
+            "config_dir": root,
             "gateway": gateway,
             "runtime": "docker",
             "image": launch.image_ref,
@@ -285,7 +301,7 @@ mod tests {
             "capture_output": false,
             "argv": launch.command.argv,
         }))?;
-        let intent = ExecutionIntentV1::from_legacy_named_launch(options, &material)?;
+        let intent = ExecutionIntentV1::from_legacy_named_launch(options.clone(), &material)?;
         let scope = JournalScopeV1::new(
             Uuid::new_v4(),
             "fixture",
@@ -308,6 +324,14 @@ mod tests {
             Decision::new(Outcome::Allow, "fixture", "Exact policy decision."),
             receipt.clone(),
         )?;
+        let initial_decision = LegacyNamedInitialDecisionV1 {
+            version: 1,
+            binding_ref,
+            request: decision_request.clone(),
+            decision: answer.decision().clone(),
+            receipt: receipt.clone(),
+            replayed: false,
+        };
         let request = LegacyNamedSupervisedAdmissionV1 {
             version: 1,
             binding_ref,
@@ -382,7 +406,7 @@ mod tests {
         assert_eq!(observed.request.input_hash()?, request.input_hash()?);
         assert_eq!(observed.archive_digest, digest);
         let swapped = checkpoint(LegacyNamedAdmissionCheckpoint::pending_with_archive(
-            plan,
+            plan.clone(),
             request.clone(),
             "f".repeat(64),
         )?)?;
@@ -422,6 +446,91 @@ mod tests {
         let reopened = BrokerCheckpointV2::from_bytes(&acknowledged.canonical_bytes()?)?;
         let named = reopened.supervision().legacy_named_admission().unwrap();
         assert!(equal(named.receipt().unwrap(), &saved)?);
+
+        for stop_first in [true, false] {
+            let journal_dir =
+                Directory::open_or_create(&root.join(format!("journal-{stop_first}")))?;
+            let journal = Journal::open(
+                &journal_dir,
+                scope.clone(),
+                &FsExclusions::new(),
+                JournalLimitsV1::default(),
+                ControlSecrets::new(vec![])?,
+            )?;
+            let writer = WriterClient::start(journal, 8, Duration::from_secs(5))?;
+            let ReserveResult::New(ticket) =
+                writer.reserve_legacy_named(operation, binding_ref).await?
+            else {
+                panic!("fixture must have a fresh operation");
+            };
+            let submission = PreparedSubmission::from_legacy_named_launch(
+                options.clone(),
+                config.clone(),
+                &material,
+            )?;
+            writer
+                .accept_prepared(ticket, submission)
+                .await
+                .map_err(|failure| failure.error())?;
+            writer.prepare_legacy_named_initial_decision(&plan).await?;
+            writer
+                .acknowledge_legacy_named_initial_decision(&plan, &initial_decision)
+                .await?;
+            if stop_first {
+                writer
+                    .stops()
+                    .append_cancel(CancelInputV1::new(operation, Uuid::new_v4())?)
+                    .await
+                    .map_err(|failure| failure.error())?;
+                let stopped = writer.load(operation).await?.unwrap();
+                let next = BrokerCheckpointV3::new(
+                    prepared.clone(),
+                    stopped.broker_checkpoint_v3().unwrap().commands().to_vec(),
+                )?;
+                assert!(matches!(
+                    writer
+                        .advance_lifecycle(operation, stopped.head().clone(), next)
+                        .await,
+                    Err(JournalError::Conflict)
+                ));
+                assert!(matches!(
+                    writer
+                        .record_legacy_named_admission(&plan, request.clone(), digest.clone())
+                        .await,
+                    Err(JournalError::Interrupted)
+                ));
+                continue;
+            }
+            let before = writer.load(operation).await?.unwrap();
+            let (one, two) = tokio::join!(
+                writer.record_legacy_named_admission(&plan, request.clone(), digest.clone()),
+                writer.record_legacy_named_admission(&plan, request.clone(), digest.clone()),
+            );
+            let recorded = match (one, two) {
+                (Ok(recorded), Err(JournalError::Conflict))
+                | (Err(JournalError::Conflict), Ok(recorded)) => recorded,
+                _ => panic!("exact concurrency must yield one permission to emit"),
+            };
+            assert_eq!(recorded.into_request().input_hash()?, request.input_hash()?);
+            let next = BrokerCheckpointV3::new(prepared.clone(), Vec::new())?;
+            assert!(matches!(
+                writer
+                    .advance_lifecycle(operation, before.head().clone(), next)
+                    .await,
+                Err(JournalError::Conflict)
+            ));
+            writer
+                .stops()
+                .append_cancel(CancelInputV1::new(operation, Uuid::new_v4())?)
+                .await
+                .map_err(|failure| failure.error())?;
+            writer
+                .acknowledge_legacy_named_admission(&plan, &request, saved.clone())
+                .await?;
+            let retained = writer.load_legacy_named_admission(operation).await?;
+            assert_eq!(retained.archive_digest(), Some(digest.as_str()));
+            assert!(equal(retained.receipt().unwrap(), &saved)?);
+        }
         Ok(())
     }
 }

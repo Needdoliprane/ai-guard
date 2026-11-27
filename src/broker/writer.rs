@@ -43,6 +43,7 @@ use tokio::sync::oneshot;
 use uuid::Uuid;
 
 mod cold_audit;
+mod legacy_named_admission;
 mod queue;
 mod retirement_owners;
 mod status_cache;

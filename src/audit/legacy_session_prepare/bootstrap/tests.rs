@@ -116,6 +116,7 @@ impl Fixture {
                     incarnation_id,
                     broker_grant_revision: 1,
                     broker_profile_id: "fixture-bootstrap-profile".into(),
+                    source_identity_hash: None,
                     launch: LaunchSpecV1 {
                         version: 1,
                         session_id: target_id.to_string(),
