@@ -724,19 +724,33 @@ async fn report_missing_receipt_wait_failure(
         println!("phase={phase} view=worker category=endpoint_unavailable");
         return;
     };
-    match fixture.a.worker(&endpoint.worker_id) {
+    let worker = match fixture.a.worker(&endpoint.worker_id) {
         Ok(Some(worker))
-            if worker.admission_operation_id == job.to_string()
+            if worker.worker_id == endpoint.worker_id
+                && worker.admission_operation_id == job.to_string()
                 && worker.attempt.attempt_id == endpoint.attempt_id =>
         {
             println!(
                 "phase={phase} view=worker category=observed state={:?} quota_held={}",
                 worker.state, worker.quota_held,
             );
+            Some(worker)
         }
-        Ok(Some(_)) => println!("phase={phase} view=worker category=identity_unconfirmed"),
-        Ok(None) => println!("phase={phase} view=worker category=absent"),
-        Err(_) => println!("phase={phase} view=worker category=read_error"),
+        Ok(Some(_)) => {
+            println!("phase={phase} view=worker category=identity_unconfirmed");
+            None
+        }
+        Ok(None) => {
+            println!("phase={phase} view=worker category=absent");
+            None
+        }
+        Err(_) => {
+            println!("phase={phase} view=worker category=read_error");
+            None
+        }
+    };
+    if phase == "handoff_worker_terminal" {
+        fixture.report_terminal_wait_evidence(worker.as_ref());
     }
 }
 

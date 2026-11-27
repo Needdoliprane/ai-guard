@@ -4,8 +4,11 @@
 use agentsandbox::{
     api::{GatewayState, TenantGateway, gateway_router},
     audit::Store,
-    broker::service::{self, RequestedExecutionV1, SubmitV1, encode_submit, protocol::*},
-    control::{WorkerMutationV1, WorkerStateV1, WorkerTransitionV1},
+    broker::{
+        lifecycle::LocalFailurePhaseV1,
+        service::{self, RequestedExecutionV1, SubmitV1, encode_submit, protocol::*},
+    },
+    control::{WorkerMutationV1, WorkerStateV1, WorkerTransitionV1, WorkerV1},
     control_fs::Directory,
     operations::initialize_config,
     policy::Policy,
@@ -707,6 +710,143 @@ impl Fixture {
         db.busy_timeout(Duration::from_secs(2))?;
         Ok(db)
     }
+    pub fn report_terminal_wait_evidence(&self, worker: Option<&WorkerV1>) {
+        let (stop_received, terminal) = worker
+            .and_then(|worker| self.terminal_runtime_witness(worker))
+            .unwrap_or(("Unknown", "Unknown"));
+        println!(
+            "phase=handoff_worker_terminal view=runtime_witness stop_received={stop_received} terminal={terminal}"
+        );
+        match worker.map(|worker| self.terminal_batch_failure(worker)) {
+            Some(Ok(Some(failure))) => println!(
+                "phase=handoff_worker_terminal view=batch_failure category=observed failure_phase={:?} broker_step={} runtime_stage={} enforcer_stage={}",
+                failure.phase, failure.broker_step, failure.runtime_stage, failure.enforcer_stage,
+            ),
+            Some(Ok(None)) => {
+                println!("phase=handoff_worker_terminal view=batch_failure category=not_observed");
+            }
+            _ => println!("phase=handoff_worker_terminal view=batch_failure category=Unknown"),
+        }
+    }
+    fn terminal_runtime_witness(&self, worker: &WorkerV1) -> Option<(&'static str, &'static str)> {
+        if self.engine_task.is_finished() {
+            return None;
+        }
+        let inspection = worker.attempt.created_inspection.as_ref()?;
+        let id = inspection.container_id.as_str();
+        let name = worker.attempt.stable_name.as_str();
+        if worker.attempt.container_id.as_deref() != Some(id) || inspection.stable_name != name {
+            return None;
+        }
+        let engine = self.engine.try_lock().ok()?;
+        let container = engine.containers.get(id)?;
+        let facts = &container.facts;
+        let labels = &facts["Config"]["Labels"];
+        if facts["Id"].as_str() != Some(id)
+            || facts["Name"]
+                .as_str()
+                .and_then(|name| name.strip_prefix('/'))
+                != Some(name)
+            || labels["agentsandbox.purpose"] != "run"
+            || labels["agentsandbox.session"].as_str() != Some(worker.launch.session_id.as_str())
+            || labels["agentsandbox.operation"].as_str()
+                != Some(worker.admission_operation_id.as_str())
+        {
+            return None;
+        }
+        let mut stop_received = if engine.errors.is_empty() {
+            "false"
+        } else {
+            "Unknown"
+        };
+        for call in &engine.calls {
+            let target = call.last().map(String::as_str);
+            if target != Some(id) && target != Some(name) {
+                continue;
+            }
+            let command = match call.as_slice() {
+                [option, _, command, ..] if option == "--host" => Some(command.as_str()),
+                [command, ..] => Some(command.as_str()),
+                [] => None,
+            };
+            if matches!(command, Some("kill" | "stop")) && target == Some(id) {
+                stop_received = "true";
+                break;
+            }
+            if call
+                .iter()
+                .any(|arg| matches!(arg.as_str(), "kill" | "stop"))
+            {
+                stop_received = "Unknown";
+            }
+        }
+        let state = &facts["State"];
+        let terminal = match (
+            state["Status"].as_str(),
+            state["Running"].as_bool(),
+            *container.done.borrow(),
+            facts["RestartCount"].as_u64(),
+        ) {
+            (Some("exited"), Some(false), true, Some(0)) => "true",
+            (Some("running"), Some(true), false, Some(0)) => "false",
+            _ => "Unknown",
+        };
+        Some((stop_received, terminal))
+    }
+    fn terminal_batch_failure(&self, worker: &WorkerV1) -> Result<Option<BatchFailureWitness>> {
+        use rusqlite::OptionalExtension;
+
+        let db = self.readonly_a()?;
+        db.busy_timeout(Duration::ZERO)?;
+        // Worker session is unique in this Store and tied to the verified admission.
+        let payload = db
+            .query_row(
+                "SELECT json_extract(payload,'$.data') FROM events \
+                 WHERE kind='broker.batch.failure' AND json_extract(payload,'$.source')='runner' \
+                 AND json_extract(payload,'$.provenance')='observed' \
+                 AND json_extract(payload,'$.session_id')=?1 ORDER BY seq DESC LIMIT 1",
+                [worker.launch.session_id.as_str()],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        let Some(payload) = payload else {
+            return Ok(None);
+        };
+        let data: Value = serde_json::from_str(&payload)?;
+        ensure!(
+            data["version"].as_u64() == Some(1) && data["runtime_effect"] == "unknown",
+            "unrecognized batch failure diagnostic"
+        );
+        Ok(Some(BatchFailureWitness {
+            phase: serde_json::from_value(data["phase"].clone())?,
+            broker_step: closed_category(
+                &data["broker_step"],
+                &[
+                    "terminal_observation_ack",
+                    "result_audit",
+                    "cleanup_confirmation",
+                    "cleanup_ack",
+                    "failure_observed",
+                ],
+            ),
+            runtime_stage: closed_category(
+                &data["runtime"]["stage"],
+                &[
+                    "observe_only",
+                    "authority_before_spawn",
+                    "invocation_before_spawn",
+                    "stop_before_spawn",
+                    "guard_before_spawn",
+                    "spawn",
+                    "started_observation",
+                ],
+            ),
+            enforcer_stage: closed_category(
+                &data["enforcer"]["stage"],
+                &["register", "before_claim", "prepare", "before_spawn"],
+            ),
+        }))
+    }
     pub fn relay_effects(&self) -> Result<(Vec<(String, bool)>, Vec<String>)> {
         let db = self.readonly_a()?;
         let mut query =
@@ -1033,6 +1173,22 @@ fn channel_fact_for_job(record: &Value, job: Uuid) -> Result<Option<&Value>> {
         "channel fact job identity differs from V2 record"
     );
     Ok((fact_job == job).then_some(fact))
+}
+
+struct BatchFailureWitness {
+    phase: LocalFailurePhaseV1,
+    broker_step: &'static str,
+    runtime_stage: &'static str,
+    enforcer_stage: &'static str,
+}
+
+fn closed_category(value: &Value, allowed: &[&'static str]) -> &'static str {
+    let observed = value.as_str();
+    allowed
+        .iter()
+        .copied()
+        .find(|&name| observed == Some(name))
+        .unwrap_or("Unknown")
 }
 
 #[test]
