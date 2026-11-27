@@ -18,6 +18,7 @@ use crate::{
 
 mod arm;
 mod cancel;
+mod claim;
 mod execution;
 mod initial_decision;
 pub(crate) use arm::LegacyNamedArmV1;
@@ -27,6 +28,11 @@ pub(in crate::audit) use arm::{
 pub(crate) use cancel::LegacyNamedCancelReservationV1;
 pub(crate) use cancel::LegacyNamedCancelV1;
 pub(in crate::audit) use cancel::validate_legacy_named_cancel;
+pub(crate) use claim::LegacyNamedImportClaimV1;
+pub(in crate::audit) use claim::{
+    LEGACY_NAMED_IMPORT_CLAIM_KIND, legacy_named_import_claim_predecessor,
+    validate_named_import_claim_initiator,
+};
 pub(crate) use initial_decision::LegacyNamedInitialDecision;
 pub(in crate::audit) use initial_decision::require_named_admission_link;
 

@@ -1162,9 +1162,10 @@ async fn legacy_named_import_arm_preserves_its_prefix_and_closes_manual_claims()
     use crate::{
         api::{GatewayState, TenantGateway, gateway_router},
         control::{
-            ArmResultV1,
+            ArmResultV1, ClaimDispositionV1,
             session_control::{
                 LEGACY_NAMED_IMPORT_ARM_RECEIPT_NOT_FOUND, LegacyNamedImportArmRequestV1,
+                LegacyNamedImportClaimRequestV1,
             },
         },
     };
@@ -1391,7 +1392,10 @@ async fn legacy_named_import_arm_preserves_its_prefix_and_closes_manual_claims()
     armed.receipt.validate_for_arm(&arm).unwrap();
     let claim = HelperStartClaimV1 {
         version: 1,
-        operation_id: Uuid::new_v4().to_string(),
+        operation_id: LegacyNamedImportClaimRequestV1::operation_id(
+            request.binding_ref,
+            Uuid::parse_str(&armed.receipt.arm_id).unwrap(),
+        ),
         helper_id: helper_id.to_string(),
         emitter_id: Uuid::new_v4().to_string(),
         arm_receipt: armed.receipt.clone(),
@@ -1458,6 +1462,107 @@ async fn legacy_named_import_arm_preserves_its_prefix_and_closes_manual_claims()
     assert_eq!(store.head().unwrap(), armed.receipt.audit_seq);
     assert_eq!(store.worker_quota(&quota).unwrap().held_workers, 1);
 
+    let named_claim = LegacyNamedImportClaimRequestV1 {
+        version: 1,
+        binding_ref: request.binding_ref,
+        namespace: namespace.clone(),
+        claim,
+    };
+    let Some(AuthenticatedWorkload::Broker(other_broker)) =
+        store.authenticate_workload_token(OTHER_BROKER).unwrap()
+    else {
+        panic!("fixture second broker identity");
+    };
+    assert!(
+        store
+            .read_legacy_named_import_claim(&broker, &named_claim)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        store
+            .claim_legacy_named_import(&other_broker, &named_claim)
+            .unwrap_err()
+            .downcast_ref::<ControlFailure>(),
+        Some(&ControlFailure::NotFound)
+    );
+    let mut divergent_claim = named_claim.clone();
+    divergent_claim.claim.arm_receipt.audit_hash = "e".repeat(64);
+    assert_eq!(
+        store
+            .claim_legacy_named_import(&broker, &divergent_claim)
+            .unwrap_err()
+            .downcast_ref::<ControlFailure>(),
+        Some(&ControlFailure::Conflict)
+    );
+    let mut expired_clock_claim = named_claim.clone();
+    expired_clock_claim.claim.clock_check.continuous_ns_decimal = arm.deadline_ns_decimal.clone();
+    assert_eq!(
+        store
+            .claim_legacy_named_import(&broker, &expired_clock_claim)
+            .unwrap_err()
+            .downcast_ref::<ControlFailure>(),
+        Some(&ControlFailure::InvalidRequest)
+    );
+    *store.named_control_commit_observation.lock().unwrap() = Some(expiry);
+    assert_eq!(
+        store
+            .claim_legacy_named_import(&broker, &named_claim)
+            .unwrap_err()
+            .downcast_ref::<ControlFailure>(),
+        Some(&ControlFailure::NotFound)
+    );
+    assert!(
+        store
+            .read_legacy_named_import_claim(&broker, &named_claim)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(store.head().unwrap(), armed.receipt.audit_seq);
+    let committed_claim = store
+        .claim_legacy_named_import(&broker, &named_claim)
+        .unwrap();
+    assert!(matches!(
+        committed_claim.disposition,
+        ClaimDispositionV1::EmitOnce
+    ));
+    assert_eq!(
+        committed_claim.receipt.audit_seq,
+        armed.receipt.audit_seq + 1
+    );
+    assert_eq!(
+        committed_claim.receipt.input_hash,
+        named_claim.input_hash().unwrap()
+    );
+    assert_eq!(
+        committed_claim.receipt.worker_id.as_deref(),
+        Some(prepared.worker_id.as_str())
+    );
+    assert_eq!(committed_claim.receipt.revision, None);
+    assert_eq!(store.head().unwrap(), committed_claim.receipt.audit_seq);
+    assert_eq!(store.worker_quota(&quota).unwrap().held_workers, 1);
+    assert_eq!(
+        serde_json::to_value(store.worker(&prepared.worker_id).unwrap().unwrap()).unwrap(),
+        serde_json::to_value(&prepared).unwrap(),
+    );
+    assert_eq!(
+        store
+            .claim_helper_start(&named_claim.claim)
+            .unwrap_err()
+            .downcast_ref::<ControlFailure>(),
+        Some(&ControlFailure::Conflict)
+    );
+    let mut changed_emitter = named_claim.clone();
+    changed_emitter.claim.emitter_id = Uuid::new_v4().to_string();
+    assert_eq!(
+        store
+            .claim_legacy_named_import(&broker, &changed_emitter)
+            .unwrap_err()
+            .downcast_ref::<ControlFailure>(),
+        Some(&ControlFailure::Conflict)
+    );
+    assert_eq!(store.head().unwrap(), committed_claim.receipt.audit_seq);
+
     credential.active = false;
     credential.revision += 1;
     let revoked = store
@@ -1474,6 +1579,28 @@ async fn legacy_named_import_arm_preserves_its_prefix_and_closes_manual_claims()
     drop(store);
 
     let reopened = Arc::new(f.reopen());
+    for replay in [
+        reopened
+            .claim_legacy_named_import(&broker, &named_claim)
+            .unwrap(),
+        reopened
+            .read_legacy_named_import_claim(&broker, &named_claim)
+            .unwrap()
+            .unwrap(),
+    ] {
+        assert!(matches!(
+            replay.disposition,
+            ClaimDispositionV1::AlreadyConsumed
+        ));
+        assert_eq!(replay.receipt, committed_claim.receipt);
+    }
+    assert_eq!(
+        reopened
+            .read_legacy_named_import_claim(&other_broker, &named_claim)
+            .unwrap_err()
+            .downcast_ref::<ControlFailure>(),
+        Some(&ControlFailure::NotFound)
+    );
     assert_eq!(
         write(&reopened, &namespace, &wrong_receipt)
             .unwrap_err()
