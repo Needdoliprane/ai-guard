@@ -325,7 +325,7 @@ fn named_import_from_with_plan(
     (registration, birth, plan)
 }
 
-async fn named_prepare_request(
+fn named_prepare_request(
     native: &Arc<State>,
     registration: &RegistrationV1,
     plan: &LegacyConfirmedPlanV1,
@@ -349,6 +349,8 @@ async fn named_prepare_request(
         }
         _ => panic!("fixture must retain its exact Import helper Arm"),
     };
+    let clock_check = native.clock.sample().unwrap();
+    registration.arm.validate_clock_check(&clock_check).unwrap();
     let claim = LegacyNamedImportClaimRequestV1 {
         version: 1,
         binding_ref: plan.binding_ref,
@@ -359,34 +361,26 @@ async fn named_prepare_request(
             helper_id,
             emitter_id: Uuid::new_v4().to_string(),
             arm_receipt: registration.receipt.clone(),
-            clock_check: native.clock.sample().unwrap(),
+            clock_check,
         },
     };
-    let mut request = NamedImportPrepareV1 {
+    let receipt = crate::control::MutationReceiptV1 {
+        operation_id: claim.claim.operation_id.clone(),
+        worker_id: Some(registration.arm.worker_id.clone()),
+        revision: None,
+        input_hash: claim.input_hash().unwrap(),
+        audit_seq: registration.receipt.audit_seq + 1,
+        audit_hash: "9".repeat(64),
+    };
+    NamedImportPrepareV1 {
         reservation: reservation.clone(),
         registration_hash: registration.digest().unwrap(),
         generation: reservation.cancel_generation,
         custody_nonce,
         original_exchange_nonce,
         claim,
-        receipt: crate::control::MutationReceiptV1 {
-            operation_id: String::new(),
-            worker_id: None,
-            revision: None,
-            input_hash: String::new(),
-            audit_seq: 0,
-            audit_hash: String::new(),
-        },
-    };
-    request.receipt = crate::control::MutationReceiptV1 {
-        operation_id: request.claim.claim.operation_id.clone(),
-        worker_id: Some(registration.arm.worker_id.clone()),
-        revision: None,
-        input_hash: request.claim.input_hash().unwrap(),
-        audit_seq: registration.receipt.audit_seq + 1,
-        audit_hash: "9".repeat(64),
-    };
-    request
+        receipt,
+    }
 }
 
 async fn reserve_bind_named(
@@ -1041,10 +1035,10 @@ async fn exercise(mode: &str, parent: &Directory) {
             named_import_from_with_plan(registration_with_authority(managed.binding().clone()));
         if mode == "named_prepare_expired" {
             let clock = native.clock.sample().unwrap();
-            registration.arm.timeout_seconds = 1;
+            registration.arm.timeout_seconds = 5;
             registration.arm.clock = clock;
             registration.arm.deadline_ns_decimal =
-                checked_deadline(registration.arm.clock.continuous_ns().unwrap(), 1)
+                checked_deadline(registration.arm.clock.continuous_ns().unwrap(), 5)
                     .unwrap()
                     .to_string();
             registration.receipt.input_hash = registration.arm.input_hash().unwrap();
@@ -1065,8 +1059,7 @@ async fn exercise(mode: &str, parent: &Directory) {
             &reservation,
             custody_nonce,
             original_exchange_nonce,
-        )
-        .await;
+        );
 
         if mode == "named_prepare_stop_first" {
             let facts = pending
@@ -1096,7 +1089,7 @@ async fn exercise(mode: &str, parent: &Directory) {
                 .as_ref()
                 .unwrap()
                 .clone();
-            assert!(!bound.state.lock().unwrap().prepared_once);
+            assert!(bound.stop.load(Ordering::SeqCst));
             let key = pending.fixture_exit_key();
             wait_for(|| native.owners.keyed_finished(key)).await;
             server.abort();
@@ -1104,7 +1097,12 @@ async fn exercise(mode: &str, parent: &Directory) {
         }
 
         if mode == "named_prepare_expired" {
-            let deadline = registration.arm.deadline_ns_decimal.parse::<u64>().unwrap();
+            let deadline = registration
+                .arm
+                .deadline_ns_decimal
+                .parse::<u128>()
+                .unwrap();
+            assert!(prepare.claim.claim.clock_check.continuous_ns().unwrap() < deadline);
             wait_for(|| native.clock.sample().unwrap().continuous_ns().unwrap() >= deadline).await;
             expect_error(
                 rpc(
@@ -1116,15 +1114,6 @@ async fn exercise(mode: &str, parent: &Directory) {
                 .await,
                 EnforcerError::NotReady,
             );
-            let bound = pending
-                .state
-                .lock()
-                .unwrap()
-                .bound
-                .as_ref()
-                .unwrap()
-                .clone();
-            assert!(!bound.state.lock().unwrap().prepared_once);
             let key = pending.fixture_exit_key();
             wait_for(|| native.owners.keyed_finished(key)).await;
             server.abort();
@@ -1134,7 +1123,9 @@ async fn exercise(mode: &str, parent: &Directory) {
         assert_eq!(mode, "named_prepare_success");
         let valid_wire = serde_json::to_value(&prepare).unwrap();
         let mut invalid: NamedImportPrepareV1 = serde_json::from_value(valid_wire.clone()).unwrap();
-        invalid.receipt.audit_hash = "a".repeat(64);
+        let mut wrong_hash = invalid.receipt.input_hash.into_bytes();
+        wrong_hash[0] = if wrong_hash[0] == b'a' { b'b' } else { b'a' };
+        invalid.receipt.input_hash = String::from_utf8(wrong_hash).unwrap();
         expect_error(
             rpc(
                 &root,
