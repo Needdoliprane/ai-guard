@@ -7,7 +7,7 @@ use crate::{
         journal::{JournalError, JournalScopeV1, canonical},
         presence::http::{Client, Limits},
     },
-    control::{AdmissionRefusalV1, RuntimeKindV1, WorkerStateV1, WorkerV1, session_control::*},
+    control::{AdmissionRefusalV1, RuntimeKindV1, WorkerV1, session_control::*},
 };
 use reqwest::{Method, StatusCode};
 
@@ -300,7 +300,7 @@ pub(super) async fn cancel_reserved(
         .map_err(|_| PresenceError::AdmissionOutcomeUnknown)?;
     let result =
         serde_json::from_value(value).map_err(|_| PresenceError::AdmissionOutcomeUnknown)?;
-    validate_cancel_receipt(&request, reserved, &result)?;
+    validate_cancel_receipt(&request, &reserved, &result)?;
     presence
         .revalidate()
         .map_err(|_| PresenceError::AdmissionOutcomeUnknown)?;
@@ -309,25 +309,21 @@ pub(super) async fn cancel_reserved(
 
 fn validate_cancel_receipt(
     request: &LegacyNamedCancelReservationV1,
-    mut reserved: WorkerV1,
+    reserved: &WorkerV1,
     result: &MutationResultV1,
 ) -> Result<()> {
-    reserved.state = WorkerStateV1::Cancelled;
-    reserved.quota_held = false;
-    reserved.revision = reserved
-        .revision
-        .checked_add(1)
-        .ok_or(PresenceError::Protocol)?;
+    let expected = crate::audit::expected_worker_transition(reserved, &request.mutation)
+        .map_err(|_| PresenceError::Protocol)?;
     let receipt = &result.receipt;
     let input_hash = request.input_hash().map_err(|_| PresenceError::Protocol)?;
     if result.disposition.is_some()
         || receipt.operation_id != request.mutation.operation_id
-        || receipt.worker_id.as_deref() != Some(reserved.worker_id.as_str())
-        || receipt.revision != Some(reserved.revision)
+        || receipt.worker_id.as_deref() != Some(expected.worker_id.as_str())
+        || receipt.revision != Some(expected.revision)
         || receipt.input_hash != input_hash
         || receipt.audit_seq <= request.admission.audit_seq
         || crate::control::hash(&receipt.audit_hash).is_err()
-        || canonical(&reserved).map_err(named_write_error)?
+        || canonical(&expected).map_err(named_write_error)?
             != canonical(&result.worker).map_err(named_write_error)?
     {
         return Err(PresenceError::AdmissionOutcomeUnknown);
