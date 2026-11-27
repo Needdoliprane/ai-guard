@@ -1,6 +1,8 @@
 //! Session control contracts shared by the catalogue and launch.
 
-use super::{ControlFailure, bounded, content_hash, invalid, uuid};
+use super::{
+    ControlFailure, SupervisedAdmissionV1, bounded, conflict, content_hash, invalid, uuid,
+};
 use crate::identity::PrincipalRefV1;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -135,6 +137,51 @@ pub(crate) struct LegacyConfirmedPlanV1 {
     pub broker_profile_id: String,
     pub launch_spec_hash: String,
     pub expires_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Versioned input for the Legacy named admission transaction.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct LegacyNamedSupervisedAdmissionV1 {
+    pub version: u32,
+    pub binding_ref: Uuid,
+    pub broker_profile_id: String,
+    pub admission: SupervisedAdmissionV1,
+}
+
+impl std::fmt::Debug for LegacyNamedSupervisedAdmissionV1 {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("LegacyNamedSupervisedAdmissionV1(<private request>)")
+    }
+}
+
+impl LegacyNamedSupervisedAdmissionV1 {
+    pub(crate) fn validate(&self) -> anyhow::Result<()> {
+        invalid(self.version == 1 && !self.binding_ref.is_nil())?;
+        bounded(&self.broker_profile_id, 128)?;
+        self.admission.validate()
+    }
+
+    /// Request identity for admission and replay, including the exact binding.
+    pub(crate) fn input_hash(&self) -> anyhow::Result<String> {
+        self.validate()?;
+        content_hash("ai-guard:legacy-named-supervised-admission:v1", self)
+    }
+
+    /// Compare the admitted launch to the plan the Store resolved for the
+    /// authenticated broker within the checked transaction.
+    pub(crate) fn require_plan(&self, plan: &LegacyConfirmedPlanV1) -> anyhow::Result<()> {
+        self.validate()?;
+        let admission = &self.admission.admission;
+        conflict(
+            plan.version == 1
+                && self.binding_ref == plan.binding_ref
+                && self.broker_profile_id == plan.broker_profile_id
+                && canonical_uuid(&admission.operation_id)? == plan.operation_id
+                && canonical_uuid(&admission.launch.session_id)? == plan.session_id
+                && admission.launch.spec_hash()? == plan.launch_spec_hash,
+        )
+    }
 }
 
 /// The exact launch commit of one retained preparation. It names the launch
