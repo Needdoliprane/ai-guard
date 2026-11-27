@@ -1,5 +1,5 @@
 //! Explicit persistence capability for nominative preparation on Legacy SQLite.
-use super::*;
+use super::{control::supervision, *};
 use crate::{
     broker_registry::BrokerRuntimeKindV1,
     control::{RuntimeKindV1, session_control::ProvisionLegacySessionTargetV1},
