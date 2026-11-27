@@ -4,7 +4,8 @@ use super::*;
 use crate::{
     broker::clock::HostClock,
     broker::enforcer::{
-        ExecutionEnforcerV1, LegacyNamedProspectiveBind, LegacyNamedProspectiveBindAck, SlotPhaseV1,
+        ExecutionEnforcerV1, LegacyNamedImportPrepared, LegacyNamedProspectiveBind,
+        LegacyNamedProspectiveBindAck, SlotPhaseV1,
     },
     broker::presence::LegacyNamedAdmissionOutcome,
     control::{
@@ -149,8 +150,29 @@ impl PendingLegacyNamedImportClaim {
 #[allow(dead_code, reason = "the named Import start is composed separately")]
 pub(super) struct ConfirmedLegacyNamedImportClaim {
     bound: BoundLegacyNamedImport,
+    claim: NamedImportPrepareClaim,
+}
+
+/// One first claim confirmed by the Service and its Writer. The fields stay
+/// private to this module, so a reloaded request and receipt cannot mint it.
+pub(in crate::broker) struct NamedImportPrepareClaim {
     request: LegacyNamedImportClaimRequestV1,
     receipt: MutationReceiptV1,
+}
+
+impl NamedImportPrepareClaim {
+    pub(in crate::broker) fn into_parts(
+        self,
+    ) -> (LegacyNamedImportClaimRequestV1, MutationReceiptV1) {
+        (self.request, self.receipt)
+    }
+}
+
+/// The original Create ownership and its fresh native Prepare observation.
+#[allow(dead_code, reason = "the named Import start is composed separately")]
+pub(super) struct PreparedLegacyNamedImport {
+    created: CreatedLegacyNamedImport,
+    acknowledgement: LegacyNamedImportPrepared,
 }
 
 impl Service {
@@ -1018,8 +1040,54 @@ impl Service {
                     }
                     Ok(ConfirmedLegacyNamedImportClaim {
                         bound: pending.bound,
-                        request,
-                        receipt: acknowledged.receipt,
+                        claim: NamedImportPrepareClaim {
+                            request,
+                            receipt: acknowledged.receipt,
+                        },
+                    })
+                })
+                .map_err(|_| BrokerErrorCodeV1::Interrupted)?
+        }
+        .await;
+        job.result(result.as_ref().err().copied());
+        result
+    }
+
+    /// Consume the live confirmed claim at the original guardian.
+    #[allow(dead_code, reason = "the named Import start is composed separately")]
+    pub(super) async fn prepare_confirmed_legacy_named_import(
+        &self,
+        confirmed: ConfirmedLegacyNamedImportClaim,
+    ) -> Result<PreparedLegacyNamedImport, BrokerErrorCodeV1> {
+        let ConfirmedLegacyNamedImportClaim { bound, claim } = confirmed;
+        let BoundLegacyNamedImport {
+            created,
+            acknowledgement,
+        } = bound;
+        let job = Arc::clone(&created.admission.job);
+        let (cancel, generation) = acknowledgement.generation();
+        let cancel = cancel.clone();
+        let result = async {
+            require_generation(&cancel, generation)?;
+            self.validate_control().await?;
+            if self.recovery_only()
+                || self.stopping.load(Ordering::SeqCst)
+                || self.fenced.load(Ordering::SeqCst)
+            {
+                return Err(BrokerErrorCodeV1::NeedsReconciliation);
+            }
+            let acknowledgement = acknowledgement
+                .prepare_named_import(claim)
+                .await
+                .map_err(|_| BrokerErrorCodeV1::NeedsReconciliation)?;
+            cancel
+                .with_current_generation(generation, || {
+                    if self.stopping.load(Ordering::SeqCst) || self.fenced.load(Ordering::SeqCst) {
+                        return Err(BrokerErrorCodeV1::NeedsReconciliation);
+                    }
+                    Ok(PreparedLegacyNamedImport {
+                        created,
+                        acknowledgement,
                     })
                 })
                 .map_err(|_| BrokerErrorCodeV1::Interrupted)?

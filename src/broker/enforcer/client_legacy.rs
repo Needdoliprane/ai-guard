@@ -4,8 +4,12 @@ use crate::{
     broker::{
         journal::{AcceptedJobV1, canonical},
         lifecycle::LocalCommandRequestV1,
+        service::NamedImportPrepareClaim,
     },
-    control::{ArmResultV1, session_control::LegacyNamedImportArmRequestV1},
+    control::{
+        ArmResultV1, MutationReceiptV1,
+        session_control::{LegacyNamedImportArmRequestV1, LegacyNamedImportClaimRequestV1},
+    },
 };
 
 /// Result of one exact native attempt. A native refusal can report a site
@@ -61,6 +65,17 @@ pub(crate) struct LegacyNamedProspectiveBindAck {
     registration: RegistrationV1,
     status: EnforcerSlotStatusV1,
     owner: LegacyNamedProspectiveReservation,
+    original_exchange_nonce: Uuid,
+}
+
+/// Acknowledgement of the first native Prepare. The original custody stays
+/// with the observation. This type supplies no runtime operation.
+#[allow(dead_code, reason = "the named Import start is composed separately")]
+pub(in crate::broker) struct LegacyNamedImportPrepared {
+    bound: Box<LegacyNamedProspectiveBindAck>,
+    status: EnforcerSlotStatusV1,
+    claim: LegacyNamedImportClaimRequestV1,
+    receipt: MutationReceiptV1,
 }
 
 #[allow(
@@ -111,6 +126,158 @@ impl LegacyNamedProspectiveBindAck {
             .ok_or(EnforcerError::NotReady)?;
         entry.require_bound_custody(&self.owner.retained, self.owner.custody_nonce, &self.status)
     }
+
+    /// Consume the original Bind and the Service's confirmed first claim.
+    /// A lost or stale reply leaves reconciliation as the only continuation.
+    pub(in crate::broker) async fn prepare_named_import(
+        self: Box<Self>,
+        confirmed: NamedImportPrepareClaim,
+    ) -> Result<LegacyNamedImportPrepared, LegacyNamedProspectiveFailure> {
+        use LegacyNamedProspectiveFailure::{
+            BeforeSend, OutcomeUnknown, Refused, StaleAcknowledged,
+        };
+
+        self.require_live_custody().map_err(BeforeSend)?;
+        let (claim, receipt) = confirmed.into_parts();
+        let arm = self.registration.arm();
+        let attempt = Uuid::parse_str(&arm.attempt_id)
+            .map_err(|_| BeforeSend(EnforcerError::InvalidInput))?;
+        if self.original_exchange_nonce.is_nil()
+            || arm.operation_id
+                != LegacyNamedImportArmRequestV1::operation_id(claim.binding_ref, attempt)
+        {
+            return Err(BeforeSend(EnforcerError::Conflict));
+        }
+        claim
+            .validate_for_arm(
+                claim.binding_ref,
+                &self.registration.receipt().control_namespace_uuid,
+                arm,
+                self.registration.receipt(),
+            )
+            .and_then(|()| claim.validate_receipt(&receipt))
+            .map_err(|_| BeforeSend(EnforcerError::Conflict))?;
+        let client = self.owner.client.clone();
+        let generation = self.owner.retained.generation.clone();
+        let expected = self.owner.expected;
+        let reservation = self
+            .owner
+            .retained
+            .reservation
+            .lock()
+            .map_err(|_| BeforeSend(EnforcerError::Unhealthy))?
+            .clone()
+            .ok_or(BeforeSend(EnforcerError::NotReady))?;
+        reservation
+            .validate_for(
+                &self.owner.retained.target,
+                client.0.endpoint.epoch(),
+                expected,
+            )
+            .map_err(BeforeSend)?;
+
+        let clock = NativeHostClock::new().map_err(|_| BeforeSend(EnforcerError::Unhealthy))?;
+        let before = clock
+            .sample()
+            .map_err(|_| BeforeSend(EnforcerError::Unhealthy))?;
+        arm.validate_clock_check(&before)
+            .map_err(|_| BeforeSend(EnforcerError::NotReady))?;
+        let before_ns = before
+            .continuous_ns()
+            .map_err(|_| BeforeSend(EnforcerError::Unhealthy))?;
+        let claim_ns = claim
+            .claim
+            .clock_check
+            .continuous_ns()
+            .map_err(|_| BeforeSend(EnforcerError::InvalidInput))?;
+        if before_ns < claim_ns {
+            return Err(BeforeSend(EnforcerError::NotReady));
+        }
+        let reply = client
+            .0
+            .request_in_generation(
+                Request::PrepareNamedImport {
+                    request: Box::new(NamedImportPrepareV1 {
+                        reservation,
+                        registration_hash: self.status.registration_hash.clone(),
+                        generation: expected,
+                        custody_nonce: self.owner.custody_nonce,
+                        original_exchange_nonce: self.original_exchange_nonce,
+                        claim: claim.clone(),
+                        receipt: receipt.clone(),
+                    }),
+                },
+                IO_TIMEOUT,
+                Some((&generation, expected)),
+            )
+            .await?;
+        let status = match reply {
+            Response::Prepared { value } => *value,
+            Response::Error { code } => return Err(Refused(code.into())),
+            response => return Err(OutcomeUnknown(response_error(response))),
+        };
+        generation
+            .with_current_generation(expected, || {
+                client.0.try_check_health().map_err(StaleAcknowledged)?;
+                let now = clock
+                    .sample()
+                    .map_err(|_| StaleAcknowledged(EnforcerError::Unhealthy))?;
+                require_named_prepare_ack(
+                    &self.status,
+                    self.registration.arm(),
+                    &status,
+                    before_ns,
+                    &now,
+                )?;
+                Ok(LegacyNamedImportPrepared {
+                    bound: self,
+                    status,
+                    claim,
+                    receipt,
+                })
+            })
+            .map_err(StaleAcknowledged)?
+    }
+}
+
+fn require_named_prepare_ack(
+    bound: &EnforcerSlotStatusV1,
+    arm: &ArmV1,
+    prepared: &EnforcerSlotStatusV1,
+    before_ns: u128,
+    now: &HostClockSampleV1,
+) -> Result<(), LegacyNamedProspectiveFailure> {
+    use LegacyNamedProspectiveFailure::{OutcomeUnknown, StaleAcknowledged};
+
+    if prepared.arm_id != bound.arm_id
+        || prepared.registration_hash != bound.registration_hash
+        || prepared.generation != bound.generation
+        || prepared.phase != SlotPhaseV1::Ready
+        || !prepared.prepared_once
+    {
+        return Err(OutcomeUnknown(EnforcerError::Conflict));
+    }
+    let observed = prepared
+        .clock
+        .as_ref()
+        .ok_or(OutcomeUnknown(EnforcerError::Conflict))?;
+    arm.validate_clock_check(observed)
+        .map_err(|_| OutcomeUnknown(EnforcerError::Conflict))?;
+    let observed_ns = observed
+        .continuous_ns()
+        .map_err(|_| OutcomeUnknown(EnforcerError::Conflict))?;
+    if observed_ns < before_ns {
+        return Err(OutcomeUnknown(EnforcerError::Conflict));
+    }
+    arm.validate_clock_check(now)
+        .map_err(|_| StaleAcknowledged(EnforcerError::NotReady))?;
+    let now_ns = now
+        .continuous_ns()
+        .map_err(|_| StaleAcknowledged(EnforcerError::Unhealthy))?;
+    if now_ns < observed_ns || now_ns - observed_ns > HEALTH_WINDOW.as_nanos() {
+        return Err(StaleAcknowledged(EnforcerError::NotReady));
+    }
+    Ok(())
 }
 
 struct LegacyProspectiveEntry {
@@ -832,6 +999,7 @@ impl EnforcerClient {
                         registration,
                         status,
                         owner,
+                        original_exchange_nonce: original_nonce,
                     },
                 )))
             })
@@ -1001,6 +1169,61 @@ fn named_import_prepare_pin_requires_the_original_bound_custody() -> anyhow::Res
     assert_eq!(
         entry.require_bound_custody(&retained, custody_nonce, &bind),
         Err(EnforcerError::NotReady)
+    );
+    Ok(())
+}
+
+#[cfg(test)]
+#[test]
+fn named_prepare_requires_the_correlated_ack_and_fresh_arm_clock() -> anyhow::Result<()> {
+    use super::super::server::test_support::named_import_registration;
+    use LegacyNamedProspectiveFailure::{OutcomeUnknown, StaleAcknowledged};
+
+    let root = tempfile::tempdir()?;
+    let (registration, _) = named_import_registration(root.path());
+    let arm = registration.arm();
+    let bound = EnforcerSlotStatusV1 {
+        arm_id: registration.arm_id().into(),
+        registration_hash: registration.digest()?,
+        phase: SlotPhaseV1::Ready,
+        prepared_once: false,
+        generation: 1,
+        clock: None,
+        observation: None,
+        stop_failures: 0,
+    };
+    let before_ns = arm.clock.continuous_ns()? + 1;
+    let sample = |ns: u128| HostClockSampleV1 {
+        continuous_ns_decimal: ns.to_string(),
+        ..arm.clock.clone()
+    };
+    let prepared = EnforcerSlotStatusV1 {
+        prepared_once: true,
+        clock: Some(sample(before_ns + 1)),
+        ..bound.clone()
+    };
+    let now = sample(before_ns + 2);
+    require_named_prepare_ack(&bound, arm, &prepared, before_ns, &now)
+        .map_err(LegacyNamedProspectiveFailure::code)?;
+
+    let mut wrong_generation = prepared.clone();
+    wrong_generation.generation += 1;
+    assert_eq!(
+        require_named_prepare_ack(&bound, arm, &wrong_generation, before_ns, &now),
+        Err(OutcomeUnknown(EnforcerError::Conflict))
+    );
+    let old = EnforcerSlotStatusV1 {
+        clock: Some(arm.clock.clone()),
+        ..prepared.clone()
+    };
+    assert_eq!(
+        require_named_prepare_ack(&bound, arm, &old, before_ns, &now),
+        Err(OutcomeUnknown(EnforcerError::Conflict))
+    );
+    let stale = sample(before_ns + HEALTH_WINDOW.as_nanos() + 2);
+    assert_eq!(
+        require_named_prepare_ack(&bound, arm, &prepared, before_ns, &stale),
+        Err(StaleAcknowledged(EnforcerError::NotReady))
     );
     Ok(())
 }
