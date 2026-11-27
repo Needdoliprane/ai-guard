@@ -1444,7 +1444,7 @@ mod tests {
             assert_eq!(named_import.admission().plan(), &plan);
             assert!(equal(named_import.evidence().owned(), &owned)?);
             assert!(equal(named_import.evidence().arm(), &submitted.arm)?);
-            assert_eq!(named_import.evidence().receipt(), None);
+            assert!(named_import.evidence().receipt().is_none());
             assert_eq!(
                 named_import.evidence().handle_fingerprint(),
                 authority.fingerprint()
@@ -1480,10 +1480,11 @@ mod tests {
                 named_import.arm_pending_head()
             );
             assert_eq!(replayed_import.stop_head(), named_import.stop_head());
-            assert_eq!(
-                replayed_import.evidence().receipt(),
-                Some(&arm_result.receipt)
-            );
+            let projected_receipt = replayed_import
+                .evidence()
+                .receipt()
+                .expect("exact Arm receipt remains available after STOP");
+            assert!(equal(projected_receipt, &arm_result.receipt)?);
             let snapshot = writer.stops().recovery_status(operation).await?.unwrap();
             assert!(snapshot.incomplete());
             assert_eq!(snapshot.pending_arms(), 0);
