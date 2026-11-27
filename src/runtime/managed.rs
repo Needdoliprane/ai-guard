@@ -1759,7 +1759,6 @@ impl ManagedRuntime {
     /// Create and inspect the exact import helper under the live cancellation
     /// generation. The caller retains the durable preparation and owns any
     /// reconciliation when the create response or inspection is unavailable.
-    #[allow(dead_code, reason = "the named import runner is composed separately")]
     pub(crate) async fn create_owned_import_for_generation(
         &self,
         spec: &ContainerSpec,

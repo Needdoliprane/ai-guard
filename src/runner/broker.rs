@@ -8,14 +8,16 @@ use super::{
 };
 use crate::{
     broker::{
+        enforcer::CancelGeneration,
         intent::ExecutionIntentV1,
         journal::{AcceptedJobV1, BindingInputs, BindingKindV1, JournalError, JournalResult},
     },
-    control::{EgressLaunchV1, session_control::LegacyConfirmedLaunchSpecV1},
+    control::{EgressLaunchV1, WorkerV1, session_control::LegacyConfirmedLaunchSpecV1},
     control_fs::{Directory, PrivateFile},
     model::DecisionRequest,
+    runtime::ManagedRuntime,
 };
-use anyhow::{Result, anyhow, ensure};
+use anyhow::{Context, Result, anyhow, ensure};
 use sha2::{Digest, Sha256};
 use std::{fmt, path::Path};
 use uuid::Uuid;
@@ -25,7 +27,10 @@ use uuid::Uuid;
     reason = "the private named recovery caller is a separate G04 integration"
 )]
 pub(crate) use super::managed::reopen_legacy_named_archive;
-pub(crate) use super::managed::{LegacyNamedWorkspaceArchiveV1, retain_legacy_named_archive};
+pub(crate) use super::managed::{
+    LegacyNamedWorkspaceArchiveV1, broker_helper_spec, reopen_legacy_named_runtime,
+    retain_legacy_named_archive,
+};
 
 mod executor;
 pub(crate) use executor::{BatchExecutor, BatchOutcome, deliver_cancellation};
@@ -33,6 +38,35 @@ pub(crate) use executor::{BatchExecutor, BatchOutcome, deliver_cancellation};
 pub(crate) use executor::{
     ColdRecoverySeed, terminal_cleanup_jobs_for_test, terminal_pending_seed_for_cold_audit_test,
 };
+
+pub(crate) async fn create_import_volume(
+    runtime: &ManagedRuntime,
+    worker: &WorkerV1,
+    cancel: &CancelGeneration,
+    expected: u64,
+) -> Result<()> {
+    let namespace = worker
+        .attempt
+        .stable_name
+        .strip_prefix("aig-")
+        .and_then(|name| name.split('-').next())
+        .context("worker namespace is missing")?;
+    runtime
+        .create_named_volume_for_generation(
+            &worker.attempt.volume_name,
+            &[
+                (
+                    "agentsandbox.authority".into(),
+                    worker.launch.authority_id.clone(),
+                ),
+                ("agentsandbox.worker".into(), worker.worker_id.clone()),
+                ("agentsandbox.namespace".into(), namespace.into()),
+            ],
+            cancel,
+            expected,
+        )
+        .await
+}
 
 /// Live, single-use provenance from the executor's freshly acknowledged claim.
 /// There is deliberately no public constructor, Clone or serde implementation.

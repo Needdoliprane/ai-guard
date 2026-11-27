@@ -1,8 +1,11 @@
 //! Private named admission facts retained in the broker checkpoint.
 use super::*;
-use crate::control::session_control::{
-    LegacyConfirmedPlanV1, LegacyNamedAdmissionReceiptV1, LegacyNamedImportArmRequestV1,
-    LegacyNamedSupervisedAdmissionV1,
+use crate::{
+    control::session_control::{
+        LegacyConfirmedPlanV1, LegacyNamedAdmissionReceiptV1, LegacyNamedImportArmRequestV1,
+        LegacyNamedSupervisedAdmissionV1,
+    },
+    runtime::{RuntimeAuthority, RuntimeKind},
 };
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -29,7 +32,7 @@ pub(crate) struct LegacyNamedAdmissionCheckpoint {
         deserialize_with = "deserialize_present",
         skip_serializing_if = "Option::is_none"
     )]
-    import_creation: Option<Box<LegacyNamedImportCreationV1>>,
+    import_creation: Option<Box<LegacyNamedImportCreationCheckpoint>>,
 }
 
 fn deserialize_present<'de, D, T>(decoder: D) -> Result<Option<T>, D::Error>
@@ -60,9 +63,46 @@ impl LegacyNamedImportArmCheckpointV1 {
 /// records that creation may be issued, before any runtime observation exists.
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct LegacyNamedImportCreationV1 {
+struct LegacyNamedImportCreationCheckpoint {
     version: u32,
     preparation: HelperPreparationV1,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    authority: Option<LegacyNamedImportAuthorityV1>,
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LegacyNamedImportAuthorityV1 {
+    handle_fingerprint: String,
+    binding_hash: String,
+}
+
+impl LegacyNamedImportAuthorityV1 {
+    fn for_policy(
+        policy: &HelperExecutionPolicyV1,
+        binding: &RuntimeAuthority,
+    ) -> JournalResult<Self> {
+        let kind = match binding.kind {
+            RuntimeKind::Docker => RuntimeKindV1::Docker,
+            RuntimeKind::Podman => RuntimeKindV1::Podman,
+        };
+        ensure(
+            policy.authority_id == binding.authority_id.to_string()
+                && policy.runtime_kind == kind
+                && binding.invocation.is_some(),
+        )?;
+        Ok(Self {
+            handle_fingerprint: binding.fingerprint(),
+            binding_hash: checked(content_hash(
+                "ai-guard:legacy-named-import-runtime-binding:v1",
+                binding,
+            ))?,
+        })
+    }
 }
 
 /// The exact request and archive pinned by a V2 pending checkpoint.
@@ -161,12 +201,48 @@ impl LegacyNamedAdmissionCheckpoint {
     }
 
     #[allow(dead_code, reason = "the named create caller is composed separately")]
-    pub(crate) fn with_import_creation(mut self, helper_id: Uuid) -> JournalResult<Self> {
+    pub(crate) fn with_import_creation(
+        mut self,
+        helper_id: Uuid,
+        binding: &RuntimeAuthority,
+    ) -> JournalResult<Self> {
         ensure(self.import_creation.is_none() && self.import_arm.is_none())?;
-        self.import_creation = Some(Box::new(LegacyNamedImportCreationV1 {
-            version: 1,
-            preparation: self.import_preparation(helper_id)?,
+        let preparation = self.import_preparation(helper_id)?;
+        self.import_creation = Some(Box::new(LegacyNamedImportCreationCheckpoint {
+            version: 2,
+            authority: Some(LegacyNamedImportAuthorityV1::for_policy(
+                preparation.policy(),
+                binding,
+            )?),
+            preparation,
         }));
+        self.validate_shape(uuid(&self.plan.control_namespace_uuid)?)?;
+        Ok(self)
+    }
+
+    #[allow(dead_code, reason = "the named create caller is composed separately")]
+    pub(crate) fn with_import_owned(
+        mut self,
+        binding: &RuntimeAuthority,
+        owned: OwnedContainerSnapshot,
+    ) -> JournalResult<Self> {
+        let creation = self
+            .import_creation
+            .as_mut()
+            .ok_or(JournalError::Conflict)?;
+        let preparation = &creation.preparation;
+        let expected = LegacyNamedImportAuthorityV1::for_policy(preparation.policy(), binding)?;
+        ensure(creation.authority.as_ref() == Some(&expected))?;
+        if let Some(previous) = preparation.owned() {
+            ensure(equal(previous, &owned)?)?;
+            return Ok(self);
+        }
+        ensure(self.import_arm.is_none())?;
+        creation.preparation = HelperPreparationV1::new(
+            preparation.policy().clone(),
+            preparation.permission().clone(),
+            Some(owned),
+        )?;
         self.validate_shape(uuid(&self.plan.control_namespace_uuid)?)?;
         Ok(self)
     }
@@ -271,12 +347,38 @@ impl LegacyNamedAdmissionCheckpoint {
             validate_legacy_named_admission_receipt(namespace, &self.request, saved)?;
         }
         if let Some(creation) = &self.import_creation {
-            if creation.version != 1 {
-                return Err(JournalError::UnsupportedVersion);
+            let preparation = &creation.preparation;
+            match creation.version {
+                1 => ensure(creation.authority.is_none() && preparation.owned().is_none())?,
+                2 => {
+                    let authority = creation.authority.as_ref().ok_or(JournalError::Conflict)?;
+                    hash(&authority.binding_hash)?;
+                    hash(&authority.handle_fingerprint)?;
+                    if let Some(owned) = preparation.owned() {
+                        validation::helper_owned_context(
+                            owned,
+                            preparation.policy(),
+                            plan.session_id,
+                            &authority.handle_fingerprint,
+                        )?;
+                        let process = &owned.observation.process;
+                        ensure(
+                            process.running == Some(false)
+                                && matches!(
+                                    process.status.as_deref(),
+                                    Some("created" | "configured" | "initialized")
+                                )
+                                && process.started_at.is_none(),
+                        )?;
+                    }
+                }
+                _ => return Err(JournalError::UnsupportedVersion),
             }
-            let expected =
-                self.import_preparation(uuid(&creation.preparation.policy().helper_id)?)?;
-            ensure(equal(&creation.preparation, &expected)?)?;
+            let expected = self.import_preparation(uuid(&preparation.policy().helper_id)?)?;
+            ensure(
+                equal(preparation.policy(), expected.policy())?
+                    && equal(preparation.permission(), expected.permission())?,
+            )?;
         }
         if let Some(arm) = self.import_arm() {
             self.validate_import_arm(arm)?;
@@ -311,6 +413,18 @@ impl LegacyNamedAdmissionCheckpoint {
                         && matches!(permission.as_ref(), HelperPermissionV1::Admission { receipt } if receipt == &admission.admission.receipt)
                 ),
         )?;
+        if let Some(creation) = &self.import_creation
+            && creation.authority.is_some()
+        {
+            let owned = creation.preparation.owned().ok_or(JournalError::Conflict)?;
+            ensure(
+                owned.handle.id() == arm.inspection.container_id
+                    && owned.handle.authority_fingerprint() == arm.authority_binding_hash
+                    && owned.handle.fingerprint_version() == arm.configuration_fingerprint_version
+                    && owned.observation.configuration_fingerprint.as_deref()
+                        == Some(arm.configuration_fingerprint.as_str()),
+            )?;
+        }
         let prepare = WorkerMutationV1 {
             version: 1,
             operation_id: arm.operation_id.clone(),
@@ -346,14 +460,36 @@ impl LegacyNamedAdmissionCheckpoint {
                         && equal(&self.request, &old.request)?,
                 )?;
                 ensure(old.receipt.is_none() || equal(&self.receipt, &old.receipt)?)?;
-                if old.import_creation.is_some() {
-                    ensure(equal(&self.import_creation, &old.import_creation)?)?;
-                } else if self.import_creation.is_some() {
-                    ensure(
+                match (&old.import_creation, &self.import_creation) {
+                    (None, None) => {}
+                    (None, Some(new)) => ensure(
                         old.admission_result().is_some_and(|result| result.accepted)
                             && old.import_arm.is_none()
-                            && self.import_arm.is_none(),
-                    )?;
+                            && self.import_arm.is_none()
+                            && new.preparation.owned().is_none(),
+                    )?,
+                    (Some(previous), Some(current)) => {
+                        ensure(
+                            previous.version == current.version
+                                && previous.authority == current.authority
+                                && equal(
+                                    previous.preparation.policy(),
+                                    current.preparation.policy(),
+                                )?
+                                && equal(
+                                    previous.preparation.permission(),
+                                    current.preparation.permission(),
+                                )?,
+                        )?;
+                        let old_owned = previous.preparation.owned();
+                        let new_owned = current.preparation.owned();
+                        if old_owned.is_some() {
+                            ensure(equal(&old_owned, &new_owned)?)?;
+                        } else if new_owned.is_some() {
+                            ensure(old.import_arm.is_none() && self.import_arm.is_none())?;
+                        }
+                    }
+                    (Some(_), None) => return Err(JournalError::Conflict),
                 }
                 match (old.import_arm(), self.import_arm()) {
                     (None, None) => Ok(()),
@@ -845,6 +981,24 @@ mod tests {
         };
         let helper_id = Uuid::new_v4();
         let helper = helper_execution_policy_v1(&reserved, HelperPurposeV1::Import, helper_id)?;
+        // Private codec fixtures for a Created callback. No runtime is opened.
+        let unavailable = root.join("unavailable-runtime");
+        let authority: RuntimeAuthority = serde_json::from_value(json!({
+            "authority_id": helper.authority_id,
+            "kind": "docker",
+            "endpoint": format!("unix://{}", root.join("unavailable.sock").display()),
+            "engine_id": "import-fixture",
+            "invocation": {
+                "policy_version": 2, "kind": "docker",
+                "approved_entry": unavailable, "canonical_program": unavailable,
+                "file_identity": {
+                    "device": 1, "inode": 2, "owner": 0, "group": 0, "mode": 493,
+                    "length": 1, "sha256": "b".repeat(64)
+                },
+                "environment": {}, "cwd": root
+            },
+            "podman": null
+        }))?;
         let arm = ArmV1 {
             version: 1,
             operation_id: LegacyNamedImportArmRequestV1::operation_id(
@@ -878,7 +1032,7 @@ mod tests {
                 security_preset: helper.security_preset,
                 restart_policy: helper.restart_policy,
             },
-            authority_binding_hash: "8".repeat(64),
+            authority_binding_hash: authority.fingerprint(),
             configuration_fingerprint_version: 2,
             configuration_fingerprint: "9".repeat(64),
             clock: HostClockSampleV1 {
@@ -891,6 +1045,28 @@ mod tests {
             timeout_seconds: 120,
             deadline_ns_decimal: "220000000000".into(),
         };
+        let owned: OwnedContainerSnapshot = serde_json::from_value(json!({
+            "handle": {
+                "authority_fingerprint": arm.authority_binding_hash, "session": session,
+                "operation": helper_id, "id": arm.inspection.container_id,
+                "name": helper.stable_name, "configuration_fingerprint_version": 2
+            },
+            "observation": {
+                "id": arm.inspection.container_id, "name": helper.stable_name,
+                "image_id": helper.image_id, "restart_count": 0,
+                "process": {
+                    "status": "created", "running": false, "started_at": null,
+                    "finished_at": null, "exit_code": null, "oom_killed": false
+                },
+                "allocation": {
+                    "cpu": {"quota": 2, "period": 1}, "memory_bytes": helper.memory_bytes,
+                    "pids_limit": helper.pids_limit
+                },
+                "configuration_fingerprint": arm.configuration_fingerprint,
+                "configuration_fingerprint_version": 2,
+                "observed_at": "2026-11-27T00:00:00Z", "diagnostics": []
+            }
+        }))?;
         let arm_result = ArmResultV1 {
             replayed: true,
             arm: arm.clone(),
@@ -925,10 +1101,35 @@ mod tests {
             retained.import_arm().unwrap().receipt().unwrap(),
             &arm_result.receipt
         )?);
-        let latched = accepted.clone().with_import_creation(helper_id)?;
-        let other_latch = accepted.with_import_creation(Uuid::new_v4())?;
+        let latched = accepted
+            .clone()
+            .with_import_creation(helper_id, &authority)?;
+        let mut historical_latch = latched.clone();
+        let historical_creation = historical_latch.import_creation.as_mut().unwrap();
+        historical_creation.version = 1;
+        historical_creation.authority = None;
+        let historical_bytes = checkpoint(historical_latch)?.canonical_bytes()?;
+        let reopened = BrokerCheckpointV2::from_bytes(&historical_bytes)?;
+        assert_eq!(reopened.canonical_bytes()?, historical_bytes);
+        let historical_latch = reopened.supervision().legacy_named_admission().unwrap();
+        assert!(
+            historical_latch
+                .import_creation()
+                .unwrap()
+                .owned()
+                .is_none()
+        );
         assert!(matches!(
-            other_latch.clone().with_import_arm(arm.clone()),
+            historical_latch
+                .clone()
+                .with_import_owned(&authority, owned.clone()),
+            Err(JournalError::Conflict)
+        ));
+        let other_latch = accepted.with_import_creation(Uuid::new_v4(), &authority)?;
+        assert!(matches!(
+            other_latch
+                .clone()
+                .with_import_owned(&authority, owned.clone()),
             Err(JournalError::Conflict)
         ));
 
@@ -997,7 +1198,7 @@ mod tests {
                 ));
                 assert!(matches!(
                     writer
-                        .record_legacy_named_import_creation(&plan, &digest, helper_id)
+                        .record_legacy_named_import_creation(&plan, &digest, helper_id, &authority)
                         .await,
                     Err(JournalError::Interrupted)
                 ));
@@ -1015,9 +1216,30 @@ mod tests {
                 admitted.head()
             );
             let recorded_creation = writer
-                .record_legacy_named_import_creation(&plan, &digest, helper_id)
+                .record_legacy_named_import_creation(&plan, &digest, helper_id, &authority)
                 .await?;
-            let before_arm = recorded_creation.job().head();
+            assert!(matches!(
+                writer
+                    .record_legacy_named_import_arm(&plan, &digest, arm.clone())
+                    .await,
+                Err(JournalError::Conflict)
+            ));
+            assert_eq!(
+                writer.load(operation).await?.unwrap().head(),
+                recorded_creation.job().head()
+            );
+            writer
+                .acknowledge_legacy_named_import_creation(&plan, &digest, &authority, owned.clone())
+                .await?;
+            let before_arm = writer.load(operation).await?.unwrap();
+            let mut different_container = arm.clone();
+            different_container.inspection.container_id = "a".repeat(64);
+            assert!(matches!(
+                writer
+                    .record_legacy_named_import_arm(&plan, &digest, different_container)
+                    .await,
+                Err(JournalError::Conflict)
+            ));
             assert!(matches!(
                 writer
                     .record_legacy_named_import_arm(&plan, &"0".repeat(64), arm.clone())
@@ -1041,7 +1263,10 @@ mod tests {
                     .await,
                 Err(JournalError::Conflict)
             ));
-            assert_eq!(writer.load(operation).await?.unwrap().head(), before_arm);
+            assert_eq!(
+                writer.load(operation).await?.unwrap().head(),
+                before_arm.head()
+            );
             let (first, second) = tokio::join!(
                 writer.record_legacy_named_import_arm(&plan, &digest, arm.clone()),
                 writer.record_legacy_named_import_arm(&plan, &digest, arm.clone()),
@@ -1052,12 +1277,17 @@ mod tests {
                 _ => panic!("only one exact import Arm write may issue a ticket"),
             };
             let next = BrokerCheckpointV3::new(
-                checkpoint(latched.clone().with_import_arm(arm.clone())?)?,
+                checkpoint(
+                    latched
+                        .clone()
+                        .with_import_owned(&authority, owned.clone())?
+                        .with_import_arm(arm.clone())?,
+                )?,
                 Vec::new(),
             )?;
             assert!(matches!(
                 writer
-                    .advance_lifecycle(operation, before_arm.clone(), next)
+                    .advance_lifecycle(operation, before_arm.head().clone(), next)
                     .await,
                 Err(JournalError::Conflict)
             ));
@@ -1123,13 +1353,13 @@ mod tests {
         let before_creation = writer.load(operation).await?.unwrap();
         assert!(matches!(
             writer
-                .record_legacy_named_import_creation(&plan, &"0".repeat(64), helper_id)
+                .record_legacy_named_import_creation(&plan, &"0".repeat(64), helper_id, &authority)
                 .await,
             Err(JournalError::Conflict)
         ));
         let (first, second) = tokio::join!(
-            writer.record_legacy_named_import_creation(&plan, &digest, helper_id),
-            writer.record_legacy_named_import_creation(&plan, &digest, helper_id),
+            writer.record_legacy_named_import_creation(&plan, &digest, helper_id, &authority),
+            writer.record_legacy_named_import_creation(&plan, &digest, helper_id, &authority),
         );
         let recorded = match (first, second) {
             (Ok(recorded), Err(JournalError::Conflict))
@@ -1169,16 +1399,94 @@ mod tests {
             Err(JournalError::Conflict)
         ));
         assert_eq!(writer.load(operation).await?.unwrap().head(), creation_head);
-        let stop = writer
-            .stops()
-            .append_cancel(CancelInputV1::new(operation, Uuid::new_v4())?)
-            .await
-            .map_err(|failure| failure.error())?;
+        let mut invocation_changed = serde_json::to_value(&authority)?;
+        invocation_changed["invocation"]["cwd"] = json!(root.join("different-cwd"));
+        let invocation_changed: RuntimeAuthority = serde_json::from_value(invocation_changed)?;
+        assert_eq!(invocation_changed.fingerprint(), authority.fingerprint());
+        assert!(matches!(
+            writer
+                .acknowledge_legacy_named_import_creation(
+                    &plan,
+                    &digest,
+                    &invocation_changed,
+                    owned.clone(),
+                )
+                .await,
+            Err(JournalError::Conflict)
+        ));
+        let mut running = owned.clone();
+        running.observation.process.running = Some(true);
+        assert!(matches!(
+            writer
+                .acknowledge_legacy_named_import_creation(&plan, &digest, &authority, running)
+                .await,
+            Err(JournalError::Conflict)
+        ));
+        assert_eq!(writer.load(operation).await?.unwrap().head(), creation_head);
+        let mut different = serde_json::to_value(&owned)?;
+        different["handle"]["id"] = json!("a".repeat(64));
+        different["observation"]["id"] = json!("a".repeat(64));
+        let different: OwnedContainerSnapshot = serde_json::from_value(different)?;
+
+        // Queue both observation loads before STOP, then let STOP commit
+        // before polling either acknowledgement again.
+        let pause = writer.pause_for_test().await?;
+        let acknowledgement = writer.acknowledge_legacy_named_import_creation(
+            &plan,
+            &digest,
+            &authority,
+            owned.clone(),
+        );
+        tokio::pin!(acknowledgement);
+        assert!(futures_util::poll!(&mut acknowledgement).is_pending());
+        let conflicting =
+            writer.acknowledge_legacy_named_import_creation(&plan, &digest, &authority, different);
+        tokio::pin!(conflicting);
+        assert!(futures_util::poll!(&mut conflicting).is_pending());
+        let stops = writer.stops();
+        let cancellation = stops.append_cancel(CancelInputV1::new(operation, Uuid::new_v4())?);
+        tokio::pin!(cancellation);
+        assert!(futures_util::poll!(&mut cancellation).is_pending());
+        assert!(pause.is_paused());
+        drop(pause);
+        let stop = cancellation.await.map_err(|failure| failure.error())?;
         assert!(stop.incomplete());
         assert!(stop.named_reservation().is_none());
-        let snapshot = writer.stops().recovery_status(operation).await?.unwrap();
+        let snapshot = stops.recovery_status(operation).await?.unwrap();
         assert!(snapshot.incomplete());
         assert_eq!(snapshot.pending_arms(), 0);
+        let stopped_job = writer.load(operation).await?.unwrap();
+        assert_eq!(stopped_job.head().revision(), creation_head.revision() + 1);
+        acknowledgement.await?;
+        assert!(matches!(conflicting.await, Err(JournalError::Conflict)));
+        let owned_job = writer.load(operation).await?.unwrap();
+        assert_eq!(
+            owned_job.head().revision(),
+            stopped_job.head().revision() + 1
+        );
+        assert!(equal(
+            &owned_job.broker_checkpoint_v3().unwrap().commands(),
+            &stopped_job.broker_checkpoint_v3().unwrap().commands(),
+        )?);
+        let retained = writer.load_legacy_named_admission(operation).await?;
+        assert!(equal(
+            retained.import_creation().unwrap().owned().unwrap(),
+            &owned
+        )?);
+        assert!(retained.import_arm().is_none());
+        writer
+            .acknowledge_legacy_named_import_creation(&plan, &digest, &authority, owned.clone())
+            .await?;
+        assert_eq!(
+            writer.load(operation).await?.unwrap().head(),
+            owned_job.head()
+        );
+        assert!(matches!(
+            writer
+                .record_legacy_named_import_arm(&plan, &digest, arm)
+                .await,
+            Err(JournalError::Interrupted)
+        ));
         Ok(())
     }
 }

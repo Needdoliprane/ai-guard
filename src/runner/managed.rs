@@ -1523,6 +1523,75 @@ async fn selected_endpoint(options: &RunOptions, runtime: &Runtime) -> Result<St
     }
     docker_endpoint(runtime, None).await
 }
+
+fn legacy_authority_seed_name(
+    kind: RuntimeKind,
+    endpoint: &str,
+    invocation: &InvocationBindingV1,
+) -> String {
+    format!(
+        "{}-{}-{}.json",
+        kind,
+        &hex::encode(Sha256::digest(endpoint.as_bytes()))[..24],
+        &invocation.fingerprint()[..24],
+    )
+}
+
+/// Reopen the local authority already provisioned for the authenticated profile.
+/// A named launch cannot mint an authority or initialize an engine binding.
+pub(crate) async fn reopen_legacy_named_runtime(
+    material: &LegacyConfirmedLaunchSpecV1,
+    options: &RunOptions,
+    config: &crate::control_fs::Directory,
+    approved: &Runtime,
+) -> Result<ManagedRuntime> {
+    material.validate()?;
+    let launch = &material.launch;
+    let invocation = approved.invocation();
+    anyhow::ensure!(
+        config.path() == options.config_dir.as_path()
+            && options.runtime_endpoint.is_some()
+            && options.runtime_program.as_deref() == Some(invocation.approved_entry.as_path())
+            && options.runtime == approved.kind
+            && runtime_kind(options.runtime) == launch.runtime_kind,
+        "named launch runtime selection differs from the authorized profile"
+    );
+    let authority_id = crate::control::session_control::canonical_uuid(&launch.authority_id)?;
+    let endpoint = selected_endpoint(options, approved).await?;
+    let name = legacy_authority_seed_name(options.runtime, &endpoint, invocation);
+    let seed_file = config
+        .open_existing_child("authorities")?
+        .read_private_file(&name, crate::control_fs::MAX_PRIVATE_FILE_BYTES)
+        .context("named runtime authority seed is unavailable")?;
+    let seed: AuthoritySeed = serde_json::from_slice(seed_file.bytes())
+        .context("named runtime authority seed is invalid")?;
+    anyhow::ensure!(
+        seed.version == 1
+            && seed.authority_id == authority_id
+            && seed.kind == options.runtime
+            && seed.endpoint == endpoint
+            && seed.invocation.as_ref() == Some(invocation)
+            && seed.docker_launch_profile.is_none(),
+        "named runtime authority seed differs from the confirmed launch"
+    );
+    let binding = seed
+        .binding
+        .context("named runtime authority binding is absent")?;
+    anyhow::ensure!(
+        binding.authority_id == seed.authority_id
+            && binding.kind == seed.kind
+            && binding.endpoint == seed.endpoint
+            && binding.invocation == seed.invocation
+            && binding.docker_launch_profile.is_none(),
+        "named runtime authority binding differs from its seed"
+    );
+    exclude_project_runtime(approved, &options.project)?;
+    let runtime = ManagedRuntime::reopen_with_runtime(binding, approved.clone()).await?;
+    runtime.doctor(options.allow_rootful_runtime).await?;
+    seed_file.revalidate()?;
+    Ok(runtime)
+}
+
 async fn prepare_authority(
     plan: &RunPlan,
     approved: &Runtime,
@@ -1563,12 +1632,7 @@ async fn prepare_authority_for_launch(
         );
         launch_authority_seed_name(binding)?
     } else {
-        format!(
-            "{}-{}-{}.json",
-            plan.options.runtime,
-            &hex::encode(Sha256::digest(endpoint.as_bytes()))[..24],
-            &approved.invocation().fingerprint()[..24],
-        )
+        legacy_authority_seed_name(plan.options.runtime, &endpoint, approved.invocation())
     };
     let directory = Directory::root(&plan.options.config_dir)?.child("authorities")?;
     let mut seed = directory
@@ -2316,7 +2380,7 @@ pub(super) async fn broker_runtime(
     Ok(runtime)
 }
 
-pub(super) fn broker_helper_spec(policy: &HelperExecutionPolicyV1) -> Result<ContainerSpec> {
+pub(crate) fn broker_helper_spec(policy: &HelperExecutionPolicyV1) -> Result<ContainerSpec> {
     policy.validate()?;
     ContainerSpec::with_operation(
         Uuid::parse_str(&policy.session_id)?,
