@@ -46,7 +46,7 @@ fn fs<T>(value: anyhow::Result<T>) -> Result<T> {
 }
 fn encode(p: &PreparedPresence, value: &impl Serialize) -> Result<Vec<u8>> {
     let value = serde_json::to_value(value).map_err(|_| PresenceError::UnsafeState)?;
-    p.screen(&value)?;
+    p.authority.screen(&value)?;
     let bytes = serde_json::to_vec(&value).map_err(|_| PresenceError::UnsafeState)?;
     if bytes.len() as u64 > BYTES {
         return Err(PresenceError::Capacity);
@@ -61,7 +61,7 @@ fn read<T: for<'de> Deserialize<'de>>(
     let file = fs(root.persistent_read(name, BYTES, &[]))?.ok_or(PresenceError::UnsafeState)?;
     let value: Value =
         serde_json::from_slice(file.bytes()).map_err(|_| PresenceError::UnsafeState)?;
-    p.screen(&value)?;
+    p.authority.screen(&value)?;
     Ok((
         serde_json::from_slice(file.bytes()).map_err(|_| PresenceError::UnsafeState)?,
         file,
@@ -106,13 +106,13 @@ pub(super) fn validate_pending(p: &PreparedPresence, pending: &Pending) -> Resul
     if pending.version != 1
         || identity.version != 1
         || !matches!(identity.schema_version, 12 | 13)
-        || identity.tenant_id != p.scope.expected_tenant_id
-        || identity.control_namespace_uuid != p.scope.control_namespace_uuid.to_string()
-        || identity.broker_id != p.config.broker_id
-        || identity.credential_id != p.config.credential_id
-        || identity.incarnation_id != p.config.incarnation_id
-        || snapshot.authority.authority_id != p.config.authority_id
-        || snapshot.authority.runtime_kind != p.scope.runtime_kind
+        || identity.tenant_id != p.authority.scope.expected_tenant_id
+        || identity.control_namespace_uuid != p.authority.scope.control_namespace_uuid.to_string()
+        || identity.broker_id != p.authority.config.broker_id
+        || identity.credential_id != p.authority.config.credential_id
+        || identity.incarnation_id != p.authority.config.incarnation_id
+        || snapshot.authority.authority_id != p.authority.config.authority_id
+        || snapshot.authority.runtime_kind != p.authority.scope.runtime_kind
         || Store::broker_checkpoint_input_hash(identity, &pending.checkpoint)
             .map_err(|_| PresenceError::UnsafeState)?
             != pending.input_hash
@@ -171,11 +171,11 @@ impl Stream {
         let facts = fs(fs(root.try_clone_file())?.metadata().map_err(Into::into))?;
         let expected = Anchor {
             version: 1,
-            scope: p.scope.clone(),
-            broker_id: p.config.broker_id.clone(),
-            credential_id: p.config.credential_id.clone(),
-            incarnation_id: p.config.incarnation_id.clone(),
-            authority_id: p.config.authority_id.clone(),
+            scope: p.authority.scope.clone(),
+            broker_id: p.authority.config.broker_id.clone(),
+            credential_id: p.authority.config.credential_id.clone(),
+            incarnation_id: p.authority.config.incarnation_id.clone(),
+            authority_id: p.authority.config.authority_id.clone(),
             device: facts.dev(),
             inode: facts.ino(),
         };
@@ -223,7 +223,8 @@ impl Stream {
         Self::check_names(&entries)?;
         let count = entries.iter().filter(|e| e.directory).count();
         if count
-            > p.config
+            > p.authority
+                .config
                 .checkpoint_max_operations
                 .ok_or(PresenceError::InvalidConfig)? as usize
         {
@@ -325,7 +326,8 @@ impl Stream {
             .checkpoint_max_state_bytes
             .ok_or(PresenceError::InvalidConfig)?;
         if head.count
-            >= p.config
+            >= p.authority
+                .config
                 .checkpoint_max_operations
                 .ok_or(PresenceError::InvalidConfig)?
             || head

@@ -1,13 +1,10 @@
 //! Authenticated presence of the trusted service, independent of job admission.
 //! Local receipts are immutable recovery evidence, never execution authority.
 use crate::{
-    broker::{enforcer::CancelGeneration, writer::WriterClient},
+    broker::{enforcer::CancelGeneration, journal::CancelStopProjectionV1, writer::WriterClient},
     broker_registry::{BrokerAuthorityV1, BrokerRuntimeKindV1},
-    control::{
-        MutationResultV1,
-        session_control::{
-            LegacyConfirmedLaunchSpecV1, LegacyConfirmedPlanV1, LegacyNamedInitialDecisionV1,
-        },
+    control::session_control::{
+        LegacyConfirmedLaunchSpecV1, LegacyConfirmedPlanV1, LegacyNamedInitialDecisionV1,
     },
     control_fs::{Directory, PrivateFile},
     redaction::Redactor,
@@ -146,15 +143,19 @@ fn bytes_default() -> u64 {
     64 * 1024 * 1024
 }
 
-pub(crate) struct PreparedPresence {
+struct PresenceAuthority {
     scope: PresenceScope,
     config: PresenceConfigV1,
     files: Vec<PrivateFile>,
     roots: Vec<Directory>,
-    state: Directory,
     token: String,
     secrets: Vec<String>,
     ca: Option<PrivateFile>,
+}
+
+pub(crate) struct PreparedPresence {
+    authority: Arc<PresenceAuthority>,
+    state: Directory,
     stream: Option<storage::Stream>,
     checkpoint_state: Option<Directory>,
     checkpoint_stream: Option<checkpoint_storage::Stream>,
@@ -172,7 +173,7 @@ impl PreparedPresence {
     pub(crate) fn load(
         path: &Path,
         mut scope: PresenceScope,
-        known_secrets: Vec<String>,
+        mut known_secrets: Vec<String>,
     ) -> Result<Self> {
         normalized(path)?;
         let source =
@@ -268,34 +269,36 @@ impl PreparedPresence {
                 );
             }
         }
-        let mut prepared = Self {
-            scope,
-            config,
-            files,
-            roots,
+        known_secrets.push(token.clone());
+        let prepared = Self {
+            authority: Arc::new(PresenceAuthority {
+                scope,
+                config,
+                files,
+                roots,
+                token,
+                secrets: known_secrets,
+                ca,
+            }),
             state,
-            token,
-            secrets: known_secrets,
-            ca,
             stream: None,
             checkpoint_state,
             checkpoint_stream: None,
             #[cfg(test)]
             disk_barrier: None,
         };
-        prepared.secrets.push(prepared.token.clone());
-        prepared.screen_material()?;
+        prepared.authority.screen_material()?;
         prepared.revalidate()?;
         Ok(prepared)
     }
     pub(crate) fn protected_files(&self) -> Vec<PrivateFile> {
-        self.files.clone()
+        self.authority.files.clone()
     }
     pub(crate) fn protected_roots(&self) -> Vec<Directory> {
-        self.roots.clone()
+        self.authority.roots.clone()
     }
     pub(crate) fn secret_literals(&self) -> Vec<String> {
-        vec![self.token.clone()]
+        vec![self.authority.token.clone()]
     }
     /// The configured state directories, already opened read-only by `load`.
     /// The service compares them with owned journals; nothing is created here.
@@ -308,13 +311,20 @@ impl PreparedPresence {
         if self.stream.is_some() {
             return Err(PresenceError::UnsafeState);
         }
-        self.secrets.extend_from_slice(values);
-        self.secrets.sort();
-        self.secrets.dedup();
-        if self.secrets.len() > 64 || self.secrets.iter().any(|s| s.is_empty() || s.len() > 4096) {
+        let authority = Arc::get_mut(&mut self.authority).ok_or(PresenceError::UnsafeState)?;
+        authority.secrets.extend_from_slice(values);
+        authority.secrets.sort();
+        authority.secrets.dedup();
+        if authority.secrets.len() > 64
+            || authority
+                .secrets
+                .iter()
+                .any(|s| s.is_empty() || s.len() > 4096)
+        {
             return Err(PresenceError::InvalidConfig);
         }
-        self.screen_material()
+        authority
+            .screen_material()
             .map_err(|_| PresenceError::InvalidConfig)?;
         self.revalidate()?;
         self.stream = Some(storage::Stream::open(self)?);
@@ -324,6 +334,19 @@ impl PreparedPresence {
         Ok(())
     }
     pub(crate) fn revalidate(&self) -> Result<()> {
+        self.authority.revalidate()
+    }
+    pub(crate) fn named_control(&self) -> Result<LegacyNamedControl> {
+        if self.stream.is_none() || self.checkpoints_enabled() && self.checkpoint_stream.is_none() {
+            return Err(PresenceError::UnsafeState);
+        }
+        self.revalidate()?;
+        Ok(LegacyNamedControl(Arc::clone(&self.authority)))
+    }
+}
+
+impl PresenceAuthority {
+    fn revalidate(&self) -> Result<()> {
         for file in &self.files {
             file.revalidate()
                 .map_err(|_| PresenceError::UnsafeFilesystem)?;
@@ -333,89 +356,6 @@ impl PreparedPresence {
                 .map_err(|_| PresenceError::UnsafeFilesystem)?;
         }
         Ok(())
-    }
-    /// Read and validate the plan before the caller records its pending request.
-    #[allow(
-        dead_code,
-        reason = "the broker admission caller is a separate G04 integration"
-    )]
-    pub(crate) async fn read_legacy_confirmed_plan(
-        &self,
-        expected_broker_profile_id: &str,
-        binding_ref: Uuid,
-    ) -> Result<LegacyConfirmedPlanV1> {
-        self.revalidate()?;
-        legacy_named_admission::read_plan(self, expected_broker_profile_id, binding_ref).await
-    }
-    /// Read the target's exact launch parameters under the configured broker scope.
-    #[allow(
-        dead_code,
-        reason = "the broker admission caller is a separate G04 integration"
-    )]
-    pub(crate) async fn read_legacy_confirmed_launch_spec(
-        &self,
-        expected_broker_profile_id: &str,
-        binding_ref: Uuid,
-    ) -> Result<LegacyConfirmedLaunchSpecV1> {
-        self.revalidate()?;
-        legacy_named_admission::read_launch_spec(self, expected_broker_profile_id, binding_ref)
-            .await
-    }
-    /// Request the Initial decision for this material. To recover a lost
-    /// reply, explicitly call again with the same confirmation and material.
-    #[allow(
-        dead_code,
-        reason = "the broker admission caller is a separate G04 integration"
-    )]
-    pub(crate) async fn legacy_named_initial_decision(
-        &self,
-        writer: &WriterClient,
-        material: &LegacyConfirmedLaunchSpecV1,
-        generation: (&CancelGeneration, u64),
-    ) -> Result<LegacyNamedInitialDecisionV1> {
-        self.revalidate()?;
-        legacy_named_admission::initial_decision(self, writer, material, generation).await
-    }
-    /// Send the first admission only after the scoped Writer confirms it.
-    #[allow(
-        dead_code,
-        reason = "the broker admission caller is a separate G04 integration"
-    )]
-    pub(crate) async fn admit_legacy_named(
-        &self,
-        writer: &WriterClient,
-        material: &LegacyConfirmedLaunchSpecV1,
-        archive: (LegacyNamedWorkspaceArchiveV1, Directory),
-        generation: (&CancelGeneration, u64),
-    ) -> Result<LegacyNamedAdmissionOutcome> {
-        self.revalidate()?;
-        legacy_named_admission::admit(self, writer, material, archive, generation).await
-    }
-    /// Read a receipt for the exact retained request after a missed reply.
-    #[allow(
-        dead_code,
-        reason = "the broker admission caller is a separate G04 integration"
-    )]
-    pub(crate) async fn reconcile_legacy_named(
-        &self,
-        writer: &WriterClient,
-        operation: Uuid,
-    ) -> Result<Option<LegacyNamedAdmissionOutcome>> {
-        self.revalidate()?;
-        legacy_named_admission::reconcile(self, writer, operation).await
-    }
-    /// Reconcile a reservation already frozen by a confirmed broker STOP.
-    #[allow(
-        dead_code,
-        reason = "the named broker STOP caller is a separate G04 integration"
-    )]
-    pub(crate) async fn cancel_legacy_named_reservation(
-        &self,
-        writer: &WriterClient,
-        operation: Uuid,
-    ) -> Result<MutationResultV1> {
-        self.revalidate()?;
-        legacy_named_admission::cancel_reserved(self, writer, operation).await
     }
     fn screen_material(&self) -> Result<()> {
         let source = serde_json::from_slice::<Value>(self.files[0].bytes())
@@ -437,6 +377,94 @@ impl PreparedPresence {
     fn screen(&self, value: &Value) -> Result<()> {
         screen_with(&self.secrets, value)
     }
+}
+
+/// The same finalized private identity as the Legacy publisher. This handle
+/// can only make the named control exchanges and cannot publish presence.
+pub(crate) struct LegacyNamedControl(Arc<PresenceAuthority>);
+
+impl LegacyNamedControl {
+    /// Read and validate the plan before the caller records its pending request.
+    #[allow(
+        dead_code,
+        reason = "the broker admission caller is a separate G04 integration"
+    )]
+    pub(crate) async fn read_legacy_confirmed_plan(
+        &self,
+        expected_broker_profile_id: &str,
+        binding_ref: Uuid,
+    ) -> Result<LegacyConfirmedPlanV1> {
+        self.0.revalidate()?;
+        legacy_named_admission::read_plan(&self.0, expected_broker_profile_id, binding_ref).await
+    }
+    /// Read the target's exact launch parameters under the configured broker scope.
+    #[allow(
+        dead_code,
+        reason = "the broker admission caller is a separate G04 integration"
+    )]
+    pub(crate) async fn read_legacy_confirmed_launch_spec(
+        &self,
+        expected_broker_profile_id: &str,
+        binding_ref: Uuid,
+    ) -> Result<LegacyConfirmedLaunchSpecV1> {
+        self.0.revalidate()?;
+        legacy_named_admission::read_launch_spec(&self.0, expected_broker_profile_id, binding_ref)
+            .await
+    }
+    /// Request the Initial decision for this material. To recover a lost
+    /// reply, explicitly call again with the same confirmation and material.
+    #[allow(
+        dead_code,
+        reason = "the broker admission caller is a separate G04 integration"
+    )]
+    pub(crate) async fn legacy_named_initial_decision(
+        &self,
+        writer: &WriterClient,
+        material: &LegacyConfirmedLaunchSpecV1,
+        generation: (&CancelGeneration, u64),
+    ) -> Result<LegacyNamedInitialDecisionV1> {
+        self.0.revalidate()?;
+        legacy_named_admission::initial_decision(&self.0, writer, material, generation).await
+    }
+    /// Send the first admission only after the scoped Writer confirms it.
+    #[allow(
+        dead_code,
+        reason = "the broker admission caller is a separate G04 integration"
+    )]
+    pub(crate) async fn admit_legacy_named(
+        &self,
+        writer: &WriterClient,
+        material: &LegacyConfirmedLaunchSpecV1,
+        archive: (LegacyNamedWorkspaceArchiveV1, Directory),
+        generation: (&CancelGeneration, u64),
+    ) -> Result<LegacyNamedAdmissionOutcome> {
+        self.0.revalidate()?;
+        legacy_named_admission::admit(&self.0, writer, material, archive, generation).await
+    }
+    /// Read a receipt for the exact retained request after a missed reply.
+    #[allow(
+        dead_code,
+        reason = "the broker admission caller is a separate G04 integration"
+    )]
+    pub(crate) async fn reconcile_legacy_named(
+        &self,
+        writer: &WriterClient,
+        operation: Uuid,
+    ) -> Result<Option<LegacyNamedAdmissionOutcome>> {
+        self.0.revalidate()?;
+        legacy_named_admission::reconcile(&self.0, writer, operation).await
+    }
+    /// Reconcile a reservation already frozen by a confirmed broker STOP.
+    pub(crate) async fn cancel_legacy_named_reservation(
+        &self,
+        stop: &CancelStopProjectionV1,
+    ) -> Result<()> {
+        self.0.revalidate()?;
+        legacy_named_admission::cancel_reserved(&self.0, stop).await
+    }
+}
+
+impl PreparedPresence {
     // Closed presence run loop; production wiring pending.
     #[allow(dead_code)]
     pub(crate) async fn run(
@@ -453,23 +481,23 @@ impl PreparedPresence {
         attempts: Arc<Semaphore>,
         io: Arc<Semaphore>,
     ) -> Result<PresenceRunOwner> {
-        if self.config.version != 1 || self.checkpoint_stream.is_some() {
+        if self.authority.config.version != 1 || self.checkpoint_stream.is_some() {
             // Config V2 cannot silently run without its actual journal source.
             return Err(PresenceError::InvalidConfig);
         }
         run_owner::start(self, None, shutdown, attempts, io)
     }
     pub(crate) fn checkpoints_enabled(&self) -> bool {
-        self.config.version == 2
+        self.authority.config.version == 2
     }
     pub(crate) fn checkpoint_authority(&self) -> BrokerAuthorityV1 {
         BrokerAuthorityV1 {
-            authority_id: self.config.authority_id.clone(),
-            runtime_kind: self.scope.runtime_kind,
+            authority_id: self.authority.config.authority_id.clone(),
+            runtime_kind: self.authority.scope.runtime_kind,
         }
     }
     pub(crate) fn publication_interval(&self) -> std::time::Duration {
-        std::time::Duration::from_secs(u64::from(self.config.interval_seconds))
+        std::time::Duration::from_secs(u64::from(self.authority.config.interval_seconds))
     }
     // Closed presence run loop; production wiring pending.
     #[allow(dead_code)]

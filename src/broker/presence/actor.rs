@@ -71,7 +71,7 @@ pub(super) async fn run_owned(
     if p.stream.is_none() {
         return Err(PresenceError::UnsafeState);
     }
-    let client = http::Client::new(&p)?;
+    let client = http::Client::new(&p.authority)?;
     let mut binding_this_run: Option<u64> = None;
     loop {
         let mut short_backoffs = 0usize;
@@ -85,9 +85,9 @@ pub(super) async fn run_owned(
             .await?;
             let attempt = async {
                 let head = disk(&p, &io, shutdown, |p| stream(p)?.cached_head()).await?;
-                let identity = interrupt(shutdown, client.identity(&p)).await?;
-                let view = interrupt(shutdown, client.view(&p)).await?;
-                validate_handshake(&p, &identity, &view)?;
+                let identity = interrupt(shutdown, client.identity(&p.authority)).await?;
+                let view = interrupt(shutdown, client.view(&p.authority)).await?;
+                validate_handshake(&p.authority, &identity, &view)?;
                 if let Some(binding) = binding_this_run
                     && binding != identity.binding_revision
                 {
@@ -141,7 +141,7 @@ pub(super) async fn run_owned(
                     disk(&p, &io, shutdown, move |p| stream(p)?.append(p, pending)).await?;
                 }
                 let pending = disk(&p, &io, shutdown, |p| stream(p)?.revalidate_pending(p)).await?;
-                let result = interrupt(shutdown, client.post(&p, &pending)).await?;
+                let result = interrupt(shutdown, client.post(&p.authority, &pending)).await?;
                 storage::validate_result(&pending, &result)?;
                 disk(&p, &io, shutdown, move |p| {
                     stream(p)?.acknowledge(p, result)
@@ -158,7 +158,7 @@ pub(super) async fn run_owned(
                         short_backoffs += 1;
                         Duration::from_millis(millis)
                     } else {
-                        Duration::from_secs(u64::from(p.config.interval_seconds.min(30)))
+                        Duration::from_secs(u64::from(p.authority.config.interval_seconds.min(30)))
                     };
                     // Keep the same client, stream and pinned binding. A slow
                     // retry never starts another short burst before an ACK.
@@ -172,7 +172,10 @@ pub(super) async fn run_owned(
             }
         }
         interrupt(shutdown, async {
-            tokio::time::sleep(Duration::from_secs(u64::from(p.config.interval_seconds))).await;
+            tokio::time::sleep(Duration::from_secs(u64::from(
+                p.authority.config.interval_seconds,
+            )))
+            .await;
             Ok(())
         })
         .await?;
@@ -185,7 +188,7 @@ pub(super) fn same_grant(a: &BrokerV1, b: &BrokerV1) -> bool {
     a == *b
 }
 pub(super) fn validate_handshake(
-    p: &PreparedPresence,
+    p: &PresenceAuthority,
     identity: &BrokerIdentityViewV1,
     view: &BrokerViewV1,
 ) -> Result<()> {

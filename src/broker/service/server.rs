@@ -853,6 +853,19 @@ pub async fn serve_selected_owned(
     let presence_attempts = Arc::new(Semaphore::new(4));
     let presence_io = Arc::new(Semaphore::new(2));
     for (profile, presence) in prepared_presence {
+        let named_control = match &presence {
+            SelectedPresence::Legacy(legacy) => match legacy.named_control() {
+                Ok(control) => Some(control),
+                Err(error) => {
+                    if error.fences_admission() {
+                        service.fenced.store(true, Ordering::SeqCst);
+                    }
+                    log_presence_stopped(&profile, error, &service.material.literals);
+                    continue;
+                }
+            },
+            SelectedPresence::Owned(_) => None,
+        };
         let shutdown = presence_shutdown.subscribe();
         let attempts = Arc::clone(&presence_attempts);
         let io = Arc::clone(&presence_io);
@@ -874,6 +887,20 @@ pub async fn serve_selected_owned(
                 continue;
             }
         };
+        if let Some(control) = named_control {
+            let attached = service
+                .profile_jobs(&profile)
+                .is_ok_and(|jobs| jobs.named_control.set(control).is_ok());
+            if !attached {
+                service.fenced.store(true, Ordering::SeqCst);
+                log_presence_stopped(
+                    &profile,
+                    PresenceError::UnsafeState,
+                    &service.material.literals,
+                );
+                publication.stop();
+            }
+        }
         // Keep a strong owner outside the cancellable join observer. Shutdown
         // must join its admitted FS work before dropping the service lease.
         presence_owners.push(Arc::clone(&publication));
@@ -2385,7 +2412,7 @@ impl Service {
         #[cfg(test)]
         let operation = projection.operation_id();
         let receipt = projection.receipt().clone();
-        let incomplete = projection.incomplete();
+        let projection = Arc::new(projection);
         async {
             // Handler control-flow only, after the real confirmed projection.
             // This seam supplies no runtime observation or terminal fact.
@@ -2400,19 +2427,30 @@ impl Service {
                     return Err(BrokerErrorCodeV1::Conflict);
                 }
                 enforcer
-                    .deliver_projection(Arc::new(projection), cancel.current())
+                    .deliver_projection(Arc::clone(&projection), cancel.current())
                     .await
                     .map_err(|_| BrokerErrorCodeV1::NeedsReconciliation)
             } else {
-                deliver_cancellation(self.full_enforcer()?, scope, projection, cancel)
+                deliver_cancellation(self.full_enforcer()?, scope, &projection, cancel)
                     .await
                     .map_err(|_| BrokerErrorCodeV1::NeedsReconciliation)
             }
         }
         .await?;
-        // Known targets were attempted even when coverage was incomplete.
-        if incomplete {
+        // Known native targets were attempted even when coverage was incomplete.
+        if projection.incomplete() {
             return Err(BrokerErrorCodeV1::NeedsReconciliation);
+        }
+        if projection.named_reservation().is_some() {
+            let jobs = self.profile_jobs(scope.profile_id())?;
+            let control = jobs
+                .named_control
+                .get()
+                .ok_or(BrokerErrorCodeV1::NeedsReconciliation)?;
+            control
+                .cancel_legacy_named_reservation(&projection)
+                .await
+                .map_err(|_| BrokerErrorCodeV1::NeedsReconciliation)?;
         }
         Ok(receipt)
     }

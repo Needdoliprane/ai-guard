@@ -25,12 +25,12 @@ fn prepared(f: &preparation_tests::Fixture) -> PreparedPresence {
 fn pending(p: &PreparedPresence, schema: u32) -> checkpoint_storage::Pending {
     let identity = BrokerIdentityViewV1 {
         version: 1,
-        tenant_id: p.scope.expected_tenant_id.clone(),
-        control_namespace_uuid: p.scope.control_namespace_uuid.to_string(),
+        tenant_id: p.authority.scope.expected_tenant_id.clone(),
+        control_namespace_uuid: p.authority.scope.control_namespace_uuid.to_string(),
         schema_version: schema,
-        broker_id: p.config.broker_id.clone(),
-        incarnation_id: p.config.incarnation_id.clone(),
-        credential_id: p.config.credential_id.clone(),
+        broker_id: p.authority.config.broker_id.clone(),
+        incarnation_id: p.authority.config.incarnation_id.clone(),
+        credential_id: p.authority.config.credential_id.clone(),
         binding_revision: 1,
         grant_revision: 1,
     };
@@ -43,8 +43,8 @@ fn pending(p: &PreparedPresence, schema: u32) -> checkpoint_storage::Pending {
         snapshot: BrokerCheckpointSnapshotV1 {
             version: 1,
             authority: BrokerAuthorityV1 {
-                authority_id: p.config.authority_id.clone(),
-                runtime_kind: p.scope.runtime_kind,
+                authority_id: p.authority.config.authority_id.clone(),
+                runtime_kind: p.authority.scope.runtime_kind,
             },
             jobs: vec![BrokerJobCheckpointV1 {
                 job_id: Uuid::new_v4().to_string(),
@@ -71,8 +71,8 @@ fn view(p: &PreparedPresence, identity: &BrokerIdentityViewV1) -> BrokerCheckpoi
         credential_id: identity.credential_id.clone(),
         incarnation_id: identity.incarnation_id.clone(),
         authorities: vec![BrokerAuthorityV1 {
-            authority_id: p.config.authority_id.clone(),
-            runtime_kind: p.scope.runtime_kind,
+            authority_id: p.authority.config.authority_id.clone(),
+            runtime_kind: p.authority.scope.runtime_kind,
         }],
         lease_seconds: 60,
         not_after: "2100-01-01T00:00:00.000Z".into(),

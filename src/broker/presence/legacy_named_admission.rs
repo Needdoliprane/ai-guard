@@ -4,10 +4,10 @@ use super::*;
 use crate::{
     audit::legacy_session_prepare::LegacyNamedCancelReservationV1,
     broker::{
-        journal::{JournalError, JournalScopeV1, canonical},
+        journal::{CancelStopProjectionV1, JournalError, JournalScopeV1, canonical},
         presence::http::{Client, Limits},
     },
-    control::{AdmissionRefusalV1, RuntimeKindV1, WorkerV1, session_control::*},
+    control::{AdmissionRefusalV1, MutationResultV1, RuntimeKindV1, WorkerV1, session_control::*},
 };
 use reqwest::{Method, StatusCode};
 
@@ -40,7 +40,7 @@ enum AdmissionOperation {
 }
 
 pub(super) async fn read_plan(
-    presence: &PreparedPresence,
+    presence: &PresenceAuthority,
     expected_broker_profile_id: &str,
     binding_ref: Uuid,
 ) -> Result<LegacyConfirmedPlanV1> {
@@ -67,7 +67,7 @@ pub(super) async fn read_plan(
 }
 
 pub(super) async fn read_launch_spec(
-    presence: &PreparedPresence,
+    presence: &PresenceAuthority,
     expected_broker_profile_id: &str,
     binding_ref: Uuid,
 ) -> Result<LegacyConfirmedLaunchSpecV1> {
@@ -87,12 +87,12 @@ pub(super) async fn read_launch_spec(
 }
 
 pub(super) async fn initial_decision(
-    presence: &PreparedPresence,
+    presence: &PresenceAuthority,
     writer: &WriterClient,
     material: &LegacyConfirmedLaunchSpecV1,
     generation: (&CancelGeneration, u64),
 ) -> Result<LegacyNamedInitialDecisionV1> {
-    validate_writer_scope(presence, writer.scope())?;
+    validate_scope(presence, writer.scope())?;
     let binding_ref = material.plan.binding_ref;
     require_launch_scope(presence, binding_ref, material)?;
     writer
@@ -117,7 +117,7 @@ pub(super) async fn initial_decision(
 }
 
 async fn exchange_confirmation<T>(
-    presence: &PreparedPresence,
+    presence: &PresenceAuthority,
     method: Method,
     binding_ref: Uuid,
     suffix: &str,
@@ -161,13 +161,13 @@ async fn exchange_confirmation<T>(
 }
 
 pub(super) async fn admit(
-    presence: &PreparedPresence,
+    presence: &PresenceAuthority,
     writer: &WriterClient,
     material: &LegacyConfirmedLaunchSpecV1,
     (archive, config): (LegacyNamedWorkspaceArchiveV1, Directory),
     (cancel, expected_generation): (&CancelGeneration, u64),
 ) -> Result<Outcome> {
-    validate_writer_scope(presence, writer.scope())?;
+    validate_scope(presence, writer.scope())?;
     let plan = &material.plan;
     require_launch_scope(presence, plan.binding_ref, material)?;
     let client = Arc::new(Client::new(presence)?);
@@ -231,11 +231,11 @@ pub(super) async fn admit(
 }
 
 pub(super) async fn reconcile(
-    presence: &PreparedPresence,
+    presence: &PresenceAuthority,
     writer: &WriterClient,
     operation: Uuid,
 ) -> Result<Option<Outcome>> {
-    validate_writer_scope(presence, writer.scope())?;
+    validate_scope(presence, writer.scope())?;
     let retained = writer
         .load_legacy_named_admission(operation)
         .await
@@ -258,20 +258,43 @@ pub(super) async fn reconcile(
 }
 
 pub(super) async fn cancel_reserved(
-    presence: &PreparedPresence,
-    writer: &WriterClient,
-    operation: Uuid,
-) -> Result<MutationResultV1> {
-    validate_writer_scope(presence, writer.scope())?;
-    let (request, reserved) = writer
-        .retained_legacy_named_cancellation(operation)
-        .await
-        .map_err(|_| PresenceError::AdmissionOutcomeUnknown)?;
+    presence: &PresenceAuthority,
+    stop: &CancelStopProjectionV1,
+) -> Result<()> {
+    validate_scope(presence, stop.scope())?;
+    let reservation = stop.named_reservation().ok_or(PresenceError::Conflict)?;
+    let admission = reservation.admission();
+    let client = Arc::new(Client::new(presence)?);
+    checked_identity(&client, presence).await?;
+    let receipt = match admission.receipt() {
+        Some(acknowledgement) => acknowledgement.clone(),
+        None => {
+            let request = admission.request();
+            validate_plan(
+                presence,
+                stop.scope().profile_id(),
+                request,
+                admission.plan(),
+            )?;
+            // The reserve may still be in flight. A missing receipt from this
+            // read cannot be promoted to proof that there is no allocation.
+            send_request(&client, presence, request, Dispatch::Reconcile)
+                .await?
+                .ok_or(PresenceError::AdmissionOutcomeUnknown)?
+                .receipt()
+                .clone()
+        }
+    };
+    let cancellation = reservation
+        .cancellation(receipt)
+        .map_err(named_write_error)?;
+    stop.revalidate().map_err(named_write_error)?;
+    let Some((request, reserved)) = cancellation else {
+        return Ok(());
+    };
     let payload = serde_json::to_value(&request).map_err(|_| PresenceError::Protocol)?;
     presence.screen(&payload)?;
     let body = serde_json::to_vec(&request).map_err(|_| PresenceError::Protocol)?;
-    let client = Client::new(presence)?;
-    checked_identity(&client, presence).await?;
     presence.revalidate()?;
     let (status, bytes) = client
         .send_session_bounded(
@@ -303,7 +326,8 @@ pub(super) async fn cancel_reserved(
     presence
         .revalidate()
         .map_err(|_| PresenceError::AdmissionOutcomeUnknown)?;
-    Ok(result)
+    stop.revalidate().map_err(named_write_error)?;
+    Ok(())
 }
 
 fn validate_cancel_receipt(
@@ -330,7 +354,7 @@ fn validate_cancel_receipt(
     Ok(())
 }
 
-fn validate_writer_scope(presence: &PreparedPresence, scope: &JournalScopeV1) -> Result<()> {
+fn validate_scope(presence: &PresenceAuthority, scope: &JournalScopeV1) -> Result<()> {
     if scope.installation_id() != presence.scope.installation_id
         || scope.tenant_id() != presence.scope.expected_tenant_id
         || scope.gateway_origin() != presence.scope.gateway
@@ -384,7 +408,7 @@ enum Dispatch<'a> {
 
 async fn send_request(
     client: &Arc<Client>,
-    presence: &PreparedPresence,
+    presence: &PresenceAuthority,
     request: &LegacyNamedSupervisedAdmissionV1,
     dispatch: Dispatch<'_>,
 ) -> Result<Option<Outcome>> {
@@ -469,7 +493,7 @@ fn decode_receipt(
 }
 
 fn decode_confirmation(
-    presence: &PreparedPresence,
+    presence: &PresenceAuthority,
     status: StatusCode,
     bytes: &[u8],
     expected_statuses: &[StatusCode],
@@ -482,7 +506,7 @@ fn decode_confirmation(
     Ok(value)
 }
 
-fn require_unmasked_document(presence: &PreparedPresence, value: &Value) -> Result<()> {
+fn require_unmasked_document(presence: &PresenceAuthority, value: &Value) -> Result<()> {
     if Redactor::new(presence.secrets.clone()).value_unclipped(value) != *value {
         return Err(PresenceError::Protocol);
     }
@@ -490,7 +514,7 @@ fn require_unmasked_document(presence: &PreparedPresence, value: &Value) -> Resu
 }
 
 fn decode_launch_spec(
-    presence: &PreparedPresence,
+    presence: &PresenceAuthority,
     binding_ref: Uuid,
     status: StatusCode,
     bytes: &[u8],
@@ -504,7 +528,7 @@ fn decode_launch_spec(
 }
 
 fn require_launch_scope(
-    presence: &PreparedPresence,
+    presence: &PresenceAuthority,
     binding_ref: Uuid,
     material: &LegacyConfirmedLaunchSpecV1,
 ) -> Result<()> {
@@ -528,7 +552,7 @@ fn require_launch_scope(
 }
 
 fn decode_initial_decision(
-    presence: &PreparedPresence,
+    presence: &PresenceAuthority,
     material: &LegacyConfirmedLaunchSpecV1,
     status: StatusCode,
     bytes: &[u8],
@@ -563,7 +587,7 @@ fn decode_initial_decision(
 
 async fn checked_identity(
     client: &Client,
-    presence: &PreparedPresence,
+    presence: &PresenceAuthority,
 ) -> Result<crate::broker_registry::BrokerIdentityViewV1> {
     let identity = client.identity(presence).await?;
     let view = client.view(presence).await?;
@@ -572,7 +596,7 @@ async fn checked_identity(
 }
 
 fn validate_plan(
-    presence: &PreparedPresence,
+    presence: &PresenceAuthority,
     expected_broker_profile_id: &str,
     request: &LegacyNamedSupervisedAdmissionV1,
     plan: &LegacyConfirmedPlanV1,
@@ -783,7 +807,9 @@ mod tests {
     fn launch_spec_decoder_requires_exact_private_material() {
         let (_fixture, presence, mut material) = launch_material();
         let binding_ref = material.plan.binding_ref;
-        let decode = |body: &[u8]| decode_launch_spec(&presence, binding_ref, StatusCode::OK, body);
+        let decode = |body: &[u8]| {
+            decode_launch_spec(&presence.authority, binding_ref, StatusCode::OK, body)
+        };
         let body = serde_json::to_string(&material).unwrap();
         let decoded = decode(body.as_bytes()).unwrap();
         assert_eq!(decoded.plan, material.plan);
@@ -812,7 +838,7 @@ mod tests {
             decode(&serde_json::to_vec(&material).unwrap()),
             Err(PresenceError::Forbidden)
         ));
-        material.launch.authority_id = presence.config.authority_id.clone();
+        material.launch.authority_id = presence.authority.config.authority_id.clone();
         material
             .launch
             .command
@@ -864,8 +890,9 @@ mod tests {
             decision: Decision::new(PolicyOutcome::Deny, "fixture", "The policy refused."),
             replayed: false,
         };
-        let decode =
-            |status, bytes: &[u8]| decode_initial_decision(&presence, &material, status, bytes);
+        let decode = |status, bytes: &[u8]| {
+            decode_initial_decision(&presence.authority, &material, status, bytes)
+        };
         let fresh = serde_json::to_vec(&response).unwrap();
         let recorded = decode(StatusCode::CREATED, &fresh).unwrap();
         assert_eq!(recorded.decision.outcome, PolicyOutcome::Deny);

@@ -197,3 +197,30 @@ fn finalized_stream_holds_exclusive_lock_until_its_owner_is_dropped() {
     let mut reopened = PreparedPresence::load(&fixture.config, fixture.scope(), vec![]).unwrap();
     reopened.finalize(&[]).unwrap();
 }
+
+#[tokio::test]
+async fn named_control_retains_only_the_finalized_private_identity() {
+    let fixture = Fixture::new();
+    fixture.write_config();
+    let mut prepared = PreparedPresence::load(&fixture.config, fixture.scope(), vec![]).unwrap();
+    assert!(matches!(
+        prepared.named_control(),
+        Err(PresenceError::UnsafeState)
+    ));
+    prepared.finalize(&[OTHER_TOKEN.to_owned()]).unwrap();
+    let control = prepared.named_control().unwrap();
+    drop(prepared);
+
+    let authority = &control.0;
+    authority.revalidate().unwrap();
+    assert!(authority.screen_text(OTHER_TOKEN).is_err());
+    let token = fixture.root.join("broker-bearer");
+    fs::rename(&token, fixture.root.join("old-bearer")).unwrap();
+    private_file(&token, OWN_TOKEN.as_bytes());
+    assert!(matches!(
+        control
+            .read_legacy_confirmed_plan("fixture-profile", Uuid::new_v4())
+            .await,
+        Err(PresenceError::UnsafeFilesystem)
+    ));
+}

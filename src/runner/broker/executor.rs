@@ -364,7 +364,7 @@ impl BatchExecutor {
 pub(crate) async fn deliver_cancellation(
     enforcer: &ExecutionEnforcerV1,
     expected_scope: &JournalScopeV1,
-    projection: CancelStopProjectionV1,
+    projection: &CancelStopProjectionV1,
     cancel: &CancelGeneration,
 ) -> Result<()> {
     ensure!(

@@ -8,6 +8,7 @@ use crate::{
             AcceptedJobV1, JournalEntryKindV1, JournalEntryV1, JournalError, JournalStatusV1,
         },
         lifecycle::LocalCommandRequestV1,
+        presence::LegacyNamedControl,
         writer::ProfileWriterCapabilities,
     },
     control::DecisionReceiptV1,
@@ -106,6 +107,7 @@ impl BackgroundYield {
 
 pub(super) struct ProfileJobs {
     pub(super) writer: OnceCell<ProfileWriterCapabilities>,
+    pub(super) named_control: OnceCell<LegacyNamedControl>,
     identity: Arc<AsyncMutex<()>>,
     jobs: Mutex<BTreeMap<Uuid, Arc<Job>>>,
     retirement_audit_cursor: Mutex<Option<Uuid>>,
@@ -129,6 +131,7 @@ impl ProfileJobs {
     pub(super) fn new() -> Self {
         Self {
             writer: OnceCell::new(),
+            named_control: OnceCell::new(),
             identity: Arc::new(AsyncMutex::new(())),
             jobs: Mutex::new(BTreeMap::new()),
             retirement_audit_cursor: Mutex::new(None),

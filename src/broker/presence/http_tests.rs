@@ -768,15 +768,15 @@ async fn presence_uses_only_its_three_control_routes_with_the_same_durable_pendi
         .unwrap();
     let retained = fs::read(&pending_path).unwrap();
     let prepared = fixture.prepared();
-    let client = super::http::Client::new(&prepared).unwrap();
-    let identity = client.identity(&prepared).await.unwrap();
-    let view = client.view(&prepared).await.unwrap();
+    let client = super::http::Client::new(&prepared.authority).unwrap();
+    let identity = client.identity(&prepared.authority).await.unwrap();
+    let view = client.view(&prepared.authority).await.unwrap();
     let pending: super::storage::Pending = serde_json::from_slice(&retained).unwrap();
     assert_eq!(identity, pending.identity);
     assert_eq!(view.broker, pending.prior.broker);
     let before = fixture.store.head().unwrap();
-    let first = client.post(&prepared, &pending).await.unwrap();
-    let replay = client.post(&prepared, &pending).await.unwrap();
+    let first = client.post(&prepared.authority, &pending).await.unwrap();
+    let replay = client.post(&prepared.authority, &pending).await.unwrap();
     assert_eq!(first.receipt, replay.receipt);
     assert_eq!(fixture.store.head().unwrap(), before + 1);
     assert_eq!(fs::read(&pending_path).unwrap(), retained);
@@ -805,12 +805,12 @@ async fn presence_control_refusals_do_not_fall_back_or_change_the_pending() {
         let retained = fs::read(&pending_path).unwrap();
         let pending: super::storage::Pending = serde_json::from_slice(&retained).unwrap();
         let prepared = fixture.prepared();
-        let client = super::http::Client::new(&prepared).unwrap();
+        let client = super::http::Client::new(&prepared.authority).unwrap();
         *fixture.probe.transport_refusal.lock().unwrap() = Some(status);
         let before = fixture.store.head().unwrap();
-        assert!(client.identity(&prepared).await.is_err());
-        assert!(client.view(&prepared).await.is_err());
-        assert!(client.post(&prepared, &pending).await.is_err());
+        assert!(client.identity(&prepared.authority).await.is_err());
+        assert!(client.view(&prepared.authority).await.is_err());
+        assert!(client.post(&prepared.authority, &pending).await.is_err());
         assert_eq!(fixture.store.head().unwrap(), before);
         assert_eq!(fs::read(&pending_path).unwrap(), retained);
         assert_eq!(

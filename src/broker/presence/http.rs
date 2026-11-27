@@ -39,7 +39,7 @@ impl Limits {
     }
 }
 impl Client {
-    pub(super) fn new(p: &PreparedPresence) -> Result<Self> {
+    pub(super) fn new(p: &PresenceAuthority) -> Result<Self> {
         Self::build(&p.scope.gateway, p.ca.as_ref(), &p.token)
     }
     /// Protected transport shared by the legacy and owned profiles: exact
@@ -75,7 +75,7 @@ impl Client {
     }
     async fn exchange<T: DeserializeOwned>(
         &self,
-        p: &PreparedPresence,
+        p: &PresenceAuthority,
         path: &str,
         request: Option<Vec<u8>>,
     ) -> Result<T> {
@@ -83,7 +83,7 @@ impl Client {
     }
     async fn exchange_bounded<T: DeserializeOwned>(
         &self,
-        p: &PreparedPresence,
+        p: &PresenceAuthority,
         path: &str,
         request: Option<Vec<u8>>,
         limit: u64,
@@ -196,15 +196,15 @@ impl Client {
         }
         self.send_bounded(method, path, request, limits).await
     }
-    pub(super) async fn identity(&self, p: &PreparedPresence) -> Result<BrokerIdentityViewV1> {
+    pub(super) async fn identity(&self, p: &PresenceAuthority) -> Result<BrokerIdentityViewV1> {
         self.exchange(p, "/api/v1/brokers/identity", None).await
     }
-    pub(super) async fn view(&self, p: &PreparedPresence) -> Result<BrokerViewV1> {
+    pub(super) async fn view(&self, p: &PresenceAuthority) -> Result<BrokerViewV1> {
         self.exchange(p, "/api/v1/brokers/self", None).await
     }
     pub(super) async fn post(
         &self,
-        p: &PreparedPresence,
+        p: &PresenceAuthority,
         pending: &storage::Pending,
     ) -> Result<BrokerMutationResultV1> {
         self.exchange(
@@ -216,7 +216,7 @@ impl Client {
     }
     pub(super) async fn checkpoint_view(
         &self,
-        p: &PreparedPresence,
+        p: &PresenceAuthority,
     ) -> Result<crate::broker_registry::BrokerCheckpointViewV1> {
         self.exchange_bounded(
             p,
@@ -228,7 +228,7 @@ impl Client {
     }
     pub(super) async fn checkpoint_post(
         &self,
-        p: &PreparedPresence,
+        p: &PresenceAuthority,
         pending: &super::checkpoint_storage::Pending,
     ) -> Result<crate::broker_registry::BrokerCheckpointResultV1> {
         self.exchange_bounded(

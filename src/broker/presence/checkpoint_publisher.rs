@@ -107,7 +107,7 @@ pub(super) async fn run(
     attempts: Arc<Semaphore>,
     io: Arc<Semaphore>,
 ) -> Result<()> {
-    let client = http::Client::new(&p)?;
+    let client = http::Client::new(&p.authority)?;
     let mut binding_this_run = None;
     let mut next = snapshots.borrow_and_update().clone();
     let mut source_ready = true;
@@ -132,8 +132,8 @@ pub(super) async fn run(
                 continue;
             };
             snapshot.validate().map_err(|_| PresenceError::Protocol)?;
-            if snapshot.authority.authority_id != p.config.authority_id
-                || snapshot.authority.runtime_kind != p.scope.runtime_kind
+            if snapshot.authority.authority_id != p.authority.config.authority_id
+                || snapshot.authority.runtime_kind != p.authority.scope.runtime_kind
             {
                 return Err(PresenceError::Forbidden);
             }
@@ -149,8 +149,8 @@ pub(super) async fn run(
             .await?;
             let attempt = async {
                 let head = actor::disk(&p, &io, shutdown, |p| stream(p)?.checked_head(p)).await?;
-                let identity = actor::interrupt(shutdown, client.identity(&p)).await?;
-                let view = actor::interrupt(shutdown, client.checkpoint_view(&p)).await?;
+                let identity = actor::interrupt(shutdown, client.identity(&p.authority)).await?;
+                let view = actor::interrupt(shutdown, client.checkpoint_view(&p.authority)).await?;
                 validate_remote(&p, &identity, &view, &head)?;
                 if binding_this_run.is_some_and(|binding| binding != identity.binding_revision) {
                     return Err(PresenceError::Conflict);
@@ -187,7 +187,8 @@ pub(super) async fn run(
                 })
                 .await?;
                 let result =
-                    actor::interrupt(shutdown, client.checkpoint_post(&p, &pending)).await?;
+                    actor::interrupt(shutdown, client.checkpoint_post(&p.authority, &pending))
+                        .await?;
                 checkpoint_storage::validate_result(&pending, &result)?;
                 actor::disk(&p, &io, shutdown, move |p| {
                     stream(p)?.acknowledge(p, result)
@@ -204,7 +205,7 @@ pub(super) async fn run(
                         backoff += 1;
                         Duration::from_millis(millis)
                     } else {
-                        Duration::from_secs(u64::from(p.config.interval_seconds.min(30)))
+                        Duration::from_secs(u64::from(p.authority.config.interval_seconds.min(30)))
                     };
                     actor::interrupt(shutdown, async {
                         tokio::time::sleep(delay).await;

@@ -4,8 +4,15 @@
 //! fresh-start permission, credential handoff or enforcer registration.
 use super::*;
 use crate::{
-    broker::{checkpoint::SupervisionOperationV1, lifecycle::LocalCommandRequestV1},
-    control::{ArmReceiptV1, ArmSubjectV1, ArmV1, WorkerTransitionV1},
+    audit::legacy_session_prepare::LegacyNamedCancelReservationV1,
+    broker::{
+        checkpoint::{LegacyNamedAdmissionCheckpoint, SupervisionOperationV1},
+        lifecycle::LocalCommandRequestV1,
+    },
+    control::{
+        ArmReceiptV1, ArmSubjectV1, ArmV1, WorkerMutationV1, WorkerTransitionV1, WorkerV1,
+        session_control::LegacyNamedAdmissionReceiptV1,
+    },
     runtime::{OwnedContainerSnapshot, RuntimeAuthority},
 };
 use std::sync::{
@@ -85,7 +92,48 @@ pub struct CancelStopProjectionV1 {
     receipt: LocalCommandReceiptV1,
     stops: Vec<RecoveredStopV1>,
     cancel_prefixes: Vec<ConfirmedCancelPrefixV1>,
+    named_reservation: Option<Box<NamedReservationStop>>,
     incomplete: bool,
+}
+
+/// A confirmed STOP against a named admission before any preparation intent.
+pub(in crate::broker) struct NamedReservationStop {
+    admission: LegacyNamedAdmissionCheckpoint,
+    cancellation_id: String,
+}
+
+impl NamedReservationStop {
+    pub(in crate::broker) fn admission(&self) -> &LegacyNamedAdmissionCheckpoint {
+        &self.admission
+    }
+
+    pub(in crate::broker) fn cancellation(
+        &self,
+        receipt: LegacyNamedAdmissionReceiptV1,
+    ) -> JournalResult<Option<(LegacyNamedCancelReservationV1, WorkerV1)>> {
+        let confirmed = self.admission.clone().acknowledge(receipt)?;
+        let receipt = confirmed.receipt().ok_or(JournalError::Corrupt)?;
+        let Some(reserved) = &receipt.admission.worker else {
+            // The exact admission was refused. There is no quota to release.
+            return Ok(None);
+        };
+        let request = LegacyNamedCancelReservationV1 {
+            version: 1,
+            binding_ref: confirmed.plan().binding_ref,
+            namespace: confirmed.plan().control_namespace_uuid.clone(),
+            admission: receipt.admission.receipt.clone(),
+            mutation: WorkerMutationV1 {
+                version: 1,
+                operation_id: self.cancellation_id.clone(),
+                worker_id: reserved.worker_id.clone(),
+                attempt_id: reserved.attempt.attempt_id.clone(),
+                expected_revision: reserved.revision,
+                transition: WorkerTransitionV1::CancelReserved,
+            },
+        };
+        request.input_hash().map_err(|_| JournalError::Conflict)?;
+        Ok(Some((request, reserved.clone())))
+    }
 }
 
 /// Metadata attested by the existing reader's verified revision chain. This
@@ -183,6 +231,9 @@ impl StopJobSnapshotV1 {
 }
 
 impl CancelStopProjectionV1 {
+    pub(in crate::broker) fn named_reservation(&self) -> Option<&NamedReservationStop> {
+        self.named_reservation.as_deref()
+    }
     pub(crate) fn cancel_prefix_for_stop(&self, index: usize) -> Option<&ConfirmedCancelPrefixV1> {
         self.cancel_prefixes.get(index)
     }
@@ -817,6 +868,7 @@ fn project_cancel(
         .filter(|stop| stop.birth_index < boundary)
         .map(|stop| recovered.cancel_prefix(stop))
         .collect::<JournalResult<Vec<_>>>()?;
+    let named_reservation = named_reservation_stop(&recovered).map(Box::new);
     let stops = recovered
         .stops
         .into_iter()
@@ -833,8 +885,58 @@ fn project_cancel(
         receipt,
         stops,
         cancel_prefixes,
+        named_reservation,
         incomplete,
     }))
+}
+
+fn named_reservation_stop(recovered: &RecoveredJobV1) -> Option<NamedReservationStop> {
+    let metadata = recovered.metadata.as_ref()?;
+    let supervision = metadata.checkpoint.supervised()?.supervision();
+    let admission = supervision.legacy_named_admission()?;
+    let first_stop = *recovered.cancel_command_ids.first()?;
+    // Once any preparation or runtime operation is retained, STOP must
+    // use its own recovery path. A lost receipt cannot restore this authority.
+    if metadata.legacy_managed_seen
+        || metadata.intent.legacy_named_plan() != Some(admission.plan())
+        || admission.archive_digest().is_none()
+        || admission
+            .admission_result()
+            .is_some_and(|result| !result.accepted)
+        || !supervision.helpers().is_empty()
+        || supervision
+            .operations()
+            .iter()
+            .any(|operation| !matches!(operation, SupervisionOperationV1::Decision { .. }))
+    {
+        return None;
+    }
+    Some(NamedReservationStop {
+        admission: admission.clone(),
+        cancellation_id: reservation_cancellation_id(recovered.operation_id, first_stop),
+    })
+}
+
+fn reservation_cancellation_id(operation: Uuid, first_stop: Uuid) -> String {
+    let domain = format!("ai-guard:legacy-named-cancel-reservation-operation:v1:{operation}");
+    crate::model::bound_event_id(domain.as_bytes(), first_stop)
+}
+
+#[cfg(test)]
+#[test]
+fn named_cancellation_replays_within_its_job_and_separates_jobs() {
+    let stop = Uuid::from_u128(1);
+    let original = Uuid::from_u128(2);
+    let retained = reservation_cancellation_id(original, stop);
+    assert_eq!(retained, reservation_cancellation_id(original, stop));
+    assert_ne!(
+        retained,
+        reservation_cancellation_id(Uuid::from_u128(3), stop)
+    );
+    assert_ne!(
+        retained,
+        reservation_cancellation_id(original, Uuid::from_u128(4))
+    );
 }
 
 /// Count every safely inspected entry even when its schema/name is invalid.

@@ -493,11 +493,12 @@ mod tests {
                 .acknowledge_legacy_named_initial_decision(&plan, &initial_decision)
                 .await?;
             if stop_first {
-                writer
+                let stop = writer
                     .stops()
                     .append_cancel(CancelInputV1::new(operation, Uuid::new_v4())?)
                     .await
                     .map_err(|failure| failure.error())?;
+                assert!(stop.named_reservation().is_none());
                 let stopped = writer.load(operation).await?.unwrap();
                 let next = BrokerCheckpointV3::new(
                     prepared.clone(),
@@ -535,14 +536,33 @@ mod tests {
                     .await,
                 Err(JournalError::Conflict)
             ));
-            writer
+            let stop_id = Uuid::new_v4();
+            let stop = writer
                 .stops()
-                .append_cancel(CancelInputV1::new(operation, Uuid::new_v4())?)
+                .append_cancel(CancelInputV1::new(operation, stop_id)?)
                 .await
                 .map_err(|failure| failure.error())?;
+            assert!(!stop.incomplete());
+            assert!(stop.stops().is_empty());
+            let reservation = stop.named_reservation().unwrap();
+            assert!(reservation.admission().receipt().is_none());
+            assert_eq!(
+                reservation.admission().request().input_hash()?,
+                request.input_hash()?
+            );
+            let mut divergent = saved.clone();
+            divergent.admission.receipt.input_hash = "0".repeat(64);
+            assert!(reservation.cancellation(divergent).is_err());
+            assert!(reservation.cancellation(saved.clone())?.is_none());
             writer
                 .acknowledge_legacy_named_admission(&plan, &request, saved.clone())
                 .await?;
+            let stopped = writer
+                .stops()
+                .cancel_stop_projection(operation, stop_id)
+                .await?
+                .unwrap();
+            assert!(stopped.named_reservation().is_none());
             let retained = writer.load_legacy_named_admission(operation).await?;
             assert_eq!(retained.archive_digest(), Some(digest.as_str()));
             assert!(equal(retained.receipt().unwrap(), &saved)?);

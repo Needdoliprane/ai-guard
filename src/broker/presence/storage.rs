@@ -52,7 +52,7 @@ fn fs<T>(value: anyhow::Result<T>) -> Result<T> {
 }
 fn encode(p: &PreparedPresence, value: &impl Serialize) -> Result<Vec<u8>> {
     let value = serde_json::to_value(value).map_err(|_| PresenceError::UnsafeState)?;
-    p.screen(&value)?;
+    p.authority.screen(&value)?;
     let bytes = serde_json::to_vec(&value).map_err(|_| PresenceError::UnsafeState)?;
     if bytes.len() as u64 > RECORD_BYTES {
         return Err(PresenceError::Capacity);
@@ -68,7 +68,7 @@ fn read<T: for<'de> Deserialize<'de>>(
         fs(root.persistent_read(name, RECORD_BYTES, &[]))?.ok_or(PresenceError::UnsafeState)?;
     let value: Value =
         serde_json::from_slice(file.bytes()).map_err(|_| PresenceError::UnsafeState)?;
-    p.screen(&value)?;
+    p.authority.screen(&value)?;
     let value = serde_json::from_slice(file.bytes()).map_err(|_| PresenceError::UnsafeState)?;
     Ok((value, file))
 }
@@ -105,7 +105,7 @@ fn reserve_pending(p: &PreparedPresence, head: &Head) -> Result<()> {
         && head
             .bytes
             .checked_add(RECORD_BYTES)
-            .is_none_or(|n| n > p.config.max_state_bytes)
+            .is_none_or(|n| n > p.authority.config.max_state_bytes)
     {
         return Err(PresenceError::Capacity);
     }
@@ -154,17 +154,17 @@ impl Stream {
         let facts = fs(fs(root.try_clone_file())?.metadata().map_err(Into::into))?;
         let expected = Anchor {
             version: 1,
-            scope: p.scope.clone(),
-            broker_id: p.config.broker_id.clone(),
-            credential_id: p.config.credential_id.clone(),
-            incarnation_id: p.config.incarnation_id.clone(),
-            authority_id: p.config.authority_id.clone(),
+            scope: p.authority.scope.clone(),
+            broker_id: p.authority.config.broker_id.clone(),
+            credential_id: p.authority.config.credential_id.clone(),
+            incarnation_id: p.authority.config.incarnation_id.clone(),
+            authority_id: p.authority.config.authority_id.clone(),
             directory_device: facts.dev(),
             directory_inode: facts.ino(),
         };
         let anchor = if fresh {
             let bytes = encode(p, &expected)?;
-            if bytes.len() as u64 > p.config.max_state_bytes {
+            if bytes.len() as u64 > p.authority.config.max_state_bytes {
                 return Err(PresenceError::Capacity);
             }
             save(&root, "anchor.json", &bytes)?
@@ -274,11 +274,11 @@ impl Stream {
             }
             head.count = index;
             fs(directory.durable_bootstrap())?;
-            if head.bytes > p.config.max_state_bytes {
+            if head.bytes > p.authority.config.max_state_bytes {
                 return Err(PresenceError::Capacity);
             }
         }
-        if head.bytes > p.config.max_state_bytes {
+        if head.bytes > p.authority.config.max_state_bytes {
             return Err(PresenceError::Capacity);
         }
         reserve_pending(p, &head)?;
@@ -312,7 +312,7 @@ impl Stream {
             return Err(PresenceError::UnsafeState);
         }
         self.check_history(p, &head)?;
-        if head.count >= p.config.max_operations {
+        if head.count >= p.authority.config.max_operations {
             return Err(PresenceError::Capacity);
         }
         validate_pending(p, &pending)?;
@@ -322,7 +322,7 @@ impl Stream {
             .bytes
             .checked_add(bytes.len() as u64)
             .and_then(|n| n.checked_add(RECORD_BYTES))
-            .is_none_or(|n| n > p.config.max_state_bytes)
+            .is_none_or(|n| n > p.authority.config.max_state_bytes)
         {
             return Err(PresenceError::Capacity);
         }
@@ -382,7 +382,7 @@ impl Stream {
         if head
             .bytes
             .checked_add(bytes.len() as u64)
-            .is_none_or(|n| n > p.config.max_state_bytes)
+            .is_none_or(|n| n > p.authority.config.max_state_bytes)
         {
             return Err(PresenceError::Capacity);
         }
