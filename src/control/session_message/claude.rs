@@ -58,14 +58,14 @@ struct PendingTurn {
 enum ChannelState {
     Idle,
     InFlight(PendingTurn),
-    DivergentSession,
+    Fenced,
 }
 
 /// In-memory codec for one private channel incarnation. Keep it across read
 /// timeouts and discard it when retiring that channel.
 pub struct ClaudeStreamJsonAdapterV1 {
     session_id: Uuid,
-    initialization_reported: bool,
+    initialization_frame_uuid: Option<Uuid>,
     state: ChannelState,
 }
 
@@ -75,7 +75,7 @@ impl ClaudeStreamJsonAdapterV1 {
         invalid(!session_id.is_nil())?;
         Ok(Self {
             session_id,
-            initialization_reported: false,
+            initialization_frame_uuid: None,
             state: ChannelState::Idle,
         })
     }
@@ -88,7 +88,7 @@ impl ClaudeStreamJsonAdapterV1 {
         match &self.state {
             ChannelState::Idle => {}
             ChannelState::InFlight(_) => return Err(TurnRefusalV1::TurnInFlight.into()),
-            ChannelState::DivergentSession => return Err(ControlFailure::InvalidRequest.into()),
+            ChannelState::Fenced => return Err(ControlFailure::InvalidRequest.into()),
         }
         invalid(
             !message_uuid.is_nil()
@@ -118,16 +118,17 @@ impl ClaudeStreamJsonAdapterV1 {
 
     /// Reconcile one complete JSONL line read from the same owned channel.
     /// The first matching `system/init` reports initialization independently of
-    /// turn state. Unrelated, duplicate or unattributed frames emit no fact.
+    /// turn state. An init for another session or with a different frame UUID
+    /// fences this codec. Unrelated, duplicate or unattributed frames emit no fact.
     /// A result before the exact replay cannot close the turn. The result's
     /// own UUID identifies that frame, and only `user_message_uuid` links it to input.
     pub fn reconcile_line(&mut self, line: &str) -> anyhow::Result<Option<ClaudeObservationV1>> {
-        invalid(!matches!(&self.state, ChannelState::DivergentSession))?;
+        invalid(!matches!(&self.state, ChannelState::Fenced))?;
         let frame = decode_line(line)?;
         let same_session = wire_uuid(&frame["session_id"]) == Some(self.session_id);
         if frame["type"] == "system" && frame["subtype"] == "init" {
             if !same_session {
-                self.state = ChannelState::DivergentSession;
+                self.state = ChannelState::Fenced;
                 return Err(ControlFailure::InvalidRequest.into());
             }
             let frame_uuid = wire_uuid(&frame["uuid"]).ok_or(ControlFailure::InvalidRequest)?;
@@ -139,10 +140,14 @@ impl ClaudeStreamJsonAdapterV1 {
                             .is_none_or(|value| value.as_bool() == Some(false))
                     }),
             )?;
-            if self.initialization_reported {
-                return Ok(None);
+            match self.initialization_frame_uuid {
+                Some(previous) if previous == frame_uuid => return Ok(None),
+                Some(_) => {
+                    self.state = ChannelState::Fenced;
+                    return Err(ControlFailure::InvalidRequest.into());
+                }
+                None => self.initialization_frame_uuid = Some(frame_uuid),
             }
-            self.initialization_reported = true;
             return Ok(Some(ClaudeObservationV1::InitializationReported {
                 session_id: self.session_id,
                 frame_uuid,

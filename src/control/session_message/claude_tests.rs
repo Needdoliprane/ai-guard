@@ -99,6 +99,16 @@ fn native_initialization_is_reported_once_and_does_not_acknowledge_the_turn() {
             message_uuid: uuid(FIRST_MESSAGE),
         })
     );
+    assert_eq!(
+        codec
+            .reconcile_line(&line(&result(FIRST_MESSAGE, FIRST_RESULT)))
+            .unwrap(),
+        Some(ClaudeObservationV1::Result {
+            message_uuid: uuid(FIRST_MESSAGE),
+            result_uuid: uuid(FIRST_RESULT),
+            outcome: ClaudeTurnOutcomeV1::Success,
+        })
+    );
 }
 
 #[test]
@@ -346,4 +356,43 @@ fn divergent_session_init_fences_the_codec() {
             .is_err()
     );
     assert!(codec.issue_turn(uuid(SECOND_MESSAGE), "next").is_err());
+}
+
+#[test]
+fn different_init_frame_in_the_same_session_fences_the_echoed_turn() {
+    let init = json!({
+        "type": "system",
+        "subtype": "init",
+        "session_id": SESSION,
+        "uuid": INITIALIZATION,
+    });
+    let mut conflicting = init.clone();
+    conflicting["uuid"] = json!("947a668d-64ea-479f-819a-0b08f20216ee");
+    let completion = line(&result(FIRST_MESSAGE, FIRST_RESULT));
+
+    for in_flight in [false, true] {
+        let mut codec = ClaudeStreamJsonAdapterV1::new(uuid(SESSION)).unwrap();
+        assert_eq!(
+            codec.reconcile_line(&line(&init)).unwrap(),
+            Some(ClaudeObservationV1::InitializationReported {
+                session_id: uuid(SESSION),
+                frame_uuid: uuid(INITIALIZATION),
+            })
+        );
+        if in_flight {
+            codec.issue_turn(uuid(FIRST_MESSAGE), "first").unwrap();
+            assert_eq!(
+                codec
+                    .reconcile_line(&line(&replay(FIRST_MESSAGE, json!("first"))))
+                    .unwrap(),
+                Some(ClaudeObservationV1::ExactReplay {
+                    message_uuid: uuid(FIRST_MESSAGE),
+                })
+            );
+        }
+        assert_eq!(codec.reconcile_line(&line(&init)).unwrap(), None);
+        assert!(codec.reconcile_line(&line(&conflicting)).is_err());
+        assert!(codec.reconcile_line(&completion).is_err());
+        assert!(codec.issue_turn(uuid(SECOND_MESSAGE), "next").is_err());
+    }
 }
