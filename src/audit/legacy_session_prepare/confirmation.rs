@@ -108,14 +108,20 @@ struct ResolvedLegacyConfirmedPlan {
 
 impl ResolvedLegacyConfirmedPlan {
     fn release_at(&self, now: DateTime<Utc>) -> anyhow::Result<()> {
-        // A plan that has lost its authority has the same answer as a missing plan.
-        anyhow::ensure!(
-            now < self.plan.expires_at
-                && workload::canonical_control_time(now)? < self.broker_deadline,
-            ControlFailure::NotFound
-        );
-        Ok(())
+        require_confirmation_release_at(self.plan.expires_at, self.broker_deadline, now)
     }
+}
+
+fn require_confirmation_release_at(
+    human_deadline: DateTime<Utc>,
+    broker_deadline: DateTime<Utc>,
+    now: DateTime<Utc>,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        now < human_deadline && workload::canonical_control_time(now)? < broker_deadline,
+        ControlFailure::NotFound
+    );
+    Ok(())
 }
 
 fn confirmed_plan(
@@ -544,11 +550,12 @@ impl Store {
             .plan)
     }
 
-    pub(crate) fn legacy_confirmed_launch_spec(
+    pub(crate) fn prepare_legacy_confirmed_launch_spec<T>(
         &self,
         broker: &BrokerIdentityV1,
         binding_ref: Uuid,
-    ) -> anyhow::Result<LegacyConfirmedLaunchSpecV1> {
+        prepare: impl FnOnce(&LegacyConfirmedLaunchSpecV1) -> anyhow::Result<T>,
+    ) -> anyhow::Result<T> {
         let resolved = self.read_resolved_legacy_confirmed_plan(broker, binding_ref)?;
         let material = LegacyConfirmedLaunchSpecV1 {
             version: 1,
@@ -556,7 +563,13 @@ impl Store {
             launch: resolved.launch,
         };
         material.validate()?;
-        Ok(material)
+        let response = prepare(&material)?;
+        require_confirmation_release_at(
+            material.plan.expires_at,
+            resolved.broker_deadline,
+            Utc::now(),
+        )?;
+        Ok(response)
     }
 
     fn read_resolved_legacy_confirmed_plan(

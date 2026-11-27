@@ -6,8 +6,8 @@ use crate::control::{
     HelperStartClaimV1, MutationReceiptV1, MutationResultV1, SupervisedAdmissionV1,
     session_control::{
         LEGACY_CONFIRMED_LAUNCH_SPEC_RESPONSE_BYTES, LEGACY_NAMED_ADMISSION_RECEIPT_NOT_FOUND,
-        LegacyConfirmedLaunchSpecV1, LegacyConfirmedPlanV1, LegacyNamedAdmissionReceiptV1,
-        LegacyNamedSupervisedAdmissionV1, canonical_uuid,
+        LegacyConfirmedPlanV1, LegacyNamedAdmissionReceiptV1, LegacyNamedSupervisedAdmissionV1,
+        canonical_uuid,
     },
 };
 use crate::tenant_store::StoreHealth;
@@ -154,27 +154,26 @@ async fn confirmed_launch_spec(
     _private: PrivateControlTransport,
     broker: workload::VerifiedBroker,
     Path(binding_ref): Path<String>,
-) -> ApiResult<Json<LegacyConfirmedLaunchSpecV1>> {
+) -> ApiResult<Response> {
     let binding_ref = canonical_uuid(&binding_ref).map_err(control_error)?;
     broker
         .blocking_on(store_io::Lane::Control, move |tenant, broker, redactor| {
             let store = tenant.store.sqlite_api()?;
-            let material = store
-                .legacy_confirmed_launch_spec(&broker, binding_ref)
-                .map_err(|error| confirmed_plan_error(&tenant.store, error))?;
-            let value =
-                serde_json::to_value(&material).map_err(|error| control_error(error.into()))?;
-            if store.redactor_union(&redactor).value_unclipped(&value) != value
-                || serde_json::to_vec(&value)
-                    .map_err(|error| control_error(error.into()))?
-                    .len()
-                    > LEGACY_CONFIRMED_LAUNCH_SPEC_RESPONSE_BYTES
-            {
-                return Err(control_error(anyhow::anyhow!(
-                    "confirmed launch spec cannot be returned exactly"
-                )));
-            }
-            Ok(Json(material))
+            store
+                .prepare_legacy_confirmed_launch_spec(&broker, binding_ref, |material| {
+                    let value = serde_json::to_value(material)?;
+                    anyhow::ensure!(
+                        store.redactor_union(&redactor).value_unclipped(&value) == value,
+                        "confirmed launch spec requires redaction"
+                    );
+                    let bytes = serde_json::to_vec(material)?;
+                    anyhow::ensure!(
+                        bytes.len() <= LEGACY_CONFIRMED_LAUNCH_SPEC_RESPONSE_BYTES,
+                        "confirmed launch spec exceeds its response bound"
+                    );
+                    Ok(([(header::CONTENT_TYPE, "application/json")], bytes).into_response())
+                })
+                .map_err(|error| confirmed_plan_error(&tenant.store, error))
         })
         .await
 }
