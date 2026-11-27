@@ -29,6 +29,8 @@ use std::{
 mod broker_cli;
 mod gateway_config;
 mod human_sources_cli;
+#[cfg(feature = "mysql-storage")]
+mod mysql_prepare_cli;
 
 #[derive(Parser)]
 #[command(
@@ -53,6 +55,13 @@ enum Command {
     Human(agentsandbox::identity_cli::HumanArgs),
     /// Explicit private preparation, migration and activation of owned human sources.
     HumanSources(human_sources_cli::HumanSourcesArgs),
+    /// Publish or verify the same fresh owned MySQL audit format.
+    ///
+    /// Use a dedicated schema and keep other writers and schema administration
+    /// off the target. After a lost receipt, repeat the same request for
+    /// read-only verification. Preserve the target if verification is refused.
+    #[cfg(feature = "mysql-storage")]
+    PrepareMysqlOwned(mysql_prepare_cli::PrepareMysqlOwnedArgs),
     /// Prepare or recover a new private local OIDC installation offline.
     Setup(agentsandbox::setup::SetupArgs),
     /// Prepare, record and resume private workload credential operations.
@@ -593,32 +602,10 @@ fn open_mysql_tenant(
     max_events: u64,
     capacity_policy: Option<agentsandbox::audit::AuditCapacityPolicyV1>,
 ) -> Result<TenantStore> {
-    use agentsandbox::{
-        mysql_storage::{
-            MysqlClientIdentity, MysqlCredentials, MysqlEndpoint, audit::MysqlAuditStore,
-        },
-        tenant_store::MysqlTenant,
-    };
-    let credentials = MysqlCredentials {
-        password: &target.password,
-        ca_pem: &target.ca_pem,
-        client_identity: target
-            .client_identity
-            .as_ref()
-            .map(|(cert, key)| MysqlClientIdentity {
-                certificate_chain_pem: cert,
-                private_key_pem: key,
-            }),
-    };
-    let endpoint = MysqlEndpoint {
-        host: &target.host,
-        port: target.port,
-        database: &target.database,
-        username: &target.username,
-    };
+    use agentsandbox::{mysql_storage::audit::MysqlAuditStore, tenant_store::MysqlTenant};
     let mut store = MysqlAuditStore::new(
-        endpoint,
-        credentials,
+        target.endpoint(),
+        target.credentials(),
         tenant_id,
         target.namespace,
         redactor.union(&Redactor::new(
@@ -863,6 +850,8 @@ async fn run() -> Result<()> {
         Command::Broker(args) => broker_cli::execute(args).await?,
         Command::Human(args) => agentsandbox::identity_cli::execute(args).await?,
         Command::HumanSources(args) => human_sources_cli::run(args).await?,
+        #[cfg(feature = "mysql-storage")]
+        Command::PrepareMysqlOwned(args) => mysql_prepare_cli::run(args).await?,
         Command::Setup(args) => agentsandbox::setup::execute(args)?,
         Command::Workload(args) => agentsandbox::workload_cli::run(args).await?,
         Command::Kubernetes(args) => agentsandbox::kubernetes_cli::execute(args).await?,
@@ -1777,6 +1766,85 @@ mod gateway_main_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "mysql-storage")]
+    #[test]
+    fn mysql_owned_preparation_requires_an_exact_target_and_stable_ids() {
+        const SERVER: &str = "00000000-0000-4000-8000-000000000001";
+        const OPERATION: &str = "00000000-0000-4000-8000-000000000002";
+        const INSTALLATION: &str = "00000000-0000-4000-8000-000000000003";
+        const SOURCE: &str = "00000000-0000-4000-8000-000000000004";
+        let base = [
+            "agentsandbox",
+            "prepare-mysql-owned",
+            "--registry",
+            "operator.json",
+            "--gateway-registry",
+            "gateway.json",
+            "--tenant",
+            "tenant-a",
+            "--server-uuid",
+            SERVER,
+            "--operation-id",
+            OPERATION,
+            "--installation-id",
+            INSTALLATION,
+            "--source-id",
+            SOURCE,
+        ];
+        for (format, expected) in [("14", 14_u16), ("15", 15)] {
+            let parsed = Cli::command()
+                .try_get_matches_from(base.into_iter().chain(["--schema-version", format]))
+                .unwrap();
+            let args = parsed.subcommand_matches("prepare-mysql-owned").unwrap();
+            assert_eq!(
+                args.get_one::<PathBuf>("gateway_registry")
+                    .map(PathBuf::as_path),
+                Some(Path::new("gateway.json"))
+            );
+            assert_eq!(args.get_one::<u16>("schema_version"), Some(&expected));
+            for (name, value) in [
+                ("server_uuid", SERVER),
+                ("operation_id", OPERATION),
+                ("installation_id", INSTALLATION),
+                ("source_id", SOURCE),
+            ] {
+                assert_eq!(
+                    args.get_one::<uuid::Uuid>(name),
+                    Some(&uuid::Uuid::parse_str(value).unwrap())
+                );
+            }
+        }
+        for format in ["13", "014", "16"] {
+            assert!(
+                Cli::command()
+                    .try_get_matches_from(base.into_iter().chain(["--schema-version", format]))
+                    .is_err()
+            );
+        }
+        assert!(Cli::command().try_get_matches_from(base).is_err());
+        for omitted in (2..base.len()).step_by(2) {
+            let args = base
+                .into_iter()
+                .enumerate()
+                .filter(|(index, _)| !(omitted..=omitted + 1).contains(index))
+                .map(|(_, arg)| arg);
+            assert!(
+                Cli::command()
+                    .try_get_matches_from(args.chain(["--schema-version", "14"]))
+                    .is_err(),
+                "accepted omission of {}",
+                base[omitted]
+            );
+        }
+        let mut nil_source = base;
+        nil_source[base.len() - 1] = "00000000-0000-0000-0000-000000000000";
+        assert!(
+            Cli::command()
+                .try_get_matches_from(nil_source.into_iter().chain(["--schema-version", "14"]))
+                .is_err()
+        );
+    }
 
     #[test]
     fn migration_cli_accepts_12_and_preserves_default_and_upper_bound() {

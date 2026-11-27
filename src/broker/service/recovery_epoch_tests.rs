@@ -17,6 +17,7 @@ fn release_epoch_barrier(root: &Path) {
 async fn checked_old_connection_cannot_publish_over_a_newer_observed_epoch_or_ack() {
     let fixture = Fixture::with_manual_arm(true);
     let command = Uuid::new_v4();
+    let generation = 1;
     let projection = Arc::new(
         fixture
             .writer
@@ -31,10 +32,11 @@ async fn checked_old_connection_cannot_publish_over_a_newer_observed_epoch_or_ac
     let mut child = recovery_child(&root, None);
     let client = warmed_recovery_client(&root).await;
     client
-        .deliver_projection(Arc::clone(&projection), 1)
+        .deliver_projection(Arc::clone(&projection), generation)
         .await
         .unwrap();
     let old_epoch = client.connection_epoch().unwrap();
+    assert_eq!(client.acknowledged_restore_epoch(&arm), Some(old_epoch));
     assert_eq!(
         client
             .query_stop(&arm, &hash)
@@ -48,8 +50,11 @@ async fn checked_old_connection_cannot_publish_over_a_newer_observed_epoch_or_ac
     // replay. Warm Watch already owns its E1 stream, and the cached stop is ACKed.
     let checked_open = client.pause_next_checked_open();
     let replay_client = client.clone();
-    let mut replay =
-        tokio::spawn(async move { replay_client.deliver_projection(projection, 1).await });
+    let mut replay = tokio::spawn(async move {
+        replay_client
+            .deliver_projection(projection, generation)
+            .await
+    });
     let expires = std::time::Instant::now() + Duration::from_secs(3);
     while checked_open.entered_epoch().is_none() {
         assert!(
@@ -102,8 +107,9 @@ async fn checked_old_connection_cannot_publish_over_a_newer_observed_epoch_or_ac
     let history_before_release = client.observation_history();
     assert_eq!(history_before_release.last(), Some(&new_epoch));
 
-    // E2's Restore cannot ACK or deliver Cancel yet. Releasing E1 therefore
-    // cannot legitimately complete the replay through an old cached ACK.
+    // E2 already owns the Cancel, but its held Restore reply prevents the
+    // client from validating E2's delivery ACK. E1's cached ACK cannot
+    // complete the replay.
     checked_open.release();
     let expires = std::time::Instant::now() + Duration::from_secs(3);
     while checked_open.is_blocked() {
@@ -122,10 +128,17 @@ async fn checked_old_connection_cannot_publish_over_a_newer_observed_epoch_or_ac
     let old_ack_succeeded = completed.as_ref().is_some_and(|result| result.is_ok());
     let epoch_during_hold = client.connection_epoch();
     let stop_during_hold = client.query_stop(&arm, &hash).await.unwrap();
+    let ack_during_hold = client.acknowledged_restore_epoch(&arm);
     let still_held = !barrier_root.join("release").exists();
 
     release_epoch_barrier(&barrier_root);
-    let accepted = wait_for_cancel_without_business_retry(&client, &arm, &hash, command).await;
+    let acknowledged_in_new_epoch = tokio::time::timeout(Duration::from_secs(3), async {
+        while client.acknowledged_restore_epoch(&arm) != Some(new_epoch) {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .is_ok();
     if completed.is_none() {
         match tokio::time::timeout(Duration::from_secs(5), &mut replay).await {
             Ok(result) => completed = Some(result.unwrap()),
@@ -143,8 +156,15 @@ async fn checked_old_connection_cannot_publish_over_a_newer_observed_epoch_or_ac
     assert!(still_held);
     assert_eq!(
         stop_during_hold.cancel_command_id(),
-        None,
-        "positive control: no E2 Cancel was accepted while Restore ACK was held"
+        Some(command),
+        "E2's native STOP owner must retain the exact Cancel before the Restore reply"
+    );
+    assert_eq!(stop_during_hold.registration_hash(), hash.as_str());
+    assert_eq!(stop_during_hold.generation(), generation);
+    assert_ne!(
+        ack_during_hold,
+        Some(new_epoch),
+        "the held Restore reply must prevent a validated E2 delivery ACK"
     );
     assert!(
         !rolled_back,
@@ -156,8 +176,8 @@ async fn checked_old_connection_cannot_publish_over_a_newer_observed_epoch_or_ac
         "old cached ACK must not report success before the E2 Restore can complete"
     );
     assert!(
-        accepted,
-        "the retained stop must progress in E2 after releasing only its fixture barrier"
+        acknowledged_in_new_epoch,
+        "the retained Cancel must receive its validated E2 ACK without a business retry"
     );
     assert!(
         completed.is_some(),

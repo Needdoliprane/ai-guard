@@ -658,8 +658,25 @@ pub(super) async fn verify_empty_in_transaction(
     // metadata locks for the rest of this snapshot.
     let empty: Vec<u8> = metadata_rows(
         "SELECT NOT EXISTS (SELECT 1 FROM ai_guard_audit_state) \
-         AND NOT EXISTS (SELECT 1 FROM ai_guard_audit_event) \
-         AND NOT EXISTS (SELECT 1 FROM ai_guard_audit_decision) \
+         AND NOT EXISTS (SELECT 1 FROM ai_guard_audit_event)",
+        tx,
+    )
+    .await?;
+    ensure!(empty == [1], "MySQL unpublished audit tables contain rows");
+    require_empty_projections(tx, version).await?;
+    verify_physical_structure(tx, version).await?;
+    lock.verify_preparation_target(tx).await
+}
+
+/// The fresh publication writes only the audit chain and the singleton.
+/// Projection rows require a different durable state and cannot be accepted
+/// as part of the initial publication receipt.
+pub(super) async fn require_empty_projections(
+    tx: &mut Transaction<'_>,
+    version: u16,
+) -> Result<()> {
+    let empty: Vec<u8> = metadata_rows(
+        "SELECT NOT EXISTS (SELECT 1 FROM ai_guard_audit_decision) \
          AND NOT EXISTS (SELECT 1 FROM review_authority_meta) \
          AND NOT EXISTS (SELECT 1 FROM runner_review_bindings) \
          AND NOT EXISTS (SELECT 1 FROM ai_guard_worker) \
@@ -672,7 +689,10 @@ pub(super) async fn verify_empty_in_transaction(
         tx,
     )
     .await?;
-    ensure!(empty == [1], "MySQL unpublished common tables contain rows");
+    ensure!(
+        empty == [1],
+        "MySQL fresh owned common projections contain rows"
+    );
     if version == 15 {
         let empty: Vec<u8> = metadata_rows(
             "SELECT NOT EXISTS (SELECT 1 FROM egress_policy_meta) \
@@ -683,11 +703,12 @@ pub(super) async fn verify_empty_in_transaction(
             tx,
         )
         .await?;
-        ensure!(empty == [1], "MySQL unpublished egress tables contain rows");
+        ensure!(
+            empty == [1],
+            "MySQL fresh owned egress projections contain rows"
+        );
     }
-
-    verify_physical_structure(tx, version).await?;
-    lock.verify_preparation_target(tx).await
+    Ok(())
 }
 
 /// Verify the published manifest on the caller's locked transaction. The seed

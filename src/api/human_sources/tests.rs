@@ -1096,11 +1096,14 @@ async fn every_existing_control_alias_and_head_closes_before_body_and_store() {
                     >()))
                     .unwrap();
                 let response = router.clone().oneshot(request).await.unwrap();
-                assert_eq!(
-                    response.status(),
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "{method} {prefix}{path}"
-                );
+                // The reserved GET reaches its credential gate without
+                // reading the body or either tenant store. HEAD stays closed.
+                let expected = if method == "GET" && *path == "/api/v1/control/protocol" {
+                    StatusCode::UNAUTHORIZED
+                } else {
+                    StatusCode::SERVICE_UNAVAILABLE
+                };
+                assert_eq!(response.status(), expected, "{method} {prefix}{path}");
             }
         }
     }

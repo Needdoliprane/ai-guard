@@ -96,7 +96,7 @@ pub(super) async fn publish(
             durable == head,
             "MySQL owned publication head differs from prepared events"
         );
-        replay_published_prefix(&mut tx, tenant, &namespace, &durable).await?;
+        replay_published_prefix(&mut tx, &durable, draft).await?;
         Ok::<_, anyhow::Error>(head)
     }
     .await;
@@ -112,23 +112,17 @@ pub(super) async fn publish(
     }
 }
 
-/// Re-verify a published owned target under the physical lock in a read-only
-/// snapshot. This is the gateway open verification: format, origin, tenant,
-/// namespace, durable head and the exact physical manifest must all agree.
+/// Verify the same fresh publication under the physical lock in one read-only
+/// snapshot. A target with subsequent history or projections is outside this
+/// fresh-publication receipt path.
 pub(super) async fn verify_published(
     conn: &mut Conn,
     lock: &OwnedAuditLock,
-    version: u16,
-    tenant: &str,
-    namespace: Uuid,
-    server: Uuid,
-    schema: &str,
+    draft: &FreshAnchorDraft<'_>,
 ) -> Result<AuditHead> {
-    ensure!(
-        matches!(version, 14 | 15),
-        "invalid MySQL owned audit format"
-    );
-    let namespace = namespace.to_string();
+    let request = draft.request();
+    let version = request.schema_version;
+    let namespace = request.namespace_id.to_string();
     let mut options = TxOpts::new();
     options
         .with_readonly(true)
@@ -138,18 +132,10 @@ pub(super) async fn verify_published(
         .await
         .map_err(driver_error)?;
     let verified = async {
-        lock.verify_preparation_target(&mut tx).await?;
-        let head = read_published_binding(&mut tx, version, tenant, &namespace).await?;
-        replay_published_prefix(&mut tx, tenant, &namespace, &head).await?;
-        FreshAnchorRequestV1::verify_stored_origin(
-            &stored_anchor(&mut tx).await?,
-            tenant,
-            &namespace,
-            version,
-            server,
-            schema,
-        )?;
         audit_manifest::verify_structure(&mut tx, lock, version).await?;
+        let head = read_published_binding(&mut tx, version, &request.tenant_id, &namespace).await?;
+        replay_published_prefix(&mut tx, &head, draft).await?;
+        audit_manifest::require_empty_projections(&mut tx, version).await?;
         lock.verify_preparation_target(&mut tx).await?;
         Ok::<_, anyhow::Error>(head)
     }
@@ -237,9 +223,8 @@ async fn read_published_binding(
 /// the exact stored payload bytes, never a re-serialization.
 async fn replay_published_prefix(
     tx: &mut Transaction<'_>,
-    tenant: &str,
-    namespace: &str,
     bound: &AuditHead,
+    draft: &FreshAnchorDraft<'_>,
 ) -> Result<()> {
     ensure!(
         bound.seq == PUBLISHED_EVENTS,
@@ -248,7 +233,7 @@ async fn replay_published_prefix(
     let rows: Vec<Row> = tx
         .query(
             "SELECT seq,event_id,received_at,prev_hash,hash,payload \
-             FROM ai_guard_audit_event ORDER BY seq",
+             FROM ai_guard_audit_event ORDER BY seq LIMIT 3",
         )
         .await
         .map_err(driver_error)?;
@@ -256,6 +241,8 @@ async fn replay_published_prefix(
         rows.len() as i64 == PUBLISHED_EVENTS,
         "MySQL owned publication chain length mismatch"
     );
+    let request = draft.request();
+    let namespace = request.namespace_id.to_string();
     let mut head = AuditHead::empty();
     for row in rows {
         let columns: EventColumns = decode_row(row)?;
@@ -272,30 +259,24 @@ async fn replay_published_prefix(
         );
         head = next;
         if head.seq == 1 {
-            require_owned_genesis(&stored.event, tenant, namespace)?;
+            require_owned_genesis(&stored.event, &request.tenant_id, &namespace)?;
         } else {
+            FreshAnchorRequestV1::verify_stored_origin(
+                &stored.event,
+                &request.tenant_id,
+                &namespace,
+                request.schema_version,
+                request.server_uuid,
+                &request.schema,
+            )?;
             ensure!(
-                stored.event.kind == "control.mysql.owned.source_anchor"
-                    && stored.event.source == "mysql-storage",
-                "MySQL fresh anchor origin mismatch"
+                draft.matches_recorded_fact(&encoded)?,
+                "MySQL fresh anchor differs from the requested operation"
             );
         }
     }
     ensure!(head == *bound, "MySQL audit head mismatch");
     Ok(())
-}
-
-async fn stored_anchor(tx: &mut Transaction<'_>) -> Result<Event> {
-    let row = tx
-        .query_first::<Row, _>(
-            "SELECT seq,event_id,received_at,prev_hash,hash,payload \
-             FROM ai_guard_audit_event WHERE seq=2",
-        )
-        .await
-        .map_err(driver_error)?
-        .context("MySQL owned publication anchor is absent")?;
-    let columns: EventColumns = decode_row(row)?;
-    Ok(decode_event_columns(columns)?.stored.event)
 }
 
 #[cfg(test)]

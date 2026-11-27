@@ -218,6 +218,19 @@ async fn request(state: &GatewayState, action: Value, bearer: Option<&str>) -> (
     (status, serde_json::from_slice(&bytes).unwrap())
 }
 
+fn freeze_admission_clock(oidc: &OidcGateway) -> Instant {
+    let mut clock = oidc.admission_test_now.lock().unwrap();
+    assert!(clock.is_none(), "admission clock already frozen");
+    let now = Instant::now();
+    *clock = Some(now);
+    now
+}
+
+fn advance_admission_clock(oidc: &OidcGateway, elapsed: Duration) {
+    let mut clock = oidc.admission_test_now.lock().unwrap();
+    *clock.as_mut().expect("admission clock must be frozen") += elapsed;
+}
+
 fn reset_start_window(oidc: &OidcGateway) {
     oidc.registry.lock().unwrap().rate = None;
 }
@@ -327,7 +340,7 @@ async fn anonymous_intent_pool_cannot_deny_an_existing_native_session_refresh() 
         admitted += 1;
     }
     assert!(admitted > 0 && admitted <= 256);
-    let refused = reserve_anonymous(&mut oidc.registry.lock().unwrap());
+    let refused = reserve_anonymous(oidc, &mut oidc.registry.lock().unwrap());
     assert!(
         matches!(refused, Err((StatusCode::TOO_MANY_REQUESTS, _))),
         "setup: anonymous pool did not close within256entries"

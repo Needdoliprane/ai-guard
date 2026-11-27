@@ -1,6 +1,10 @@
 mod support;
 
-use agentsandbox::{audit::Store, broker_registry::*, redaction::Redactor};
+use agentsandbox::{
+    audit::{AuditCapacityFailureV1, AuditCapacityPolicyV1, AuditCapacityV1, Store},
+    broker_registry::*,
+    redaction::Redactor,
+};
 
 fn id() -> String {
     uuid::Uuid::new_v4().to_string()
@@ -214,24 +218,50 @@ fn forged_typed_event_and_tampered_projection_are_refused() {
 }
 
 #[test]
-fn unavailable_ordinary_audit_blocks_new_grants_but_keeps_revocation_maintenance() {
+fn ordinary_saturation_preserves_one_control_grant_and_identity_revocation() {
     let directory = support::private_tempdir();
     let path = directory.path().join("a.sqlite");
     let a = store_capacity(&path, "tenant-a", 64);
+    let mut capacity = AuditCapacityPolicyV1::resolved_for(64, a.physical_bytes());
+    capacity.control_reserve = AuditCapacityV1 {
+        events: 1,
+        bytes: 1,
+    };
+    capacity.identity_reserve = AuditCapacityV1 {
+        events: 1,
+        bytes: 1,
+    };
+    let a = a.with_capacity_policy(capacity).unwrap();
     let original = grant(&id(), "host-a:docker");
     a.mutate_broker_grant(&original).unwrap();
-    for _ in 0..64 {
-        if a.append(agentsandbox::model::Event::new("test.ordinary"))
-            .is_err()
-        {
-            break;
-        }
-    }
+    let ordinary_failure = (0..64)
+        .find_map(
+            |_| match a.append(agentsandbox::model::Event::new("test.ordinary")) {
+                Ok(_) => None,
+                Err(error) => Some(error),
+            },
+        )
+        .expect("ordinary lane must saturate within its bounded event capacity");
+    assert_eq!(
+        ordinary_failure.downcast_ref::<AuditCapacityFailureV1>(),
+        Some(&AuditCapacityFailureV1::OrdinaryWriteBudgetExhausted)
+    );
+
+    // The D5 control reserve has exactly one event slot after the ordinary
+    // ceiling; a distinct grant may consume it, but not the identity reserve.
+    let control_grant = grant(&id(), "host-b:docker");
+    a.mutate_broker_grant(&control_grant).unwrap();
+    assert!(a.broker(&control_grant.broker_id).unwrap().is_some());
     let head = a.head().unwrap();
-    let refused = grant(&id(), "host-b:docker");
-    assert!(a.mutate_broker_grant(&refused).is_err());
+    let refused = grant(&id(), "host-c:docker");
+    let refusal = a.mutate_broker_grant(&refused).unwrap_err();
+    assert_eq!(
+        refusal.downcast_ref::<AuditCapacityFailureV1>(),
+        Some(&AuditCapacityFailureV1::OrdinaryWriteBudgetExhausted)
+    );
     assert_eq!(a.head().unwrap(), head);
     assert!(a.broker(&refused.broker_id).unwrap().is_none());
+    assert!(a.broker_for_authority("host-c:docker").unwrap().is_none());
     let revoke = BrokerRevocationV1 {
         version: 1,
         operation_id: id(),

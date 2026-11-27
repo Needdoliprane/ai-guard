@@ -937,7 +937,7 @@ async fn resume_preserves_monitor_failure_owned_outside_the_journal() {
         checkpoint["managed"]["result"]["postprocessing_error"]
             .as_str()
             .unwrap()
-            .contains("control observation failed during execution")
+            .contains("execution observation failed: legacy control supervision failed:")
     );
     let journal: Value =
         serde_json::from_slice(&fs::read(scenario.journal_path()).unwrap()).unwrap();

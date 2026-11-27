@@ -200,6 +200,62 @@ The last positive check must pass again after each series. A generic disconnect,
 
 The [gateway SQL-06 fixture](GATEWAY_FIXTURE.md) prepares fresh schemas and dedicated accounts for the application tests.
 
+## Fresh owned MySQL publication (QA)
+
+Use two private files in the existing tenant registry format. Pass the operator
+registry as `--registry` and the registry used at startup by the gateway of
+the same installation as `--gateway-registry` (the gateway's `--tenants-file`).
+Before reading authentication files, the CLI checks that the selected tenant
+has the same namespace, host, port and database in both registries. Each
+registry must declare distinct targets for different tenants. The operator's
+SQL username must differ from every gateway username on the same configured
+host and port. These checks compare the configured hosts without regard to
+ASCII case. Verify aliases at the deployment level. Use a dedicated empty
+schema and keep other writers and schema administration off it during publication.
+
+The CLI opens only the operator's authentication files. Both TLS profiles
+require a password file and verify the server name and certificate chain
+against the configured CA. For mTLS, also reference the operator's client
+certificate and key. Before publication, the connection verifies that the
+server selected the expected operator username.
+[Operator account and target requirements](OWNED_PREPARATION.md#compte-opérateur-du-prévol)
+
+Obtain the expected server UUID independently from a trusted administrative
+session on the intended server (`SELECT @@GLOBAL.server_uuid`). Assign the
+operation, installation and source UUIDs once and retain them with the chosen
+format. Use canonical lowercase, hyphenated, non-nil UUIDs. The example selects
+format 15. Use `--schema-version 14` for format 14.
+
+```sh
+agentsandbox prepare-mysql-owned \
+  --registry "${QA_MYSQL_OPERATOR_REGISTRY:?}" \
+  --gateway-registry "${QA_MYSQL_GATEWAY_REGISTRY:?}" --tenant "${QA_MYSQL_TENANT:?}" \
+  --schema-version 15 --server-uuid "${QA_MYSQL_SERVER_UUID:?}" \
+  --operation-id "${QA_MYSQL_OPERATION_ID:?}" \
+  --installation-id "${QA_MYSQL_INSTALLATION_ID:?}" \
+  --source-id "${QA_MYSQL_SOURCE_ID:?}"
+```
+
+On success, stdout contains one verified JSON receipt. After a lost receipt,
+repeat the command with the same target, format and UUIDs. On a nonempty
+schema, this is a read-only check on the locked SQL session. It verifies the
+manifest, the exact operation anchor, the tenant and namespace, the initial
+audit chain and head, and the empty projections. An exact match returns the
+same publication head. An incomplete, foreign or divergent target, or a
+target that has advanced beyond initial publication, is refused and preserved.
+
+On MySQL 8.4.13 under Docker Desktop ARM64, `prepare-mysql-owned` built from
+`38b64857` passed fresh publication and exact replay for format 14 with
+password and TLS and format 15 with password and mTLS. Both replays returned
+identical receipt bytes and preserved the initial audit head and projections.
+The CLI refused a different server UUID, mismatched registry targets and a
+foreign nonempty schema without changing the inspected state.
+[CLI receipt and separate libtest evidence](OWNED_PREPARATION.md#recettes-physiques)
+
+The operator handles any historical data transfer when changing storage.
+Owned gateway admission, its owner epoch, restoration and the application
+tests SQL-04 through SQL-06 still require separate evidence.
+
 ## What this preflight does not cover
 
-It proves that the server, accounts and certificates behave as the gateway tests expect. It does not prove ai-guard behaviour: the gateway startup with each profile, the refusal of a wrong password, CA, server name or client certificate with no business audit row, and the SQL-04 to SQL-06 application scenarios are separate verdicts recorded in `docs/engineering/`. An expired client certificate is not issued by the helpers above: issue one with a validity window in the past (for example with `openssl ca -startdate/-enddate`) in a private directory when that case is needed.
+The connection preflight verifies the server, accounts and certificates. Gateway startup with each profile, the refusal of a wrong password, CA, server name or client certificate with no business audit row, and the SQL-04 to SQL-06 application scenarios have separate verdicts in `docs/engineering/`. An expired client certificate is not issued by the helpers above: issue one with a validity window in the past (for example with `openssl ca -startdate/-enddate`) in a private directory when that case is needed.

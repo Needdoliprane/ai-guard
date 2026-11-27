@@ -8,6 +8,30 @@ use crate::control::{
 use serde_json::json;
 use std::os::unix::fs::PermissionsExt;
 
+fn defer_failed_stop_actor(state: &RecoveryState, arm_id: &str) -> EnforcerResult<Arc<StopActor>> {
+    let actor = state
+        .slots
+        .lock()
+        .map_err(|_| EnforcerError::Unhealthy)?
+        .get(arm_id)
+        .cloned()
+        .ok_or(EnforcerError::Conflict)?;
+    let slot = actor.snapshot()?;
+    if actor.worker_owned.load(Ordering::SeqCst)
+        || actor.fail_spawn_once.load(Ordering::SeqCst)
+        || slot.phase != StopPhaseV1::Quarantined
+        || slot.stop_failures != 1
+    {
+        return Err(EnforcerError::Conflict);
+    }
+    // Replays in these IPC fixtures must not start an unowned native thread.
+    *actor
+        .next_start
+        .lock()
+        .map_err(|_| EnforcerError::Unhealthy)? = Instant::now() + Duration::from_secs(3600);
+    Ok(actor)
+}
+
 fn unavailable_registration(root: &Path, suffix: &str) -> RegistrationV1 {
     // Explicitly unavailable fixture metadata; no host program may execute.
     // execute any host program. These are explicit test data, not engine facts.
@@ -395,21 +419,21 @@ async fn real_client2_and_client3_share_stop_dispatch_without_changing_views2() 
                 value: Box::new(value.clone()),
             })
             .await;
-        // The failed first spawn is real. For replay, explicitly postpone this
-        // test actor; no unowned, nonterminating runtime thread may be created.
-        if let Ok(slots) = fixture.state.slots.lock() {
-            for actor in slots.values() {
-                if let Ok(mut next) = actor.next_start.lock() {
-                    *next = Instant::now() + Duration::from_secs(3600);
-                }
-            }
+        if !matches!(reserved, Err(EnforcerError::NotReady)) {
+            return Err(EnforcerError::Conflict);
         }
-        let reserved = reserved?;
+        let actor = defer_failed_stop_actor(&fixture.state, &arm)?;
         let replay = client2
             .request(StopRequest::RestoreRequiredStop {
                 value: Box::new(value.clone()),
             })
-            .await?;
+            .await;
+        if !matches!(replay, Err(EnforcerError::NotReady)) {
+            return Err(EnforcerError::Conflict);
+        }
+        if actor.snapshot()?.stop_failures != 1 || actor.worker_owned.load(Ordering::SeqCst) {
+            return Err(EnforcerError::Conflict);
+        }
         let delivered = client3
             .inner
             .request(StopRequest::DeliverDurableStop {
@@ -440,7 +464,7 @@ async fn real_client2_and_client3_share_stop_dispatch_without_changing_views2() 
             tokio::time::sleep(POLL).await;
         }
         Ok::<_, EnforcerError>((
-            reserved, replay, delivered, queried2, queried3, status2, status3, cancel, hash,
+            delivered, queried2, queried3, status2, status3, cancel, hash,
         ))
     }
     .await;
@@ -449,19 +473,7 @@ async fn real_client2_and_client3_share_stop_dispatch_without_changing_views2() 
         clean,
         "owned transport fixture must stop before its oracles"
     );
-    let (reserved, replay, delivered, queried2, queried3, status2, status3, cancel, hash) =
-        observed.unwrap();
-    assert!(matches!(
-        reserved.1,
-        StopResponse::StopReserved {
-            replayed: false,
-            ..
-        }
-    ));
-    assert!(matches!(
-        replay.1,
-        StopResponse::StopReserved { replayed: true, .. }
-    ));
+    let (delivered, queried2, queried3, status2, status3, cancel, hash) = observed.unwrap();
     assert!(matches!(delivered.1, StopResponse::StopAccepted { .. }));
     for slot in [queried2, queried3] {
         assert_eq!(slot.cancel_command_id(), Some(cancel.command_id));
@@ -469,9 +481,33 @@ async fn real_client2_and_client3_share_stop_dispatch_without_changing_views2() 
         assert_eq!(slot.registration_hash(), hash);
     }
     let wire2 = serde_json::to_value(status2).unwrap();
-    assert_eq!(wire2.as_object().unwrap().len(), 8);
-    assert!(wire2.get("retirement_count").is_none());
-    assert!(wire2.get("root_binding").is_none());
+    let wire2 = wire2.as_object().unwrap();
+    let v2_fields = [
+        "epoch",
+        "slot_count",
+        "max_slots",
+        "max_recovery_stop_owners",
+        "recovery_attempt_owners",
+        "owned_active",
+        "recovery_fenced",
+        "recovery_incomplete",
+        "recovery_attempts",
+        "recovery_attempt_failures",
+        "recovery_attempt_in_flight",
+        "retained_native_causes",
+        "omitted_settled_causes",
+        "cause_omissions_exact",
+        "native_io_uncollected",
+        "progress",
+        "transport_healthy",
+        "clock_healthy",
+        "admission_available",
+        "ledger_state",
+    ];
+    assert_eq!(wire2.len(), v2_fields.len());
+    for field in v2_fields {
+        assert!(wire2.contains_key(field), "missing V2 status field {field}");
+    }
     assert_eq!(status3.known_stop_slot_count(), 1);
     assert_eq!(status3.retirement_count(), None);
 }

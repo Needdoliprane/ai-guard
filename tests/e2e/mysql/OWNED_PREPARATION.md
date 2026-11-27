@@ -12,10 +12,13 @@ par l’opérateur. L’installation sélectionne directement le format 14 ou 15
    visibilité démontrée. Garder cette connexion pour le premier DDL, la
    transaction de publication et la vérification finale. Un reçu de prévol
    obtenu sur une connexion fermée ne donne aucun droit d’écrire.
-2. Sur une cible non vide, vérifier intégralement le format demandé, son
-   origine et l’état durable. Une cible exacte et vérifiée répond en lecture
-   seule. Une cible Legacy, divergente ou partielle est refusée avant toute
-   écriture. Un verrou perdu ou un inventaire incertain ferme la préparation.
+2. Sur une cible non vide, vérifier dans un seul instantané en lecture seule
+   le format demandé, le manifeste, la cible physique, le tenant, le namespace,
+   l’ancre de l’opération exacte et la tête du préfixe initial. Le reçu exige
+   les projections vides de cet état initial. Une cible Legacy, étrangère,
+   divergente, partielle ou déjà passée au-delà de l’état initial est refusée
+   sans DDL ni transaction d’écriture. Un verrou perdu ou un inventaire
+   incertain ferme la préparation.
 3. Sur une cible vide, exécuter les créations strictes prévues par le format.
    Factoriser les déclarations réellement communes avec le DDL Legacy. La
    sentinelle d’audit reste absente pendant le DDL. L’ancien lecteur doit
@@ -48,6 +51,11 @@ droits directs `SELECT`, `SHOW VIEW`, `ALTER ROUTINE`, `EVENT`, `TRIGGER` et
 l’absence de rôle actif si `partial_revokes` est activé. Les droits restent
 stables pendant le contrôle. Le gateway et les autres comptes runtime
 gardent leurs droits bornés au tenant.
+
+Le CLI examine les deux registres avant de lire un fichier d’authentification.
+Chaque registre associe une cible déclarée à un seul tenant. Le compte
+opérateur est réservé à la préparation sur l’hôte et le port configurés.
+L’opérateur vérifie les alias et l’identité du serveur dans le déploiement.
 
 `SHOW GRANTS FOR CURRENT_USER()` décrit le compte courant. La sélection
 effective des droits de schéma peut dépendre d’une autre entrée hôte pour le
@@ -184,13 +192,15 @@ pouvoir référencer les tables de la cible et garder `foreign_key_checks` et
    le singleton et rejoue le préfixe fermé avant `COMMIT`, et `verify_published`
    revérifie le format, l’origine, le tenant, le namespace, la tête et le
    manifeste physique sous verrou dans un nouvel instantané après commit.
-   `prepare_owned_fresh_source` enchaîne installation et publication et rend un
-   reçu sans autorité d’admission. Restent à livrer : la genèse egress du format
-   15 et les marqueurs de supervision owned, le chemin d’écriture owned sur 14/15
-   (le lecteur Legacy reste fermé à ces versions), et le raccord du gateway qui
-   ouvrira la cible publiée via `verify_published`. La recette physique de ces
-   oracles reste `NOT_RUN` sans serveur MySQL 8.4 jetable.
-   [Publication MySQL](../../../src/mysql_storage/owned_origin/preparation/publication.rs)
+   `prepare_owned_fresh_source` enchaîne installation et publication sur une
+   cible vide. Sur une cible déjà publiée, il relit l’ancre exacte avec la
+   chaîne et vérifie les projections vides sous le même verrou, en lecture
+   seule. Le reçu porte sur la publication initiale. La genèse egress du
+   format 15, les marqueurs de supervision owned, le chemin d’écriture owned
+   sur 14/15 et le raccord du gateway restent à livrer. Le lecteur Legacy
+   reste fermé à ces versions. Le raccord du gateway exige sa propre preuve
+   d’admission et d’epoch. Le rejeu exact du CLI a sa recette physique.
+   [Publication MySQL](../../../src/mysql_storage/owned_origin/preparation/publication.rs) · [Recettes physiques](#recettes-physiques)
 5. Sur commit ou réponse incertains, rapprocher l’opération exacte par une
    relecture intégrale sous verrou. Un état partiel ou divergent reste
    fermé, sans nouvelle genèse ni DDL de reprise. La résolution d’une
@@ -201,6 +211,32 @@ pouvoir référencer les tables de la cible et garder `foreign_key_checks` et
    barrière d’epoch. Le verrou SQL atteste la session de la base.
    [Descripteur actuel](../../../src/human_authority/manifest.rs) ·
    [Epoch et propriétaire](../../../src/human_authority.rs)
+
+## Recettes physiques
+
+- **Libtest `e992a5a1`.** Le sélecteur
+  `owned_fresh_source_publishes_once_and_refuses_reentry` passe en TLS puis
+  en mTLS sur MySQL 8.4.13 ARM64. Il exerce les formats 14 et 15, le refus à
+  la réentrée sur une cible non vide et le refus au niveau du Store Legacy.
+  [Validation du libtest](../../../docs/engineering/VALIDATION.md#27-novembre-2026--publication-unique-mysql-owned-14-et-15)
+- **CLI `38b64857`.** `prepare-mysql-owned` passe sur MySQL 8.4.13 sous
+  Docker Desktop ARM64, format 14 avec mot de passe et TLS et format 15 avec
+  mot de passe et mTLS. Chaque publication sur cible neuve atteint la
+  séquence 2. La réinvocation exacte restitue les mêmes octets de reçu et
+  préserve le DDL, les événements, la tête, l’inventaire et les projections.
+  Les refus d’UUID serveur, de cible de registre divergente et de schéma
+  étranger non vide laissent les états contrôlés intacts. La fermeture des
+  ressources jetables est vérifiée.
+  Binaire SHA-256 `65262cf18615bc14e563d2043f8b0d10fc32c33449f2ac515b911749c935bdb1`.
+  Reçu privé SHA-256 `5f9b01012902f8f3fe452dd7ef7c1f6a67f3d07e270487127acb0a5e67f40d4c`.
+
+La recette CLI couvre ces deux combinaisons. Une interruption pendant le DDL,
+un rejeu divergent sur la base déjà publiée et le démarrage d’un ancien
+binaire gateway sur ces cibles restent `NOT_RUN` pour ce CLI. L’admission
+par le gateway owned, l’epoch du propriétaire, la restauration et les
+parcours SQL-04 à SQL-06 restent ouverts. Le transfert d’un historique reste
+une opération de l’opérateur lors d’un changement de stockage.
+[Contrat de stockage](../../../docs/engineering/ARCHITECTURE_CONTRACT.md#stockage-sql-par-tenant)
 
 ## Témoins à exécuter sur cibles jetables
 
@@ -252,8 +288,12 @@ pouvoir référencer les tables de la cible et garder `foreign_key_checks` et
   version commise. Il simule la publication d’une version avec les colonnes
   historiques. La preuve d’installation exige le vrai manifeste de chaque
   format et le refus de l’ancien binaire à toutes les phases publiées.
-- Pour chaque format, prouver l’installation directe, la relecture complète
-  et la reprise en lecture seule après perte de la réponse. Vérifier aussi le
-  refus sans effet d’un format, d’une identité ou d’une origine divergents,
-  et l’absence de seconde publication sous concurrence. Qualifier les deux
-  profils de connexion, mot de passe avec TLS et mot de passe avec mTLS.
+- Exécuter `owned_fresh_source_publishes_once_and_replays_exactly` sur deux
+  cibles MySQL 8.4 jetables, avec `AI_GUARD_MYSQL_OWNED_PUBLISH_14_QA_REGISTRY`
+  et `AI_GUARD_MYSQL_OWNED_PUBLISH_15_QA_REGISTRY`. Utiliser le même UUID de
+  serveur attendu que dans le reste de la recette. L’oracle vérifie la
+  publication initiale, le retour de la même tête après perte simulée du
+  reçu, les refus sur demande divergente et la conservation de la tête et
+  d’une projection divergente injectée en fin de test. Qualifier séparément
+  les profils mot de passe avec TLS et mot de passe avec mTLS. La concurrence
+  et les recettes du CLI gardent leurs propres preuves. [Recettes physiques](#recettes-physiques)

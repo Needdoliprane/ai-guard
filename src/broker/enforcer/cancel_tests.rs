@@ -4,7 +4,7 @@
 
 use super::*;
 use crate::{
-    broker::{clock::checked_deadline, enforcer::run_internal_enforcer},
+    broker::{clock::checked_deadline, enforcer::run_internal_legacy_fresh},
     control::{
         ArmReceiptV1, ArmSubjectV1, ArmV1, NetworkV1, RestartPolicyV1, RuntimeInspectionV1,
         RuntimeKindV1, SecurityPresetV1,
@@ -21,11 +21,37 @@ use std::{
     process::{Child, Command},
 };
 
-const CHILD_ROOT: &str = "AI_GUARD_TEST_RETAINED_CANCEL_ROOT";
+const CHILD_PARENT: &str = "AI_GUARD_TEST_RETAINED_CANCEL_PARENT";
+const ROLE_NAME: &str = "enforcer";
 #[cfg(target_os = "macos")]
 const PRIVATE_TMP: &str = "/private/tmp";
 #[cfg(target_os = "linux")]
 const PRIVATE_TMP: &str = "/tmp";
+
+tokio::task_local! {
+    static HELD_REGISTER_REPLY: (String, Arc<tokio::sync::Notify>);
+}
+
+pub(super) async fn hold_register_reply(request: &Request, response: &Response) {
+    if let (
+        Request::Register {
+            observe_only: true, ..
+        },
+        Response::Registered {
+            value,
+            replayed: true,
+        },
+    ) = (request, response)
+        && HELD_REGISTER_REPLY
+            .try_with(|(arm, seen)| {
+                assert_eq!(&value.arm_id, arm);
+                seen.notify_one();
+            })
+            .is_ok()
+    {
+        std::future::pending::<()>().await;
+    }
+}
 
 struct FailureEvidence(Option<tempfile::TempDir>);
 impl Drop for FailureEvidence {
@@ -164,13 +190,19 @@ fn unavailable_registration_at(
 #[test]
 #[ignore = "internal native child, invoked only by the retained Cancel test"]
 fn native_cancel_server_child() {
-    let root = std::env::var_os(CHILD_ROOT).expect("private test role root");
-    let root = Directory::open_existing(Path::new(&root)).unwrap();
+    let parent = std::env::var_os(CHILD_PARENT).expect("private test role parent");
+    let parent = Directory::open_existing(Path::new(&parent)).unwrap();
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .unwrap()
-        .block_on(run_internal_enforcer(&root, 8))
+        .block_on(run_internal_legacy_fresh(
+            &parent,
+            ROLE_NAME,
+            8,
+            0,
+            Uuid::new_v4(),
+        ))
         .unwrap();
 }
 
@@ -186,11 +218,7 @@ async fn retained_cancel_real_ipc_retries_without_seeding_or_targeting_later_slo
             .unwrap(),
     ));
     let base = evidence.0.as_ref().unwrap().path().canonicalize().unwrap();
-    let role = base.join("enforcer");
-    fs::create_dir(&role).unwrap();
-    fs::set_permissions(&role, fs::Permissions::from_mode(0o700)).unwrap();
-    let root = Directory::open_existing(&role).unwrap();
-    capability(&root, true).unwrap();
+    let parent = Directory::open_existing(&base).unwrap();
     let executable = std::env::current_exe().unwrap();
     let stderr = fs::OpenOptions::new()
         .write(true)
@@ -204,9 +232,10 @@ async fn retained_cancel_real_ipc_retries_without_seeding_or_targeting_later_slo
             "--exact",
             "broker::enforcer::client::retained_cancel_tests::native_cancel_server_child",
             "--ignored",
+            "--nocapture",
         ])
         .env_clear()
-        .env(CHILD_ROOT, &role)
+        .env(CHILD_PARENT, &base)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::from(stderr));
@@ -227,35 +256,52 @@ async fn retained_cancel_real_ipc_retries_without_seeding_or_targeting_later_slo
     }
     let mut child = NativeChild(command.spawn().unwrap());
     let expires = Instant::now() + Duration::from_secs(5);
-    while load_endpoint(&root).unwrap().is_none() {
+    let root = loop {
+        if let Some(root) = parent.persistent_child(ROLE_NAME, false).unwrap()
+            && load_endpoint(&root).unwrap().is_some()
+        {
+            break root;
+        }
         assert!(child.0.try_wait().unwrap().is_none(), "native child exited");
         assert!(Instant::now() < expires, "native child did not publish IPC");
         tokio::time::sleep(Duration::from_millis(10)).await;
-    }
+    };
     let client = EnforcerClient::connect_or_spawn(&root, &executable, 8)
         .await
         .unwrap();
     assert!(client.status().await.unwrap().healthy());
     let old = unavailable_registration(&base, "old");
     let later = unavailable_registration(&base, "later");
-    for (registration, generation) in [(&old, 7), (&later, 1)] {
-        // Normal registration waits 44s for an actor that cannot reopen its
-        // runtime. Intentionally stop reading after 100ms, then prove by Slots
-        // that authentication and reservation succeeded without ObserveOnly.
-        assert!(matches!(
-            client
-                .0
-                .request(
-                    Request::Register {
-                        registration: Box::new(registration.clone()),
-                        generation,
-                        observe_only: false,
-                    },
-                    Duration::from_millis(100),
-                )
-                .await,
-            Err(EnforcerError::Unavailable)
-        ));
+    for (registration, generation) in [(&old, 7), (&later, 0)] {
+        // ObserveOnly acknowledges the installed native context before the
+        // actor can reopen the unavailable runtime.
+        let reply = client
+            .0
+            .request(
+                Request::Register {
+                    registration: Box::new(registration.clone()),
+                    generation,
+                    observe_only: true,
+                },
+                IO_TIMEOUT,
+            )
+            .await
+            .expect("authenticated ObserveOnly exchange failed");
+        let Response::Registered {
+            value,
+            replayed: false,
+        } = reply
+        else {
+            panic!(
+                "expected first STOP registration acknowledgement: {:?}",
+                response_error(reply)
+            );
+        };
+        assert_eq!(value.arm_id, registration.arm.operation_id);
+        assert_eq!(value.registration_hash, registration.digest().unwrap());
+        assert_eq!(value.generation, generation);
+        assert!(value.prepared_once);
+        assert_ne!(value.phase, SlotPhaseV1::Ready);
         let reserved = client
             .slot_status(&registration.arm.operation_id)
             .await
@@ -263,24 +309,27 @@ async fn retained_cancel_real_ipc_retries_without_seeding_or_targeting_later_slo
         assert_eq!(reserved.arm_id, registration.arm.operation_id);
         assert_eq!(reserved.registration_hash, registration.digest().unwrap());
         assert_eq!(reserved.generation, generation);
-        assert!(!reserved.prepared_once);
+        assert!(reserved.prepared_once);
     }
     let generation = CancelGeneration::new();
     assert_eq!(generation.invalidate(), 1);
     let (later_local, _) = client
         .retain_registration(later.clone(), generation.clone(), false, false)
         .unwrap();
-    // The real server waits 100ms for this deliberately unavailable actor.
-    // Interrupt the caller before its Register acknowledgement: retained intent
-    // must already exist, and another exact call must still deliver Cancel.
-    assert!(
-        tokio::time::timeout(
-            Duration::from_millis(1),
+    // Drop the call after the authenticated peer acknowledged the replay,
+    // while the caller still has not handled that reply or sent Cancel.
+    {
+        let seen = Arc::new(tokio::sync::Notify::new());
+        let interrupted = HELD_REGISTER_REPLY.scope(
+            (old.arm.operation_id.clone(), Arc::clone(&seen)),
             client.cancel_retained(old.clone(), generation.clone()),
-        )
-        .await
-        .is_err()
-    );
+        );
+        tokio::select! {
+            _ = seen.notified() => {}
+            result = interrupted => panic!("Cancel completed before the replay reply was held: {result:?}"),
+            _ = tokio::time::sleep(IO_TIMEOUT) => panic!("authenticated replay reply was not held"),
+        }
+    }
     let old_local = Arc::clone(
         client
             .0
@@ -292,6 +341,7 @@ async fn retained_cancel_real_ipc_retries_without_seeding_or_targeting_later_slo
     );
     assert!(old_local.cancel_durable.load(Ordering::SeqCst));
     assert!(old_local.retained_cancel.load(Ordering::SeqCst));
+    assert!(!old_local.acknowledged.load(Ordering::SeqCst));
     assert!(*old_local.stop.borrow());
     assert!(old_local.status.lock().unwrap().0.prepared_once);
     assert_eq!(generation.current(), 1);
@@ -303,11 +353,9 @@ async fn retained_cancel_real_ipc_retries_without_seeding_or_targeting_later_slo
     let untouched = client.slot_status(&later.arm.operation_id).await.unwrap();
     assert_eq!(stopped.generation, 7, "Cancel must use the remote maximum");
     assert!(stopped.prepared_once);
-    assert_eq!(untouched.generation, 1);
-    assert!(
-        !untouched.prepared_once,
-        "a later slot must not be restored"
-    );
+    // The later slot's remote generation is below the shared generation.
+    // Applying this Cancel to it would advance the remote generation.
+    assert_eq!(untouched.generation, 0, "later remote STOP was targeted");
     assert!(!*later_local.stop.borrow());
     assert!(!later_local.retained_cancel.load(Ordering::SeqCst));
     assert_eq!(generation.current(), 1, "no shared generation seed");

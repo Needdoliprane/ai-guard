@@ -347,6 +347,25 @@ impl RegistrationV1 {
     pub(crate) fn tenant_id(&self) -> &str {
         &self.tenant_id
     }
+    pub(crate) fn matches_spawn_target(
+        &self,
+        authority: &RuntimeAuthority,
+        created: &OwnedContainerSnapshot,
+    ) -> bool {
+        let registered = &self.owned.handle;
+        let target = &created.handle;
+        authority == &self.authority
+            && target.id() == registered.id()
+            && target.name() == registered.name()
+            && target.session_id() == registered.session_id()
+            && target.operation_id() == registered.operation_id()
+            && target.authority_fingerprint() == registered.authority_fingerprint()
+            && target.fingerprint_version() == registered.fingerprint_version()
+            && created
+                .observation
+                .validate_identity_allocation(&self.owned.observation)
+                .is_ok()
+    }
     pub(crate) fn digest(&self) -> EnforcerResult<String> {
         self.validate()?;
         // Full private binding, including invocation, not authority.fingerprint

@@ -197,3 +197,65 @@ Lancer d’abord le profil mot de passe depuis le client natif. Vérifier son ar
 Le dernier contrôle positif doit repasser après chaque série. Une déconnexion générique, un timeout ou un échec de disponibilité ne valident aucun refus attendu. Conserver le profil, les versions serveur et TLS et les catégories de résultat. Les volumes QA restent disponibles après l’arrêt. [Vérification de la session TLS](https://dev.mysql.com/doc/refman/8.4/en/using-encrypted-connections.html)
 
 La [fixture gateway SQL-06](GATEWAY_FIXTURE.md) prépare les schémas neufs et les comptes dédiés aux tests applicatifs.
+
+## Publication MySQL owned sur cible neuve (QA)
+
+Utiliser deux fichiers privés au format de registre de tenants existant.
+Passer le registre opérateur avec `--registry` et celui utilisé au démarrage
+par le gateway de la même installation avec `--gateway-registry` (option
+`--tenants-file` du gateway). Avant de lire les fichiers d’authentification,
+le CLI vérifie que le tenant choisi a le même namespace, hôte, port et schéma
+dans les deux registres. Chaque registre doit déclarer des cibles distinctes
+pour les différents tenants. Le compte SQL de l’opérateur doit différer de
+tous les comptes gateway déclarés pour le même hôte et port. La comparaison
+des hôtes déclarés ignore la casse ASCII. Vérifier les alias au niveau du
+déploiement. Utiliser un schéma dédié vide et écarter les autres écritures et
+l’administration du schéma pendant la publication.
+
+Le CLI ouvre uniquement les fichiers d’authentification de l’opérateur. Les
+deux profils TLS exigent un fichier de mot de passe et vérifient le nom du
+serveur et sa chaîne de certificats à partir de l’AC configurée. En mTLS,
+référencer aussi le certificat et la clé du client opérateur. Avant la
+publication, la connexion vérifie que le serveur a retenu le nom de compte
+opérateur attendu.
+[Exigences du compte opérateur et de la cible](OWNED_PREPARATION.md#compte-opérateur-du-prévol)
+
+Obtenir l’UUID serveur attendu indépendamment, depuis une session
+d’administration de confiance sur le serveur visé (`SELECT @@GLOBAL.server_uuid`).
+Attribuer une fois les UUID de l’opération, de l’installation et de la source,
+puis les conserver avec le format choisi. Utiliser des UUID canoniques non nuls,
+en minuscules et avec tirets. L’exemple sélectionne le format 15. Pour le
+format 14, utiliser `--schema-version 14`.
+
+```sh
+agentsandbox prepare-mysql-owned \
+  --registry "${QA_MYSQL_OPERATOR_REGISTRY:?}" \
+  --gateway-registry "${QA_MYSQL_GATEWAY_REGISTRY:?}" --tenant "${QA_MYSQL_TENANT:?}" \
+  --schema-version 15 --server-uuid "${QA_MYSQL_SERVER_UUID:?}" \
+  --operation-id "${QA_MYSQL_OPERATION_ID:?}" \
+  --installation-id "${QA_MYSQL_INSTALLATION_ID:?}" \
+  --source-id "${QA_MYSQL_SOURCE_ID:?}"
+```
+
+En cas de succès, la sortie standard contient un seul reçu JSON vérifié.
+Après la perte d’un reçu, répéter la commande avec la même cible, le même
+format et les mêmes UUID. Sur un schéma non vide, le contrôle se fait en
+lecture seule sur la session SQL verrouillée. Il vérifie le manifeste, l’ancre
+exacte de l’opération, le tenant et le namespace, la chaîne et la tête
+initiales d’audit ainsi que les projections vides. Une correspondance exacte
+rend la même tête de publication. Une cible incomplète, étrangère, divergente
+ou passée au-delà de la publication initiale est refusée et conservée.
+
+Sur MySQL 8.4.13 sous Docker Desktop ARM64, `prepare-mysql-owned` construit
+depuis `38b64857` passe la publication sur base neuve et le rejeu exact au
+format 14 avec mot de passe et TLS et au format 15 avec mot de passe et mTLS.
+Chaque rejeu restitue les mêmes octets de reçu et préserve la tête d’audit
+initiale et les projections. Le CLI refuse un UUID serveur différent, des
+cibles de registre divergentes et un schéma étranger non vide sans modifier
+l’état contrôlé.
+[Reçu du CLI et preuve distincte du libtest](OWNED_PREPARATION.md#recettes-physiques)
+
+L’opérateur prend en charge tout transfert d’historique lors d’un changement
+de stockage. L’admission par le gateway owned, l’epoch du propriétaire,
+la restauration et les tests applicatifs SQL-04 à SQL-06 exigent encore
+des preuves distinctes.

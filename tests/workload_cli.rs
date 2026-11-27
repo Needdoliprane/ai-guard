@@ -13,6 +13,7 @@ use agentsandbox::{
     policy::{self, Policy},
     redaction::Redactor,
     runtime::capture_stream,
+    workload_cli::WorkloadCliError,
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -139,14 +140,49 @@ fn no_secret(output: &Output, secret: &str) {
     );
 }
 
+fn workload_error_category(stderr: &[u8]) -> Option<WorkloadCliError> {
+    use WorkloadCliError as Error;
+
+    // Report only a known public category, never the captured child output.
+    let stderr = std::str::from_utf8(stderr).ok()?;
+    [
+        Error::InvalidInput,
+        Error::InputDeadline,
+        Error::InvalidControl,
+        Error::UnsafeState,
+        Error::IncompletePreparation,
+        Error::Busy,
+        Error::ScopeMismatch,
+        Error::Transport,
+        Error::Protocol,
+        Error::Authentication,
+        Error::Forbidden,
+        Error::Conflict,
+        Error::Capacity,
+        Error::Clock,
+        Error::Unavailable,
+        Error::Output,
+    ]
+    .into_iter()
+    .find(|category| {
+        let message = category.to_string();
+        stderr
+            .lines()
+            .filter_map(|line| line.strip_prefix("Error: "))
+            .any(|line| line == message)
+    })
+}
+
+#[track_caller]
 fn success(output: &Output) -> Value {
-    assert!(
-        output.status.success(),
-        "workload CLI operation must succeed; exit={:?}",
-        output.status.code()
-    );
     no_secret(output, RUNNER);
     no_secret(output, VIEWER);
+    assert!(
+        output.status.success(),
+        "workload CLI operation must succeed; exit={:?}, category={:?}",
+        output.status.code(),
+        workload_error_category(&output.stderr)
+    );
     serde_json::from_slice(&output.stdout).unwrap()
 }
 
@@ -221,9 +257,19 @@ impl Drop for Gateway {
 }
 
 impl Gateway {
+    fn migrated_tenants(root: &Path) -> (Arc<Store>, Arc<Store>) {
+        (
+            migrated_store(&root.join("tenant-a.sqlite"), "tenant-a"),
+            migrated_store(&root.join("tenant-b.sqlite"), "tenant-b"),
+        )
+    }
+
     async fn new(root: &Path, operation: PathBuf) -> Self {
-        let store = migrated_store(&root.join("tenant-a.sqlite"), "tenant-a");
-        let neighbor = migrated_store(&root.join("tenant-b.sqlite"), "tenant-b");
+        let (store, neighbor) = Self::migrated_tenants(root);
+        Self::serve(store, neighbor, operation).await
+    }
+
+    async fn serve(store: Arc<Store>, neighbor: Arc<Store>, operation: PathBuf) -> Self {
         let namespace = store
             .supervision_state()
             .unwrap()
@@ -1461,11 +1507,14 @@ async fn worker_binding_cli_authenticates_only_its_authorized_software_attempt()
     let directory = support::private_tempdir();
     let root = directory.path();
     let operation = root.join("worker-a");
-    let gateway = Gateway::new(root, operation.clone()).await;
+    let (store, neighbor) = Gateway::migrated_tenants(root);
     // Real typed Store gates and SQLite projections; runtime observations in
     // these helpers are declared software fixtures, never container evidence.
-    let a = running_worker(&gateway.store);
-    let b = running_worker(&gateway.neighbor);
+    let a = running_worker(&store);
+    let b = running_worker(&neighbor);
+    // Gateway startup opens and verifies the connections with its masking policy.
+    // Issuance only consults the neighbor's already-verified snapshot.
+    let gateway = Gateway::serve(store, neighbor, operation.clone()).await;
     let control = gateway.control_file(root, "control", RUNNER, "tenant-a");
     let manifest = |worker: &WorkerV1| {
         json!({
@@ -1475,11 +1524,18 @@ async fn worker_binding_cli_authenticates_only_its_authorized_software_attempt()
         })
     };
     prepare_named(root, "worker-a", &manifest(&a), &control).await;
-    let applied = run(operation_command("apply", &operation, Some(&control)), root).await;
-    assert_eq!(success(&applied)["status"], "operation_recorded");
     let key = fs::read_to_string(operation.join("credential")).unwrap();
     let key = key.trim_end_matches('\n');
+    let applied = run(operation_command("apply", &operation, Some(&control)), root).await;
     no_secret(&applied, key);
+    if !applied.status.success() {
+        eprintln!(
+            "worker binding apply: scope_present={}, issue_requests={}",
+            operation.join("scope").is_dir(),
+            gateway.posts.load(Ordering::SeqCst)
+        );
+    }
+    assert_eq!(success(&applied)["status"], "operation_recorded");
     let inbox = reqwest::Client::builder()
         .no_proxy()
         .build()
