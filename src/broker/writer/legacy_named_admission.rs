@@ -194,10 +194,6 @@ impl WriterClient {
         if reserved.state != WorkerStateV1::Reserved || !reserved.quota_held {
             return Err(JournalError::Conflict);
         }
-        let cancellation_domain = format!(
-            "ai-guard:legacy-named-cancel-reservation-operation:v1:{}",
-            job.operation_id()
-        );
         let request = LegacyNamedCancelReservationV1 {
             version: 1,
             binding_ref: retained.plan().binding_ref,
@@ -205,10 +201,7 @@ impl WriterClient {
             admission: admission.admission.receipt.clone(),
             mutation: WorkerMutationV1 {
                 version: 1,
-                operation_id: crate::model::bound_event_id(
-                    cancellation_domain.as_bytes(),
-                    stop.command_id(),
-                ),
+                operation_id: cancellation_operation_id(job.operation_id(), stop.command_id()),
                 worker_id: reserved.worker_id.clone(),
                 attempt_id: reserved.attempt.attempt_id.clone(),
                 expected_revision: reserved.revision,
@@ -229,6 +222,11 @@ impl WriterClient {
         }
         Ok(job)
     }
+}
+
+fn cancellation_operation_id(operation: Uuid, stop: Uuid) -> String {
+    let domain = format!("ai-guard:legacy-named-cancel-reservation-operation:v1:{operation}");
+    crate::model::bound_event_id(domain.as_bytes(), stop)
 }
 
 fn require_open(current: &BrokerCheckpointV3) -> JournalResult<()> {
@@ -318,4 +316,23 @@ fn with_initial_decision(
     )?;
     let broker = BrokerCheckpointV2::new(current.broker().runner().clone(), supervision)?;
     BrokerCheckpointV3::new(broker, current.commands().to_vec())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn named_cancellation_replays_within_its_job_and_separates_jobs() {
+        let stop = Uuid::from_u128(1);
+        let original = Uuid::from_u128(2);
+        let other_job = Uuid::from_u128(3);
+        let retained = cancellation_operation_id(original, stop);
+        assert_eq!(retained, cancellation_operation_id(original, stop));
+        assert_ne!(retained, cancellation_operation_id(other_job, stop));
+        assert_ne!(
+            retained,
+            cancellation_operation_id(original, Uuid::from_u128(4))
+        );
+    }
 }
