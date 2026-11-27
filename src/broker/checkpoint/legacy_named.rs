@@ -482,6 +482,13 @@ impl LegacyNamedAdmissionCheckpoint {
             ensure(equal(saved, &request)?)?;
             return Ok(self);
         }
+        if request.phase == LegacyNamedImportObservationPhaseV1::Terminal
+            && self
+                .import_observation(LegacyNamedImportObservationPhaseV1::Started)
+                .is_some_and(|(_, receipt)| receipt.is_none())
+        {
+            return Err(JournalError::Conflict);
+        }
         self.import_observations
             .push(LegacyNamedImportObservationCheckpointV1 {
                 version: 1,
@@ -759,6 +766,7 @@ impl LegacyNamedAdmissionCheckpoint {
                     started.request.phase == LegacyNamedImportObservationPhaseV1::Started
                         && terminal.request.phase == LegacyNamedImportObservationPhaseV1::Terminal,
                 )?;
+                ensure(started.receipt().is_some())?;
                 let started_fact = &started.request.observation.observation;
                 let terminal_fact = &terminal.request.observation.observation;
                 ensure(started_fact.started_at == terminal_fact.started_at)?;
@@ -2146,6 +2154,16 @@ mod tests {
             &started_seen,
             None,
         );
+        let terminal_request = import_observation_fixture(
+            &plan,
+            &claim,
+            &claim_receipt,
+            &arm_result,
+            LegacyNamedImportObservationPhaseV1::Terminal,
+            &started_at,
+            &terminal_seen,
+            Some(&finished_at),
+        );
         let observation_base = accepted
             .clone()
             .with_import_creation(helper_id, &authority)?
@@ -2168,6 +2186,17 @@ mod tests {
             .await?;
         assert!(started_pending.receipt().is_none());
         assert!(equal(started_pending.request(), &started_request)?);
+        let head_with_started_pending = observation_writer.load(operation).await?.unwrap().head();
+        assert!(matches!(
+            observation_writer
+                .record_legacy_named_import_observation(&plan, terminal_request.clone())
+                .await,
+            Err(JournalError::Conflict)
+        ));
+        assert_eq!(
+            observation_writer.load(operation).await?.unwrap().head(),
+            head_with_started_pending
+        );
         let head_before_divergence = observation_writer.load(operation).await?.unwrap().head();
         let mut divergent_started = started_request.clone();
         divergent_started.observation.observation.observed_at =
@@ -2228,16 +2257,6 @@ mod tests {
             &stopped_job.broker_checkpoint_v3().unwrap().commands()
         )?);
 
-        let terminal_request = import_observation_fixture(
-            &plan,
-            &claim,
-            &claim_receipt,
-            &arm_result,
-            LegacyNamedImportObservationPhaseV1::Terminal,
-            &started_at,
-            &terminal_seen,
-            Some(&finished_at),
-        );
         let terminal_first = observation_base
             .clone()
             .with_import_observation(terminal_request.clone())?;
