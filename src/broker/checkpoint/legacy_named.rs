@@ -2945,15 +2945,16 @@ mod tests {
                 )
                 .is_err()
         );
-        assert!(
-            forged_after_stop
-                .validate_transition(
-                    Some(after_stop_lifecycle),
-                    Some(after_stop_lifecycle.broker()),
-                    after_stop.checkpoint(),
-                    None,
-                )
-                .is_err()
+        let stopped_head = after_stop.head().clone();
+        assert!(matches!(
+            stopped_plan_writer
+                .advance_lifecycle(operation, stopped_head.clone(), forged_after_stop)
+                .await,
+            Err(JournalError::Conflict)
+        ));
+        assert_eq!(
+            stopped_plan_writer.load(operation).await?.unwrap().head(),
+            &stopped_head
         );
         drop(stopped_plan_writer);
 
