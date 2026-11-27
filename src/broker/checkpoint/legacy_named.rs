@@ -1672,6 +1672,7 @@ mod tests {
             assert!(stop.named_reservation().is_none());
             let named_import = stop.named_import().expect("pending Arm predates STOP");
             assert_eq!(named_import.command_id(), stop_id);
+            assert_eq!(named_import.arm_pending_head(), recorded.birth());
             assert!(
                 named_import.arm_pending_head().revision() < named_import.stop_head().revision()
             );
@@ -1684,6 +1685,16 @@ mod tests {
                 authority.fingerprint()
             );
             assert_eq!(named_import.evidence().runtime_binding_hash().len(), 64);
+            let stop_facts = serde_json::to_value(
+                stop.named_import_stop_facts()?
+                    .expect("verified STOP can be projected from the original lease"),
+            )?;
+            assert_eq!(stop_facts["arm_pending_head"], json!(recorded.birth()));
+            assert_eq!(stop_facts["stop_head"], json!(stop.receipt().head()));
+            assert_eq!(
+                stop_facts["command_input_hash"],
+                stop.receipt().input_hash()
+            );
             assert!(stop.stops().is_empty());
             let snapshot = writer.stops().recovery_status(operation).await?.unwrap();
             assert!(snapshot.incomplete());
@@ -1714,6 +1725,10 @@ mod tests {
                 named_import.arm_pending_head()
             );
             assert_eq!(replayed_import.stop_head(), named_import.stop_head());
+            assert_eq!(
+                serde_json::to_value(replayed_stop.named_import_stop_facts()?.unwrap())?,
+                stop_facts
+            );
             let projected_receipt = replayed_import
                 .evidence()
                 .receipt()
