@@ -500,6 +500,28 @@ async fn legacy_local_confirmation_survives_reopen_without_admission() {
             serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
         )
     }
+    async fn audited_identity(
+        router: &Router,
+        store: &Store,
+        credential: &str,
+    ) -> serde_json::Value {
+        let before = store.head().unwrap();
+        let (status, identity) = call(router, "/api/v1/human/identity", credential, None).await;
+        assert_eq!(status, StatusCode::OK);
+        let events = store
+            .events(&EventQuery {
+                after: Some(before),
+                limit: Some(2),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(events.len(), 1);
+        let read = &events[0];
+        assert_eq!(read.seq, before + 1);
+        assert_eq!(read.event.kind, "control.identity.access");
+        assert_eq!(read.event.data["action"], "identity");
+        identity
+    }
     let make_router = |store: Arc<Store>| {
         gateway_router(
             GatewayState::for_tenants(
@@ -538,8 +560,7 @@ async fn legacy_local_confirmation_survives_reopen_without_admission() {
         principal
     };
     let router = make_router(reopened.clone());
-    let (status, who) = call(&router, "/api/v1/human/identity", &credential, None).await;
-    assert_eq!(status, StatusCode::OK);
+    let who = audited_identity(&router, &reopened, &credential).await;
     let context = who["contexts"][0]["id"].as_str().unwrap();
     let prepare_op = Uuid::new_v4();
     let prepared = serde_json::json!({
@@ -572,8 +593,9 @@ async fn legacy_local_confirmation_survives_reopen_without_admission() {
         assert_eq!(status, StatusCode::FORBIDDEN);
         assert_eq!(body["error"]["code"], "context_revoked");
     }
-    let (status, who) = call(&router, "/api/v1/human/identity", &credential, None).await;
-    assert_eq!(status, StatusCode::OK);
+    assert_eq!(reopened.head().unwrap(), head);
+    let who = audited_identity(&router, &reopened, &credential).await;
+    let head = reopened.head().unwrap();
     let context = who["contexts"][0]["id"].as_str().unwrap();
     let (status, mut replay) = call(
         &router,
@@ -674,8 +696,7 @@ async fn legacy_local_confirmation_survives_reopen_without_admission() {
     let reopened = reopen();
     let other_principal = add_unrelated_account(&reopened);
     let router = make_router(reopened.clone());
-    let (status, who) = call(&router, "/api/v1/human/identity", &credential, None).await;
-    assert_eq!(status, StatusCode::OK);
+    let who = audited_identity(&router, &reopened, &credential).await;
     let head = reopened.head().unwrap();
     let context = who["contexts"][0]["id"].as_str().unwrap();
     let (status, mut replay) = call(
@@ -764,9 +785,8 @@ async fn legacy_local_confirmation_survives_reopen_without_admission() {
         authorization_revision
     );
     let router = make_router(reopened.clone());
+    let who = audited_identity(&router, &reopened, &credential).await;
     let head = reopened.integrity().unwrap().head_hash;
-    let (status, who) = call(&router, "/api/v1/human/identity", &credential, None).await;
-    assert_eq!(status, StatusCode::OK);
     assert_eq!(
         who["contexts"][0]["capabilities"],
         serde_json::json!(["launch_session"])
@@ -789,9 +809,8 @@ async fn legacy_local_confirmation_survives_reopen_without_admission() {
     assert!(apply(&input).status.success(), "restore the target ACL");
     let reopened = reopen();
     let router = make_router(reopened.clone());
+    let who = audited_identity(&router, &reopened, &credential).await;
     let head = reopened.head().unwrap();
-    let (status, who) = call(&router, "/api/v1/human/identity", &credential, None).await;
-    assert_eq!(status, StatusCode::OK);
     let context = who["contexts"][0]["id"].as_str().unwrap();
     for (path, input, original) in [
         (
@@ -818,9 +837,8 @@ async fn legacy_local_confirmation_survives_reopen_without_admission() {
             membership: restricted.clone(),
         }))
         .unwrap();
+    let who = audited_identity(&router, &reopened, &credential).await;
     let head = reopened.head().unwrap();
-    let (status, who) = call(&router, "/api/v1/human/identity", &credential, None).await;
-    assert_eq!(status, StatusCode::OK);
     let context = who["contexts"][0]["id"].as_str().unwrap();
     for (path, input) in [
         ("/api/v1/human/legacy/sessions/prepare", &prepared),
