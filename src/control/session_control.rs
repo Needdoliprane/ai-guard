@@ -414,6 +414,119 @@ impl LegacyNamedImportClaimRequestV1 {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum LegacyNamedImportObservationPhaseV1 {
+    Started,
+    Terminal,
+}
+
+/// A fact observed for the helper of one consumed named Import claim.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct LegacyNamedImportObservationRequestV1 {
+    pub(crate) version: u32,
+    pub(crate) binding_ref: Uuid,
+    pub(crate) namespace: String,
+    pub(crate) phase: LegacyNamedImportObservationPhaseV1,
+    pub(crate) claim_receipt: super::MutationReceiptV1,
+    pub(crate) observation: super::HelperObservationV1,
+}
+
+impl LegacyNamedImportObservationRequestV1 {
+    pub(crate) fn operation_id(
+        binding_ref: Uuid,
+        claim_id: Uuid,
+        phase: LegacyNamedImportObservationPhaseV1,
+    ) -> String {
+        let phase = match phase {
+            LegacyNamedImportObservationPhaseV1::Started => "started",
+            LegacyNamedImportObservationPhaseV1::Terminal => "terminal",
+        };
+        let domain = format!("ai-guard:legacy-named-import-observation:v1:{binding_ref}:{phase}");
+        crate::model::bound_event_id(domain.as_bytes(), claim_id)
+    }
+
+    pub(crate) fn validate(&self) -> anyhow::Result<()> {
+        self.observation.validate()?;
+        let arm = &self.observation.arm_receipt;
+        let arm_id = canonical_uuid(&arm.arm_id)?;
+        let claim_id = canonical_uuid(&self.claim_receipt.operation_id)?;
+        invalid(
+            self.version == 1
+                && !self.binding_ref.is_nil()
+                && !canonical_uuid(&self.namespace)?.is_nil()
+                && !arm_id.is_nil()
+                && arm.control_namespace_uuid == self.namespace
+                && self.claim_receipt.operation_id
+                    == LegacyNamedImportClaimRequestV1::operation_id(self.binding_ref, arm_id)
+                && self.claim_receipt.worker_id.as_deref() == Some(arm.worker_id.as_str())
+                && self.claim_receipt.revision.is_none()
+                && self.claim_receipt.audit_seq > arm.audit_seq
+                && self.observation.operation_id
+                    == Self::operation_id(self.binding_ref, claim_id, self.phase)
+                && self.observation.verification.is_none(),
+        )?;
+        hash(&self.claim_receipt.input_hash)?;
+        hash(&self.claim_receipt.audit_hash)?;
+
+        let observation = &self.observation.observation;
+        let started = observation
+            .started_at
+            .as_deref()
+            .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+            .ok_or(ControlFailure::InvalidRequest)?;
+        let observed = chrono::DateTime::parse_from_rfc3339(&observation.observed_at)
+            .map_err(|_| ControlFailure::InvalidRequest)?;
+        invalid(
+            observation.restart_count == Some(0) && started.timestamp() > 0 && started <= observed,
+        )?;
+        use super::RuntimeStatusV1;
+        match self.phase {
+            LegacyNamedImportObservationPhaseV1::Started => invalid(
+                observation.status == RuntimeStatusV1::Running
+                    && observation.running == Some(true)
+                    && observation.finished_at.is_none(),
+            ),
+            LegacyNamedImportObservationPhaseV1::Terminal => {
+                let finished = observation
+                    .finished_at
+                    .as_deref()
+                    .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+                    .ok_or(ControlFailure::InvalidRequest)?;
+                invalid(
+                    matches!(
+                        observation.status,
+                        RuntimeStatusV1::Exited | RuntimeStatusV1::Dead
+                    ) && observation.running == Some(false)
+                        && observation.exit_code.is_some()
+                        && started <= finished
+                        && finished <= observed,
+                )
+            }
+        }
+    }
+
+    pub(crate) fn input_hash(&self) -> anyhow::Result<String> {
+        self.validate()?;
+        content_hash("ai-guard:legacy-named-import-observation:v1", self)
+    }
+
+    pub(crate) fn validate_receipt(
+        &self,
+        receipt: &super::MutationReceiptV1,
+    ) -> anyhow::Result<()> {
+        hash(&receipt.audit_hash)?;
+        conflict(
+            receipt.operation_id == self.observation.operation_id
+                && receipt.worker_id == self.claim_receipt.worker_id
+                && receipt.revision.is_none()
+                && receipt.audit_seq > self.claim_receipt.audit_seq
+                && receipt.input_hash == self.input_hash()?,
+        )
+    }
+}
+
 /// The exact launch commit of one retained preparation. It names the launch
 /// operation (the idempotency key), the opaque target and its expected server
 /// revision, and the preparation it consumes by reference and exact fingerprint.
