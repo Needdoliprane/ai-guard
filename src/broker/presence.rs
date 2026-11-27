@@ -457,10 +457,11 @@ impl LegacyNamedControl {
     /// Reconcile a reservation already frozen by a confirmed broker STOP.
     pub(crate) async fn cancel_legacy_named_reservation(
         &self,
-        stop: &CancelStopProjectionV1,
+        stop: &Arc<CancelStopProjectionV1>,
+        io: &Arc<Semaphore>,
     ) -> Result<()> {
         self.0.revalidate()?;
-        legacy_named_admission::cancel_reserved(&self.0, stop).await
+        legacy_named_admission::cancel_reserved(&self.0, stop, io).await
     }
 }
 

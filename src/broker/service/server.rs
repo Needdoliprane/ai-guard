@@ -2448,7 +2448,7 @@ impl Service {
                 .get()
                 .ok_or(BrokerErrorCodeV1::NeedsReconciliation)?;
             control
-                .cancel_legacy_named_reservation(&projection)
+                .cancel_legacy_named_reservation(&projection, &self.blocking)
                 .await
                 .map_err(|_| BrokerErrorCodeV1::NeedsReconciliation)?;
         }

@@ -258,8 +258,9 @@ pub(super) async fn reconcile(
 }
 
 pub(super) async fn cancel_reserved(
-    presence: &PresenceAuthority,
-    stop: &CancelStopProjectionV1,
+    presence: &Arc<PresenceAuthority>,
+    stop: &Arc<CancelStopProjectionV1>,
+    io: &Arc<Semaphore>,
 ) -> Result<()> {
     validate_scope(presence, stop.scope())?;
     let reservation = stop.named_reservation().ok_or(PresenceError::Conflict)?;
@@ -288,7 +289,7 @@ pub(super) async fn cancel_reserved(
     let cancellation = reservation
         .cancellation(receipt)
         .map_err(named_write_error)?;
-    stop.revalidate().map_err(named_write_error)?;
+    revalidate_cancel(presence, stop, io).await?;
     let Some((request, reserved)) = cancellation else {
         return Ok(());
     };
@@ -323,11 +324,30 @@ pub(super) async fn cancel_reserved(
     let result =
         serde_json::from_value(value).map_err(|_| PresenceError::AdmissionOutcomeUnknown)?;
     validate_cancel_receipt(&request, &reserved, &result)?;
-    presence
-        .revalidate()
-        .map_err(|_| PresenceError::AdmissionOutcomeUnknown)?;
-    stop.revalidate().map_err(named_write_error)?;
+    revalidate_cancel(presence, stop, io).await?;
     Ok(())
+}
+
+async fn revalidate_cancel(
+    presence: &Arc<PresenceAuthority>,
+    stop: &Arc<CancelStopProjectionV1>,
+    io: &Arc<Semaphore>,
+) -> Result<()> {
+    let permit = Arc::clone(io)
+        .acquire_owned()
+        .await
+        .map_err(|_| PresenceError::Unavailable)?;
+    let presence = Arc::clone(presence);
+    let stop = Arc::clone(stop);
+    // The retained STOP reader may fsync. Keep its lease and the service's FS
+    // budget until the blocking check completes, even if the request is dropped.
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        stop.revalidate().map_err(named_write_error)?;
+        presence.revalidate()
+    })
+    .await
+    .map_err(|_| PresenceError::Unavailable)?
 }
 
 fn validate_cancel_receipt(
