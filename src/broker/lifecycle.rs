@@ -359,12 +359,15 @@ impl BrokerCheckpointV3 {
             .iter()
             .any(|c| matches!(c.request, LocalCommandRequestV1::CancelRequested));
         // An already recorded request can take its Store receipt after STOP.
-        // A new named admission or Import Arm cannot cross that boundary.
+        // A new named admission, Import creation or Arm cannot cross that boundary.
         if cancelled && let Some(named) = self.broker.supervision().legacy_named_admission() {
             let previous =
                 previous_broker.and_then(|old| old.supervision().legacy_named_admission());
             if named.pending_v2().is_some() {
                 require(previous.is_some())?;
+            }
+            if named.import_creation().is_some() {
+                require(previous.and_then(|old| old.import_creation()).is_some())?;
             }
             if named.import_arm().is_some() {
                 require(previous.and_then(|old| old.import_arm()).is_some())?;

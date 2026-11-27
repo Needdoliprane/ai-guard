@@ -24,6 +24,12 @@ pub(crate) struct LegacyNamedAdmissionCheckpoint {
         skip_serializing_if = "Option::is_none"
     )]
     import_arm: Option<Box<LegacyNamedImportArmCheckpointV1>>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    import_creation: Option<Box<LegacyNamedImportCreationV1>>,
 }
 
 fn deserialize_present<'de, D, T>(decoder: D) -> Result<Option<T>, D::Error>
@@ -48,6 +54,15 @@ impl LegacyNamedImportArmCheckpointV1 {
     pub(crate) fn receipt(&self) -> Option<&ArmReceiptV1> {
         self.receipt.as_ref()
     }
+}
+
+/// The first local create boundary for the exact import helper. Its presence
+/// records that creation may be issued, before any runtime observation exists.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LegacyNamedImportCreationV1 {
+    version: u32,
+    preparation: HelperPreparationV1,
 }
 
 /// The exact request and archive pinned by a V2 pending checkpoint.
@@ -91,6 +106,7 @@ impl LegacyNamedAdmissionCheckpoint {
             receipt: None,
             archive_digest,
             import_arm: None,
+            import_creation: None,
         };
         let namespace = uuid(&value.plan.control_namespace_uuid)?;
         value.validate_shape(namespace)?;
@@ -138,6 +154,40 @@ impl LegacyNamedAdmissionCheckpoint {
         self.archive_digest.as_deref()
     }
 
+    pub(crate) fn import_creation(&self) -> Option<&HelperPreparationV1> {
+        self.import_creation
+            .as_deref()
+            .map(|saved| &saved.preparation)
+    }
+
+    #[allow(dead_code, reason = "the named create caller is composed separately")]
+    pub(crate) fn with_import_creation(mut self, helper_id: Uuid) -> JournalResult<Self> {
+        ensure(self.import_creation.is_none() && self.import_arm.is_none())?;
+        self.import_creation = Some(Box::new(LegacyNamedImportCreationV1 {
+            version: 1,
+            preparation: self.import_preparation(helper_id)?,
+        }));
+        self.validate_shape(uuid(&self.plan.control_namespace_uuid)?)?;
+        Ok(self)
+    }
+
+    fn import_preparation(&self, helper_id: Uuid) -> JournalResult<HelperPreparationV1> {
+        let admission = self.admission_result().ok_or(JournalError::Conflict)?;
+        let parent = admission.worker.as_ref().ok_or(JournalError::Conflict)?;
+        let policy = checked(helper_execution_policy_v1(
+            parent,
+            HelperPurposeV1::Import,
+            helper_id,
+        ))?;
+        HelperPreparationV1::new(
+            policy,
+            HelperPermissionV1::Admission {
+                receipt: admission.receipt.clone(),
+            },
+            None,
+        )
+    }
+
     pub(crate) fn import_arm(&self) -> Option<&LegacyNamedImportArmCheckpointV1> {
         self.import_arm.as_deref()
     }
@@ -176,7 +226,9 @@ impl LegacyNamedAdmissionCheckpoint {
     }
 
     pub(crate) fn requires_strict_cas(&self) -> bool {
-        self.pending_v2().is_some() || self.import_arm().is_some_and(|arm| arm.receipt().is_none())
+        self.pending_v2().is_some()
+            || (self.import_creation().is_some() && self.import_arm().is_none())
+            || self.import_arm().is_some_and(|arm| arm.receipt().is_none())
     }
 
     #[allow(
@@ -198,7 +250,11 @@ impl LegacyNamedAdmissionCheckpoint {
 
     pub(super) fn validate_shape(&self, namespace: Uuid) -> JournalResult<()> {
         match self.version {
-            1 => ensure(self.archive_digest.is_none() && self.import_arm.is_none())?,
+            1 => ensure(
+                self.archive_digest.is_none()
+                    && self.import_arm.is_none()
+                    && self.import_creation.is_none(),
+            )?,
             2 => hash(self.archive_digest().ok_or(JournalError::Conflict)?)?,
             _ => return Err(JournalError::UnsupportedVersion),
         }
@@ -213,6 +269,14 @@ impl LegacyNamedAdmissionCheckpoint {
         checked(self.request.require_plan(plan))?;
         if let Some(saved) = &self.receipt {
             validate_legacy_named_admission_receipt(namespace, &self.request, saved)?;
+        }
+        if let Some(creation) = &self.import_creation {
+            if creation.version != 1 {
+                return Err(JournalError::UnsupportedVersion);
+            }
+            let expected =
+                self.import_preparation(uuid(&creation.preparation.policy().helper_id)?)?;
+            ensure(equal(&creation.preparation, &expected)?)?;
         }
         if let Some(arm) = self.import_arm() {
             self.validate_import_arm(arm)?;
@@ -242,8 +306,9 @@ impl LegacyNamedAdmissionCheckpoint {
                 && arm.intent_hash == self.request.admission.intent_hash
                 && matches!(
                     &arm.subject,
-                    ArmSubjectV1::Helper { purpose: HelperPurposeV1::Import, permission, .. }
-                    if matches!(permission.as_ref(), HelperPermissionV1::Admission { receipt } if receipt == &admission.admission.receipt)
+                    ArmSubjectV1::Helper { purpose: HelperPurposeV1::Import, helper_id, permission, .. }
+                    if self.import_creation().is_none_or(|prep| &prep.policy().helper_id == helper_id)
+                        && matches!(permission.as_ref(), HelperPermissionV1::Admission { receipt } if receipt == &admission.admission.receipt)
                 ),
         )?;
         let prepare = WorkerMutationV1 {
@@ -268,7 +333,11 @@ impl LegacyNamedAdmissionCheckpoint {
 
     pub(super) fn validate_transition(&self, previous: Option<&Self>) -> JournalResult<()> {
         match previous {
-            None => ensure(self.receipt.is_none() && self.import_arm.is_none()),
+            None => ensure(
+                self.receipt.is_none()
+                    && self.import_arm.is_none()
+                    && self.import_creation.is_none(),
+            ),
             Some(old) => {
                 ensure(
                     self.version == old.version
@@ -277,6 +346,15 @@ impl LegacyNamedAdmissionCheckpoint {
                         && equal(&self.request, &old.request)?,
                 )?;
                 ensure(old.receipt.is_none() || equal(&self.receipt, &old.receipt)?)?;
+                if old.import_creation.is_some() {
+                    ensure(equal(&self.import_creation, &old.import_creation)?)?;
+                } else if self.import_creation.is_some() {
+                    ensure(
+                        old.admission_result().is_some_and(|result| result.accepted)
+                            && old.import_arm.is_none()
+                            && self.import_arm.is_none(),
+                    )?;
+                }
                 match (old.import_arm(), self.import_arm()) {
                     (None, None) => Ok(()),
                     (None, Some(new)) => ensure(
@@ -828,14 +906,20 @@ mod tests {
             },
         };
         let accepted = pending.clone().acknowledge(admission.clone())?;
-        let named_arm = accepted.with_import_arm(arm.clone())?;
+        let named_arm = accepted.clone().with_import_arm(arm.clone())?;
         assert!(matches!(
             checkpoint(named_arm.clone())?.validate_transition(Some(&prepared)),
             Err(JournalError::Conflict)
         ));
+        let latched = accepted.clone().with_import_creation(helper_id)?;
+        let other_latch = accepted.with_import_creation(Uuid::new_v4())?;
+        assert!(matches!(
+            other_latch.clone().with_import_arm(arm.clone()),
+            Err(JournalError::Conflict)
+        ));
 
-        for stop_first in [true, false] {
-            let writer = start_writer(&format!("import-{stop_first}")).await?;
+        let start_admitted_writer = async |name: &str| -> anyhow::Result<WriterClient> {
+            let writer = start_writer(name).await?;
             let recorded = writer
                 .record_legacy_named_admission(&plan, digest.clone())
                 .await?;
@@ -846,6 +930,10 @@ mod tests {
                     admission.clone(),
                 )
                 .await?;
+            Ok(writer)
+        };
+        for stop_first in [true, false] {
+            let writer = start_admitted_writer(&format!("import-{stop_first}")).await?;
             let admitted = writer.load(operation).await?.unwrap();
             assert!(
                 writer
@@ -880,6 +968,22 @@ mod tests {
                 assert!(matches!(
                     writer
                         .record_legacy_named_import_arm(&plan, &digest, arm.clone())
+                        .await,
+                    Err(JournalError::Interrupted)
+                ));
+                let next = BrokerCheckpointV3::new(
+                    checkpoint(latched.clone())?,
+                    stopped.broker_checkpoint_v3().unwrap().commands().to_vec(),
+                )?;
+                assert!(matches!(
+                    writer
+                        .advance_lifecycle(operation, stopped.head().clone(), next)
+                        .await,
+                    Err(JournalError::Conflict)
+                ));
+                assert!(matches!(
+                    writer
+                        .record_legacy_named_import_creation(&plan, &digest, helper_id)
                         .await,
                     Err(JournalError::Interrupted)
                 ));
@@ -986,6 +1090,57 @@ mod tests {
                 acknowledged.head()
             );
         }
+
+        let writer = start_admitted_writer("import-creation").await?;
+        let before_creation = writer.load(operation).await?.unwrap();
+        assert!(matches!(
+            writer
+                .record_legacy_named_import_creation(&plan, &"0".repeat(64), helper_id)
+                .await,
+            Err(JournalError::Conflict)
+        ));
+        let (first, second) = tokio::join!(
+            writer.record_legacy_named_import_creation(&plan, &digest, helper_id),
+            writer.record_legacy_named_import_creation(&plan, &digest, helper_id),
+        );
+        let recorded = match (first, second) {
+            (Ok(recorded), Err(JournalError::Conflict))
+            | (Err(JournalError::Conflict), Ok(recorded)) => recorded,
+            _ => panic!("only one exact import creation write may return a first ticket"),
+        };
+        let creation_head = recorded.job().head();
+        assert_eq!(
+            creation_head.revision(),
+            before_creation.head().revision() + 1
+        );
+        assert_eq!(writer.load(operation).await?.unwrap().head(), creation_head);
+        let retained = writer.load_legacy_named_admission(operation).await?;
+        let preparation = retained.import_creation().unwrap();
+        assert!(equal(preparation.policy(), &helper)?);
+        assert!(matches!(
+            preparation.permission(),
+            HelperPermissionV1::Admission { receipt } if receipt == &admission.admission.receipt
+        ));
+        assert!(preparation.owned().is_none());
+        assert!(retained.import_arm().is_none());
+        assert!(matches!(
+            writer
+                .advance_lifecycle(
+                    operation,
+                    before_creation.head().clone(),
+                    BrokerCheckpointV3::new(checkpoint(latched)?, Vec::new())?,
+                )
+                .await,
+            Err(JournalError::Conflict)
+        ));
+        let replacement = BrokerCheckpointV3::new(checkpoint(other_latch)?, Vec::new())?;
+        assert!(matches!(
+            writer
+                .advance_lifecycle(operation, creation_head.clone(), replacement)
+                .await,
+            Err(JournalError::Conflict)
+        ));
+        assert_eq!(writer.load(operation).await?.unwrap().head(), creation_head);
         Ok(())
     }
 }

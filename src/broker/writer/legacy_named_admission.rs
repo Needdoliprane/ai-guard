@@ -30,6 +30,18 @@ impl RecordedLegacyNamedAdmission {
     }
 }
 
+/// The confirmed first local create boundary. A journal read may recover the
+/// preparation data but never reconstruct this acknowledgement.
+#[allow(dead_code, reason = "the named create caller is composed separately")]
+pub(in crate::broker) struct RecordedLegacyNamedImportCreation(AcceptedJobV1);
+
+impl RecordedLegacyNamedImportCreation {
+    #[allow(dead_code, reason = "the named create caller is composed separately")]
+    pub(in crate::broker) fn job(&self) -> &AcceptedJobV1 {
+        &self.0
+    }
+}
+
 /// Acknowledgement of the first local write grants a single control request.
 /// The persisted view never reconstructs this value.
 #[allow(
@@ -174,6 +186,49 @@ impl WriterClient {
                 .await?;
         }
         Ok(())
+    }
+
+    #[allow(dead_code, reason = "the named create caller is composed separately")]
+    pub(in crate::broker) async fn record_legacy_named_import_creation(
+        &self,
+        plan: &LegacyConfirmedPlanV1,
+        archive_digest: &str,
+        helper_id: Uuid,
+    ) -> JournalResult<RecordedLegacyNamedImportCreation> {
+        let job = self.load_named_job(plan).await?;
+        let current = super::lifecycle(&job)?;
+        require_open(&current)?;
+        let retained = retained_admission(&job)?;
+        if retained.archive_digest() != Some(archive_digest) {
+            return Err(JournalError::Conflict);
+        }
+        let pending = retained.clone().with_import_creation(helper_id)?;
+        let expected = pending
+            .import_creation()
+            .ok_or(JournalError::Corrupt)?
+            .clone();
+        let receipt = self
+            .advance_lifecycle(
+                job.operation_id(),
+                job.head().clone(),
+                with_admission(&current, pending)?,
+            )
+            .await?;
+        let saved = self
+            .load(job.operation_id())
+            .await?
+            .ok_or(JournalError::Corrupt)?;
+        let confirmed = retained_admission(&saved)?;
+        let preparation = confirmed.import_creation().ok_or(JournalError::Conflict)?;
+        if saved.head() != receipt.head()
+            || confirmed.plan() != plan
+            || confirmed.archive_digest() != Some(archive_digest)
+            || confirmed.import_arm().is_some()
+            || canonical(preparation)? != canonical(&expected)?
+        {
+            return Err(JournalError::Conflict);
+        }
+        Ok(RecordedLegacyNamedImportCreation(saved))
     }
 
     pub(in crate::broker) async fn record_legacy_named_import_arm(
