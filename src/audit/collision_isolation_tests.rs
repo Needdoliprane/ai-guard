@@ -416,19 +416,33 @@ async fn postcommit_descriptor_fault_recovery_and_replay_preserve_known_collisio
         sha256_digest: hex::encode(Sha256::digest("b".repeat(48).as_bytes())),
         expires_at: (chrono::Utc::now() + chrono::Duration::minutes(5)).to_rfc3339(),
     };
-    let calls = Arc::new(AtomicUsize::new(0));
-    let observed = Arc::clone(&calls);
+    let observer = Mutex::new(
+        Connection::open_with_flags(
+            &a_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )
+        .unwrap(),
+    );
+    let operation_id = binding.operation_id.clone();
+    let injected = Arc::new(AtomicBool::new(false));
+    let fault = Arc::clone(&injected);
     sibling.backing.test_hook.set(move || {
-        if observed.fetch_add(1, Ordering::SeqCst) + 1 == 4 {
+        // A separate connection sees this operation only after COMMIT.
+        // Metadata checks before COMMIT must leave the write eligible.
+        let committed: bool = observer.lock().unwrap().query_row(
+            "SELECT EXISTS(SELECT 1 FROM workload_operations WHERE operation_id=?1)",
+            [&operation_id],
+            |row| row.get(0),
+        )?;
+        if committed && !fault.swap(true, Ordering::SeqCst) {
             return Err(std::io::Error::from_raw_os_error(libc::EMFILE))
                 .context("injected postcommit identity metadata descriptor shortage");
         }
         Ok(())
     });
     let error = sibling.issue_workload_binding(&binding).unwrap_err();
-    assert_eq!(
-        calls.load(Ordering::SeqCst),
-        4,
+    assert!(
+        injected.load(Ordering::SeqCst),
         "fault did not reach the exact postcommit seam"
     );
     assert!(storage::descriptor_shortage(&error));

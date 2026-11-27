@@ -593,9 +593,9 @@ fn format14_replays_nonempty_worker_workload_relay_and_shared_kubernetes_quota()
     }
     complete_replay(&db).unwrap();
     let tx = db.transaction().unwrap();
-    // This is only a negative against a genuinely migrated14 fixture. Future
-    // versions cannot acquire the14 projections through an open-ended range.
-    tx.pragma_update(None, "user_version", 15).unwrap();
+    // An unsupported format cannot acquire these projections simply by
+    // changing the header of a genuinely migrated Store14 database.
+    tx.pragma_update(None, "user_version", 16).unwrap();
     assert!(worker_at(&tx, &f.worker.worker_id, before.0 + 1).is_err());
     assert!(quota_usage_before(&tx, before.0 + 1, &quota).is_err());
     assert!(quota_usage(&tx, &quota).is_err());
