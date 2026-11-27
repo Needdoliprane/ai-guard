@@ -13,8 +13,8 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
-      SOURCE_SHA: 89056ff48f28552a285acc7bf3279e5b2c736f1c
-      SOURCE_TREE: fb6dab3fb8f15b25d69f6c3a2eceee2104e437fb
+      SOURCE_SHA: 9ebba1c31128823f306169609ad96b01efe77189
+      SOURCE_TREE: b36a4eee4eed35fc0df202db3cff06ce8a74597f
       CARGO_BUILD_JOBS: '1'
       CARGO_INCREMENTAL: '0'
       CARGO_PROFILE_DEV_DEBUG: '0'
@@ -24,7 +24,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: 89056ff48f28552a285acc7bf3279e5b2c736f1c
+          ref: 9ebba1c31128823f306169609ad96b01efe77189
           persist-credentials: false
 
       - name: Build one library harness and verify six exact tests
@@ -125,6 +125,10 @@ jobs:
           for selector in "${selectors[@]}"; do
             status=$(check_selector "$selector")
             printf 'test=%s status=%s\n' "$selector" "$status"
-            [[ "$status" == PASS ]] || failed=1
+            if [[ "$status" != PASS ]]; then
+              failed=1
+              grep -E '^(Error: (Conflict|Corrupt|Interrupted|InvalidInput|UnsafeFilesystem|UnsupportedVersion|Capacity|Io))$' "$scratch/test.log" || true
+              grep -Eo 'panicked at src/[A-Za-z0-9_./-]+[.]rs:[0-9]+:[0-9]+' "$scratch/test.log" || true
+            fi
           done
           exit "$failed"
