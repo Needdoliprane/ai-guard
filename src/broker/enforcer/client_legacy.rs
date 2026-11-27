@@ -69,7 +69,7 @@ pub(crate) struct LegacyNamedProspectiveBindAck {
 }
 
 /// Acknowledgement of the first native Prepare. The original custody stays
-/// with the observation. This type supplies no runtime operation.
+/// with the observation and can be consumed for one checked spawn.
 #[allow(dead_code, reason = "the named Import start is composed separately")]
 pub(in crate::broker) struct LegacyNamedImportPrepared {
     bound: Box<LegacyNamedProspectiveBindAck>,
@@ -121,10 +121,17 @@ impl LegacyNamedProspectiveBindAck {
             .prospective
             .lock()
             .map_err(|_| EnforcerError::Unhealthy)?;
-        let entry = entries
+        self.require_retained_bind(&entries)
+    }
+
+    fn require_retained_bind(
+        &self,
+        entries: &BTreeMap<String, LegacyProspectiveEntry>,
+    ) -> EnforcerResult<()> {
+        entries
             .get(self.registration.arm_id())
-            .ok_or(EnforcerError::NotReady)?;
-        entry.require_bound_custody(&self.owner.retained, self.owner.custody_nonce, &self.status)
+            .ok_or(EnforcerError::NotReady)?
+            .require_bound_custody(&self.owner.retained, self.owner.custody_nonce, &self.status)
     }
 
     /// Consume the original Bind and the Service's confirmed first claim.
@@ -238,6 +245,257 @@ impl LegacyNamedProspectiveBindAck {
             })
             .map_err(StaleAcknowledged)?
     }
+}
+
+#[allow(dead_code, reason = "the named Import start is composed separately")]
+impl LegacyNamedImportPrepared {
+    pub(in crate::broker) fn claim(&self) -> &LegacyNamedImportClaimRequestV1 {
+        &self.claim
+    }
+
+    pub(in crate::broker) fn receipt(&self) -> &MutationReceiptV1 {
+        &self.receipt
+    }
+
+    pub(in crate::broker) async fn into_start_control(
+        self,
+        available: impl FnOnce() -> anyhow::Result<()> + Send + 'static,
+    ) -> EnforcerResult<PrearmedStartControl> {
+        self.bound.require_live_custody()?;
+        let clock = NativeHostClock::new().map_err(|_| EnforcerError::Unhealthy)?;
+        let prepared_ns = self
+            .status
+            .clock
+            .as_ref()
+            .ok_or(EnforcerError::Conflict)?
+            .continuous_ns()
+            .map_err(|_| EnforcerError::Conflict)?;
+        let status = self.read_start_slot(HEALTH_WINDOW).await?;
+        let received = Instant::now();
+        let now = clock.sample().map_err(|_| EnforcerError::Unhealthy)?;
+        let NamedImportSlot::Ready(observed_ns) = classify_named_import_slot(
+            self.bound.registration.arm(),
+            &self.status,
+            &status,
+            prepared_ns,
+            &now,
+        )?
+        else {
+            return Err(EnforcerError::NotReady);
+        };
+        self.bound.require_live_custody()?;
+
+        let (generation, expected) = self.bound.generation();
+        let generation = generation.clone();
+        let launch_profile = self
+            .bound
+            .registration
+            .authority
+            .docker_launch_profile
+            .clone();
+        let state = Arc::new(NamedImportStartWatch {
+            prepared: self,
+            clock,
+            prepared_ns,
+            latest: Mutex::new((status, received)),
+        });
+        let (notify_stop, stop) = watch::channel(false);
+        let guard = Arc::clone(&state);
+        let guard_stop = stop.clone();
+        tokio::spawn(state.monitor(notify_stop, observed_ns, received));
+        Ok(PrearmedStartControl::with_owned_spawn_check(
+            move |authority, created| {
+                available()?;
+                guard.check_before_spawn(authority, created, &guard_stop)?;
+                Ok(())
+            },
+            stop,
+            launch_profile,
+            None,
+        )
+        .with_generation_fence(&generation, expected))
+    }
+
+    async fn read_start_slot(&self, budget: Duration) -> EnforcerResult<EnforcerSlotStatusV1> {
+        let (generation, expected) = self.bound.generation();
+        if generation.current() != expected {
+            return Err(EnforcerError::NotReady);
+        }
+        // The request authenticates the original endpoint and epoch. A
+        // reconnect through EnforcerClient::active could swap custody.
+        let client = &self.bound.owner.client.0;
+        client.check_health()?;
+        let response = tokio::time::timeout(
+            budget,
+            client.request(
+                Request::Slots {
+                    arm_ids: vec![self.bound.registration.arm_id().into()],
+                },
+                budget,
+            ),
+        )
+        .await
+        .map_err(|_| EnforcerError::Unavailable)??;
+        client.check_health()?;
+        match response {
+            Response::Slots { mut values } if values.len() == 1 => {
+                values.pop().ok_or(EnforcerError::Conflict)
+            }
+            reply => Err(response_error(reply)),
+        }
+    }
+}
+
+struct NamedImportStartWatch {
+    prepared: LegacyNamedImportPrepared,
+    clock: NativeHostClock,
+    prepared_ns: u128,
+    latest: Mutex<(EnforcerSlotStatusV1, Instant)>,
+}
+
+impl NamedImportStartWatch {
+    async fn monitor(
+        self: Arc<Self>,
+        stop: watch::Sender<bool>,
+        mut observed_ns: u128,
+        mut received: Instant,
+    ) {
+        loop {
+            let update = async {
+                tokio::time::sleep(POLL).await;
+                let budget = HEALTH_WINDOW
+                    .checked_sub(received.elapsed())
+                    .ok_or(EnforcerError::NotReady)?;
+                self.prepared.read_start_slot(budget).await
+            };
+            let status = tokio::select! {
+                biased;
+                () = stop.closed() => return,
+                status = update => status,
+            };
+            received = Instant::now();
+            let (Ok(status), Ok(now)) = (status, self.clock.sample()) else {
+                return;
+            };
+            match classify_named_import_slot(
+                self.prepared.bound.registration.arm(),
+                &self.prepared.status,
+                &status,
+                observed_ns,
+                &now,
+            ) {
+                Ok(NamedImportSlot::Ready(new_ns)) => {
+                    let Ok(mut latest) = self.latest.lock() else {
+                        return;
+                    };
+                    *latest = (status, received);
+                    observed_ns = new_ns;
+                }
+                Ok(NamedImportSlot::Stopping) => {
+                    stop.send_replace(true);
+                    return;
+                }
+                // Dropping the sender tells the operation it must reconcile.
+                // Only a correlated native STOP observation signals true.
+                Err(_) => return,
+            }
+        }
+    }
+
+    /// The runtime already holds the original generation gate through spawn.
+    fn check_before_spawn(
+        &self,
+        authority: &RuntimeAuthority,
+        created: &OwnedContainerSnapshot,
+        stop: &watch::Receiver<bool>,
+    ) -> EnforcerResult<()> {
+        let bound = &self.prepared.bound;
+        if !bound.registration.matches_spawn_target(authority, created) {
+            return Err(EnforcerError::Conflict);
+        }
+        let (generation, expected) = bound.generation();
+        if generation.current() != expected {
+            return Err(EnforcerError::NotReady);
+        }
+        let client = &bound.owner.client;
+        {
+            let entries = client
+                .legacy_transport()?
+                .prospective
+                .try_lock()
+                .map_err(|_| EnforcerError::Unhealthy)?;
+            bound.require_retained_bind(&entries)?;
+        }
+        client.0.try_check_health()?;
+        let (status, received) = &*self
+            .latest
+            .try_lock()
+            .map_err(|_| EnforcerError::Unhealthy)?;
+        if spawn_snapshot_failure(status, expected, received).is_some() {
+            return Err(EnforcerError::NotReady);
+        }
+        let now = self.clock.sample().map_err(|_| EnforcerError::Unhealthy)?;
+        if !matches!(
+            classify_named_import_slot(
+                bound.registration.arm(),
+                &self.prepared.status,
+                status,
+                self.prepared_ns,
+                &now,
+            )?,
+            NamedImportSlot::Ready(_)
+        ) || stop.has_changed().is_err()
+            || *stop.borrow()
+        {
+            return Err(EnforcerError::NotReady);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum NamedImportSlot {
+    Ready(u128),
+    Stopping,
+}
+
+fn classify_named_import_slot(
+    arm: &ArmV1,
+    prepared: &EnforcerSlotStatusV1,
+    status: &EnforcerSlotStatusV1,
+    clock_floor_ns: u128,
+    now: &HostClockSampleV1,
+) -> EnforcerResult<NamedImportSlot> {
+    if status.arm_id != prepared.arm_id
+        || status.registration_hash != prepared.registration_hash
+        || status.generation != prepared.generation
+        || !status.prepared_once
+    {
+        return Err(EnforcerError::Conflict);
+    }
+    match status.phase {
+        SlotPhaseV1::Stopping => return Ok(NamedImportSlot::Stopping),
+        SlotPhaseV1::Ready => (),
+        SlotPhaseV1::Initializing | SlotPhaseV1::Quarantined => {
+            return Err(EnforcerError::NotReady);
+        }
+    }
+    let observed = status.clock.as_ref().ok_or(EnforcerError::Conflict)?;
+    arm.validate_clock_check(observed)
+        .map_err(|_| EnforcerError::Conflict)?;
+    let observed_ns = observed
+        .continuous_ns()
+        .map_err(|_| EnforcerError::Conflict)?;
+    arm.validate_clock_check(now)
+        .map_err(|_| EnforcerError::NotReady)?;
+    let now_ns = now.continuous_ns().map_err(|_| EnforcerError::Unhealthy)?;
+    if observed_ns < clock_floor_ns
+        || now_ns < observed_ns
+        || now_ns - observed_ns > HEALTH_WINDOW.as_nanos()
+    {
+        return Err(EnforcerError::NotReady);
+    }
+    Ok(NamedImportSlot::Ready(observed_ns))
 }
 
 fn require_named_prepare_ack(
@@ -1225,6 +1483,88 @@ fn named_prepare_requires_the_correlated_ack_and_fresh_arm_clock() -> anyhow::Re
         require_named_prepare_ack(&bound, arm, &prepared, before_ns, &stale),
         Err(StaleAcknowledged(EnforcerError::NotReady))
     );
+    Ok(())
+}
+
+#[cfg(test)]
+#[test]
+fn named_import_start_requires_a_fresh_exact_prepared_slot() -> anyhow::Result<()> {
+    use super::super::server::test_support::named_import_registration;
+
+    let root = tempfile::tempdir()?;
+    let (registration, _) = named_import_registration(root.path());
+    let arm = registration.arm();
+    let floor = arm.clock.continuous_ns()? + 1;
+    let sample = |ns: u128| HostClockSampleV1 {
+        continuous_ns_decimal: ns.to_string(),
+        ..arm.clock.clone()
+    };
+    let prepared = EnforcerSlotStatusV1 {
+        arm_id: registration.arm_id().into(),
+        registration_hash: registration.digest()?,
+        phase: SlotPhaseV1::Ready,
+        prepared_once: true,
+        generation: 1,
+        clock: Some(sample(floor)),
+        observation: None,
+        stop_failures: 0,
+    };
+    let fresh = EnforcerSlotStatusV1 {
+        clock: Some(sample(floor + 1)),
+        ..prepared.clone()
+    };
+    let now = sample(floor + 2);
+    assert_eq!(
+        classify_named_import_slot(arm, &prepared, &fresh, floor, &now)?,
+        NamedImportSlot::Ready(floor + 1)
+    );
+    assert_eq!(
+        classify_named_import_slot(arm, &prepared, &prepared, floor + 1, &now),
+        Err(EnforcerError::NotReady)
+    );
+    assert_eq!(
+        classify_named_import_slot(
+            arm,
+            &prepared,
+            &fresh,
+            floor,
+            &sample(floor + 2 + HEALTH_WINDOW.as_nanos()),
+        ),
+        Err(EnforcerError::NotReady)
+    );
+    let expired = sample(arm.deadline_ns_decimal.parse()?);
+    assert_eq!(
+        classify_named_import_slot(arm, &prepared, &fresh, floor, &expired),
+        Err(EnforcerError::NotReady)
+    );
+
+    let stopping = EnforcerSlotStatusV1 {
+        phase: SlotPhaseV1::Stopping,
+        ..fresh.clone()
+    };
+    assert_eq!(
+        classify_named_import_slot(arm, &prepared, &stopping, floor, &expired)?,
+        NamedImportSlot::Stopping
+    );
+    for divergent in [
+        EnforcerSlotStatusV1 {
+            registration_hash: "a".repeat(64),
+            ..stopping.clone()
+        },
+        EnforcerSlotStatusV1 {
+            generation: stopping.generation + 1,
+            ..stopping.clone()
+        },
+        EnforcerSlotStatusV1 {
+            prepared_once: false,
+            ..fresh.clone()
+        },
+    ] {
+        assert_eq!(
+            classify_named_import_slot(arm, &prepared, &divergent, floor, &now),
+            Err(EnforcerError::Conflict)
+        );
+    }
     Ok(())
 }
 
