@@ -32,6 +32,10 @@ pub(crate) const LAUNCHED_KIND: &str = "control.session_prepare.launched";
 const TARGET_PROVISION_KIND: &str = "control.session_prepare.target_provisioned";
 const PROTOCOL: &str = "session_prepare_v1";
 const MARKER_VERSION: u32 = 1;
+const LAUNCH_EVENT_DOMAIN: &[u8] = b"ai-guard:session-launch:v1";
+const LAUNCH_SESSION_DOMAIN: &[u8] = b"ai-guard:session-launch-session:v1";
+const LAUNCH_GRANT_DOMAIN: &[u8] = b"ai-guard:session-launch-grant:v1";
+const LAUNCH_GRANT_ACTOR: &str = "session-launch-control";
 
 const TARGETS_TABLE: &str = "session_launch_targets";
 const TARGET_OPERATIONS_TABLE: &str = "session_launch_target_operations";
@@ -162,9 +166,10 @@ pub(super) fn validate_capability(
                 && message_tables == historical.is_none(),
             "session prepare capability requires its marker and tables on Store14/15"
         );
-        genesis(db)?;
+        let original = genesis(db)?.context("session prepare genesis missing")?;
         if let Some(historical) = historical {
             catalog::validate_historical_audit(db, historical, None)?;
+            catalog::validate_historical_projections(db, historical, original.seq)?;
         }
     }
     Ok(())
@@ -454,15 +459,10 @@ impl Store {
         }
         let input_hash = command.input_hash()?;
         let operation_id = command.operation_id.to_string();
-        if let Some((seq, hash)) = target_operation(&tx, &operation_id)? {
-            let stored_hash: String = tx.query_row(
-                "SELECT input_hash FROM session_launch_target_operations WHERE operation_id=?1",
-                [&operation_id],
-                |r| r.get(0),
-            )?;
-            anyhow::ensure!(stored_hash == input_hash, IdentityFailureV1::Conflict);
-            let event = stored_event(&tx, seq)?;
-            return Ok(target_receipt(command, &event, hash, true));
+        if let Some(row) = target_operation(&tx, &operation_id)? {
+            anyhow::ensure!(row.input_hash == input_hash, IdentityFailureV1::Conflict);
+            let event = stored_event(&tx, row.event_seq)?;
+            return Ok(target_receipt(command, &event, row.event_hash, true));
         }
         let existing: Option<i64> = tx
             .query_row(
@@ -724,10 +724,8 @@ impl Store {
         );
         // The session identity is deterministic from the launch operation, so a
         // replay reconciles to the same session without a second allocation.
-        let session_id =
-            bound_event_id(b"ai-guard:session-launch-session:v1", request.operation_id);
-        let grant_operation_id =
-            bound_event_id(b"ai-guard:session-launch-grant:v1", request.operation_id);
+        let session_id = bound_event_id(LAUNCH_SESSION_DOMAIN, request.operation_id);
+        let grant_operation_id = bound_event_id(LAUNCH_GRANT_DOMAIN, request.operation_id);
         let source_id: String = tx.query_row(
             "SELECT namespace_uuid FROM control_meta WHERE singleton=1",
             [],
@@ -753,7 +751,7 @@ impl Store {
         };
         // The mandatory launch audit is durable before the grant and any effect.
         let mut event = Event::new(LAUNCHED_KIND);
-        event.id = bound_event_id(b"ai-guard:session-launch:v1", request.operation_id);
+        event.id = bound_event_id(LAUNCH_EVENT_DOMAIN, request.operation_id);
         event.timestamp = crate::broker_registry::format_time(clock.at());
         event.coverage = "native".into();
         event.session_id = Some(session_id.clone());
@@ -800,7 +798,7 @@ impl Store {
             version: 1,
             operation_id: grant_operation_id.clone(),
             actor: PrincipalRefV1::LegacyControl {
-                credential_id: "session-launch-control".into(),
+                credential_id: LAUNCH_GRANT_ACTOR.into(),
                 role: LegacyControlRoleV1::Runner,
             },
             change: IdentityChangeV1::ResourceGrant {
@@ -975,14 +973,25 @@ fn consumed_by_launch(
         .optional()?)
 }
 
-// Closed session launch target catalog; production wiring pending.
-#[allow(dead_code)]
-fn target_operation(tx: &Connection, operation_id: &str) -> anyhow::Result<Option<(i64, String)>> {
+struct TargetOperationRow {
+    input_hash: String,
+    event_seq: i64,
+    event_hash: String,
+}
+
+fn target_operation(
+    tx: &Connection,
+    operation_id: &str,
+) -> anyhow::Result<Option<TargetOperationRow>> {
     Ok(tx
         .query_row(
-            "SELECT event_seq,hash FROM session_launch_target_operations o JOIN events e ON e.seq=o.event_seq WHERE o.operation_id=?1",
+            "SELECT o.input_hash,o.event_seq,e.hash FROM session_launch_target_operations o JOIN events e ON e.seq=o.event_seq WHERE o.operation_id=?1",
             [operation_id],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            |r| Ok(TargetOperationRow {
+                input_hash: r.get(0)?,
+                event_seq: r.get(1)?,
+                event_hash: r.get(2)?,
+            }),
         )
         .optional()?)
 }

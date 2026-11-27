@@ -8,7 +8,8 @@ use crate::control::session_control::{
 use crate::control_fs::publication::FAIL_AFTER_RENAME;
 use crate::human_authority::migration::egress_journal::RetainedSourceIntent;
 use crate::human_authority::migration::operator::{
-    OwnedIdentityMarkersRefusalV1, OwnedIdentityMarkersRequest, install_owned_identity_markers,
+    OwnedIdentityMarkersRefusalV1, OwnedIdentityMarkersReportV1, OwnedIdentityMarkersRequest,
+    install_owned_identity_markers,
 };
 
 const MARKER_KIND: &str = "control.identity.human_rights.genesis";
@@ -1181,14 +1182,81 @@ fn historical_session_work(
     )
     .unwrap();
     let launch = with_launches.then(|| {
-        launch(
+        let launch = launch(
             retained,
             &scope,
             &launch_request(Uuid::new_v4(), target, 1, &preparation),
         )
-        .unwrap()
+        .unwrap();
+        // Earlier work was valid at revision 1. The retained target must
+        // reflect the last event, including the now-inactive revision 2.
+        let mut deactivate = target_command(Uuid::new_v4(), target, 2, 1, &principal);
+        deactivate.target.active = false;
+        let epoch = retained.owner.try_write_epoch().unwrap();
+        retained
+            .store
+            .provision_session_launch_target_scoped(&epoch, &retained.source, &deactivate)
+            .unwrap();
+        launch
     });
     (preparation, launch)
+}
+
+fn run_historical_maintenance(
+    adopted: &Adopted,
+    name: &str,
+    resume: bool,
+) -> anyhow::Result<OwnedIdentityMarkersReportV1> {
+    install_owned_identity_markers(OwnedIdentityMarkersRequest {
+        manifest: adopted.manifest(),
+        configuration: adopted.closure.configuration.clone(),
+        files: adopted.base.configuration_files.clone(),
+        tenant_id: "A".into(),
+        redactor: Redactor::new(vec![]),
+        max_events: 10_000,
+        maintenance_directory: adopted.base.root.path().join(name),
+        excluded_directories: vec![adopted.configuration_dir().path().to_owned()],
+        resume,
+    })
+}
+
+#[test]
+fn historical_session_prepare_refuses_a_lost_projection_before_backup() {
+    let adopted = adopted(14);
+    seed_session_prepare(&adopted);
+    let retained = adopted.retained(0, "before-lost-projection.json", 14);
+    let (preparation, _) = historical_session_work(&retained, false);
+    drop(retained);
+    let store = &adopted.base.stores[0];
+    leave_historical_session_catalog(store, false);
+    let original = maintenance_source_state(&adopted.base);
+    {
+        let db = store.db.lock().unwrap();
+        assert_eq!(
+            db.execute(
+                "DELETE FROM session_preparations WHERE operation_id=?1",
+                [preparation.operation_id.to_string()],
+            )
+            .unwrap(),
+            1
+        );
+        assert!(Store::check_integrity(&db).unwrap().valid);
+    }
+    assert_eq!(maintenance_source_state(&adopted.base), original);
+
+    let error = run_historical_maintenance(&adopted, "lost-preparation", false).unwrap_err();
+    assert_eq!(
+        error.downcast_ref::<OwnedIdentityMarkersRefusalV1>(),
+        Some(&OwnedIdentityMarkersRefusalV1::FormatUnsupported)
+    );
+    assert!(format!("{error:#}").contains("historical session preparation projection is missing"));
+    let maintenance = adopted.base.root.path().join("lost-preparation");
+    for child in ["journal", "backups"] {
+        let directory = Directory::open_existing(&maintenance.join(child)).unwrap();
+        assert!(journal_names(&directory).is_empty());
+    }
+    assert_eq!(maintenance_source_state(&adopted.base), original);
+    assert_eq!(table_count(store, "session_preparations"), 0);
 }
 
 fn historical_session_rows(
@@ -1255,19 +1323,7 @@ fn historical_session_prepare_catalogs_upgrade_through_owned_operator() {
             assert!(open_owned("before-historical-maintenance.json").is_err());
             assert_eq!(maintenance_source_state(&adopted.base), before);
 
-            let run = |resume| {
-                install_owned_identity_markers(OwnedIdentityMarkersRequest {
-                    manifest: adopted.manifest(),
-                    configuration: adopted.closure.configuration.clone(),
-                    files: adopted.base.configuration_files.clone(),
-                    tenant_id: "A".into(),
-                    redactor: Redactor::new(vec![]),
-                    max_events: 10_000,
-                    maintenance_directory: adopted.base.root.path().join("historical-upgrade"),
-                    excluded_directories: vec![adopted.configuration_dir().path().to_owned()],
-                    resume,
-                })
-            };
+            let run = |resume| run_historical_maintenance(&adopted, "historical-upgrade", resume);
             let installed = match run(false) {
                 Ok(report) => report,
                 Err(error) => {
@@ -1296,6 +1352,7 @@ fn historical_session_prepare_catalogs_upgrade_through_owned_operator() {
                 historical_session_rows(&backup, preparation.operation_id, launch_id),
                 original
             );
+            drop(backup);
             {
                 let db = store.db.lock().unwrap();
                 let previous_hash: String = db
@@ -1337,19 +1394,47 @@ fn historical_session_prepare_catalogs_upgrade_through_owned_operator() {
             );
             assert_eq!(table_count(store, "session_messages"), 0);
 
+            if with_launches && format == 15 {
+                let retained = adopted.retained(0, "after-upgrade-new-work.json", format);
+                let _ = historical_session_work(&retained, false);
+            }
+            let before_confirmation = maintenance_source_state(&adopted.base);
             let confirmed = run(true).unwrap();
             assert_eq!(confirmed.state, "confirmed");
             assert_eq!(confirmed.backup_path, installed.backup_path);
             assert_eq!(confirmed.markers, installed.markers);
-            assert_eq!(maintenance_source_state(&adopted.base), upgraded);
+            assert_eq!(maintenance_source_state(&adopted.base), before_confirmation);
 
-            if with_launches {
+            if with_launches && format == 14 {
                 // The audit extension now proves that these tables existed.
                 // Their later loss must refuse even with the old SQL shape.
                 leave_historical_session_catalog(store, true);
                 let damaged = maintenance_source_state(&adopted.base);
                 assert!(run(true).is_err());
                 assert_eq!(maintenance_source_state(&adopted.base), damaged);
+            } else if let Some(launch) = launch {
+                // The same backup, with the same catalog and audit prefix,
+                // is unusable on confirmation after a causal receipt diverges.
+                let backup = rusqlite::Connection::open_with_flags(
+                    &installed.backup_path,
+                    rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE,
+                )
+                .unwrap();
+                assert_eq!(
+                    backup
+                        .execute(
+                            "UPDATE session_launches SET receipt_json=json_set(receipt_json,'$.grant_revision',2) WHERE operation_id=?1",
+                            [launch.operation_id.to_string()],
+                        )
+                        .unwrap(),
+                    1
+                );
+                assert_eq!(audit_head(&backup).unwrap(), before.head);
+                assert!(Store::check_integrity(&backup).unwrap().valid);
+                drop(backup);
+                let error = run(true).unwrap_err();
+                assert!(format!("{error:#}").contains("historical session launch grant differs"));
+                assert_eq!(maintenance_source_state(&adopted.base), before_confirmation);
             }
         }
     }
