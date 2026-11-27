@@ -268,6 +268,8 @@ opaque!(
 
 pub(in crate::broker) mod cold_audit;
 pub mod inventory;
+#[allow(dead_code, reason = "the Stops writer query is a separate integration")]
+pub(in crate::broker) mod legacy_worker_terminal;
 
 impl StopJobSnapshotV1 {
     pub(crate) fn retirements(&self) -> &[crate::broker::retirement_checkpoint::RetirementEntryV1] {
