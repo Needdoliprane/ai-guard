@@ -485,16 +485,6 @@ fn named_import_arm_absent() -> (StatusCode, Json<Value>) {
     )
 }
 
-fn named_import_arm_error(store: &TenantStore, error: anyhow::Error) -> (StatusCode, Json<Value>) {
-    if store.store_healthy()
-        && error.downcast_ref::<ControlFailure>() == Some(&ControlFailure::NotFound)
-    {
-        named_import_arm_absent()
-    } else {
-        named_admission_error(store, error)
-    }
-}
-
 fn named_import_arm_response(result: ArmResultV1, redactor: &Redactor) -> ApiResult<Response> {
     let status = if result.replayed {
         StatusCode::OK
@@ -530,7 +520,7 @@ async fn arm_named_import(
                 let store = named_admission_store(&tenant, &redactor)?;
                 let result = store
                     .arm_legacy_named_import(&identity, &request)
-                    .map_err(|error| named_import_arm_error(&tenant.store, error))?;
+                    .map_err(|error| named_admission_error(&tenant.store, error))?;
                 named_import_arm_response(result, &store.redactor_union(&redactor))
             },
         )
@@ -551,7 +541,7 @@ async fn reconcile_named_import_arm(
                 let store = named_admission_store(&tenant, &redactor)?;
                 let result = store
                     .read_legacy_named_import_arm(&identity, &request)
-                    .map_err(|error| named_import_arm_error(&tenant.store, error))?
+                    .map_err(|error| named_admission_error(&tenant.store, error))?
                     .ok_or_else(named_import_arm_absent)?;
                 named_import_arm_response(result, &store.redactor_union(&redactor))
             },

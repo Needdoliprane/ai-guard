@@ -1294,7 +1294,14 @@ async fn legacy_named_import_arm_preserves_its_prefix_and_closes_manual_claims()
     let exact = input(&namespace, &arm);
     let app = router(Arc::clone(&store));
     let before = store.head().unwrap();
-    for token in [BROKER_TOKEN, OTHER_BROKER] {
+    for (token, code_path, expected_code) in [
+        (
+            BROKER_TOKEN,
+            "/error/code",
+            LEGACY_NAMED_IMPORT_ARM_RECEIPT_NOT_FOUND,
+        ),
+        (OTHER_BROKER, "/code", "worker_not_found"),
+    ] {
         let response = app
             .clone()
             .oneshot(post(&reconcile, token, &exact))
@@ -1304,8 +1311,8 @@ async fn legacy_named_import_arm_preserves_its_prefix_and_closes_manual_claims()
         let body: Value =
             serde_json::from_slice(&to_bytes(response.into_body(), 1024).await.unwrap()).unwrap();
         assert_eq!(
-            body["error"]["code"],
-            LEGACY_NAMED_IMPORT_ARM_RECEIPT_NOT_FOUND
+            body.pointer(code_path).and_then(Value::as_str),
+            Some(expected_code)
         );
     }
     for (path, token, status) in [
@@ -1478,10 +1485,7 @@ async fn legacy_named_import_arm_preserves_its_prefix_and_closes_manual_claims()
     assert_eq!(foreign.status(), StatusCode::NOT_FOUND);
     let foreign: Value =
         serde_json::from_slice(&to_bytes(foreign.into_body(), 1024).await.unwrap()).unwrap();
-    assert_eq!(
-        foreign["error"]["code"],
-        LEGACY_NAMED_IMPORT_ARM_RECEIPT_NOT_FOUND
-    );
+    assert_eq!(foreign["code"], "worker_not_found");
     for path in [&private_path, &reconcile] {
         let response = app
             .clone()
