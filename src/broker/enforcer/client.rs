@@ -41,6 +41,8 @@ const MAX_LEGACY_RETAINED_STOPS: usize = 16_384;
 #[path = "client_legacy.rs"]
 mod legacy;
 use legacy::LegacyTransport;
+#[cfg(test)]
+pub(crate) use legacy::connect_named_legacy_fixture;
 pub(crate) use legacy::{
     LegacyNamedProspectiveBind, LegacyNamedProspectiveBindAck, LegacyNamedProspectiveFailure,
 };

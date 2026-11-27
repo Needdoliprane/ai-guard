@@ -753,8 +753,16 @@ pub(crate) fn validate_legacy_named_admission_receipt(
 mod tests {
     use super::*;
     use crate::{
+        broker::enforcer::{
+            CancelGeneration, LegacyIpcFixture, NamedImportArmBirthV1, ProspectiveRegistrationV1,
+            connect_named_legacy_fixture, deliver_named_import_stop_from_legacy_root,
+        },
         broker::{
-            journal::{ControlSecrets, FsExclusions, Journal, JournalLimitsV1, ReserveResult},
+            clock::{HostClock, NativeHostClock, checked_deadline},
+            journal::{
+                ControlSecrets, FsExclusions, Journal, JournalLimitsV1, ReserveResult,
+                recovery::StopRecoveryReaderV1,
+            },
             lifecycle::BrokerCheckpointV3,
             writer::{CancelInputV1, NamedImportArmWriteFailure, WriterClient},
         },
@@ -764,6 +772,7 @@ mod tests {
         runner::{RunOptions, broker::PreparedSubmission},
     };
     use serde_json::json;
+    use sha2::{Digest, Sha256};
     use std::{os::unix::fs::PermissionsExt, time::Duration};
 
     #[tokio::test]
@@ -1189,6 +1198,8 @@ mod tests {
             },
             "podman": null
         }))?;
+        let clock = NativeHostClock::new()?.sample()?;
+        let armed_ns = clock.continuous_ns()?;
         let arm = ArmV1 {
             version: 1,
             operation_id: LegacyNamedImportArmRequestV1::operation_id(
@@ -1225,15 +1236,9 @@ mod tests {
             authority_binding_hash: authority.fingerprint(),
             configuration_fingerprint_version: 2,
             configuration_fingerprint: "9".repeat(64),
-            clock: HostClockSampleV1 {
-                version: 1,
-                method: HostClockMethodV1::DarwinMachContinuousV1,
-                boot_id: Uuid::new_v4().to_string(),
-                continuous_ns_decimal: "100000000000".into(),
-                observed_utc: None,
-            },
+            clock,
             timeout_seconds: 120,
-            deadline_ns_decimal: "220000000000".into(),
+            deadline_ns_decimal: checked_deadline(armed_ns, 120)?.to_string(),
         };
         let owned: OwnedContainerSnapshot = serde_json::from_value(json!({
             "handle": {
@@ -1285,7 +1290,7 @@ mod tests {
                 emitter_id: Uuid::new_v4().to_string(),
                 arm_receipt: arm_result.receipt.clone(),
                 clock_check: HostClockSampleV1 {
-                    continuous_ns_decimal: "100000000001".into(),
+                    continuous_ns_decimal: (armed_ns + 1).to_string(),
                     ..arm.clock.clone()
                 },
             },
@@ -1365,9 +1370,10 @@ mod tests {
                 .await?;
             Ok(writer)
         };
+        let mut cold_stop_case = None;
         for (stop_first, record_claim) in [(true, false), (false, false), (false, true)] {
-            let writer =
-                start_admitted_writer(&format!("import-{stop_first}-{record_claim}")).await?;
+            let namespace = format!("import-{stop_first}-{record_claim}");
+            let writer = start_admitted_writer(&namespace).await?;
             let admitted = writer.load(operation).await?.unwrap();
             assert!(
                 writer
@@ -1554,6 +1560,29 @@ mod tests {
             let pending_arm = writer.load(operation).await?.unwrap();
             assert_eq!(recorded.birth(), pending_arm.head());
             let submitted = recorded.request().clone();
+            let stop_ipc = if record_claim {
+                None
+            } else {
+                let fixture = LegacyIpcFixture::start(1, 0).await;
+                let client = connect_named_legacy_fixture(&fixture).await?;
+                let target = ProspectiveRegistrationV1::new(
+                    hex::encode(Sha256::digest(scope.gateway_origin().as_bytes())),
+                    scope.tenant_id().to_owned(),
+                    submitted.arm.clone(),
+                    authority.clone(),
+                    owned.clone(),
+                )?;
+                let birth = NamedImportArmBirthV1::from_plan(&scope, &plan, recorded.birth())?;
+                let generation = CancelGeneration::new();
+                let expected = generation.current();
+                let reserved = client
+                    .legacy_reserve_named_prospective(target, &birth, &generation, expected)
+                    .await
+                    .map_err(|failure| {
+                        anyhow::anyhow!("named IPC reservation failed: {failure:?}")
+                    })?;
+                Some((fixture, client, Some(reserved)))
+            };
             if record_claim {
                 assert!(matches!(
                     writer
@@ -1668,6 +1697,9 @@ mod tests {
             assert!(pause.is_paused());
             drop(pause);
             let stop = cancellation.await.map_err(|failure| failure.error())?;
+            if let Some((_, client, _)) = &stop_ipc {
+                client.deliver_named_import_stop(&stop).await?;
+            }
             assert!(stop.incomplete());
             assert!(stop.named_reservation().is_none());
             let named_import = stop.named_import().expect("pending Arm predates STOP");
@@ -1705,6 +1737,19 @@ mod tests {
                 .unwrap();
             assert!(equal(&retained, &submitted)?);
             assert!(receipt.is_none());
+            if let Some((_, client, reserved)) = stop_ipc.as_mut() {
+                let reserved = reserved.take().expect("one exact named reservation");
+                let failure = match client
+                    .legacy_begin_named_prospective_arm_exchange(reserved)
+                    .await
+                {
+                    Err(failure) => failure,
+                    Ok(_) => panic!("STOP latches the exact pending actor before Arm ACK"),
+                };
+                assert!(
+                    matches!(failure, crate::broker::enforcer::LegacyNamedProspectiveFailure::Refused(refusal) if refusal.code() == crate::broker::enforcer::EnforcerError::NotReady)
+                );
+            }
             let stopped = writer.load(operation).await?.unwrap();
             assert_eq!(stopped.head().revision(), pending_arm.head().revision() + 1);
             acknowledgement.await?;
@@ -1714,6 +1759,9 @@ mod tests {
                 .cancel_stop_projection(operation, stop_id)
                 .await?
                 .unwrap();
+            if let Some((_, client, _)) = &stop_ipc {
+                client.deliver_named_import_stop(&replayed_stop).await?;
+            }
             assert!(replayed_stop.incomplete());
             assert!(replayed_stop.named_reservation().is_none());
             let replayed_import = replayed_stop
@@ -1782,7 +1830,42 @@ mod tests {
                     .await,
                 Err(JournalError::Conflict)
             ));
+            if let Some((fixture, client, _)) = stop_ipc {
+                drop(client);
+                cold_stop_case = Some((namespace, fixture, stop_facts));
+            }
         }
+
+        // The original Writer and its projections have left scope. The broker
+        // reacquires only the existing journal, while the native guardian stays.
+        let (namespace, fixture, exact_facts) = cold_stop_case.expect("one live guardian fixture");
+        let journal_dir = Directory::open_existing(&root.join(namespace))?;
+        let report = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match StopRecoveryReaderV1::open_existing(
+                    &journal_dir,
+                    scope.clone(),
+                    &FsExclusions::new(),
+                    JournalLimitsV1::default(),
+                    ControlSecrets::new(vec![])?,
+                ) {
+                    Ok(Some(reader)) => break Ok(reader.scan()),
+                    Err(JournalError::Busy) => tokio::task::yield_now().await,
+                    Ok(None) => break Err(JournalError::Conflict),
+                    Err(error) => break Err(error),
+                }
+            }
+        })
+        .await??;
+        assert_eq!(report.named_import_stop_jobs().collect::<Vec<_>>(), [0]);
+        let recovered = report.named_import_stop_projection(0)?.unwrap();
+        assert!(recovered.incomplete());
+        assert_eq!(
+            serde_json::to_value(recovered.named_import_stop_facts()?.unwrap())?,
+            exact_facts
+        );
+        deliver_named_import_stop_from_legacy_root(fixture.root(), &recovered).await?;
+        fixture.finish().await;
 
         let writer = start_admitted_writer("import-creation").await?;
         let before_creation = writer.load(operation).await?.unwrap();

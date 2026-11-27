@@ -13,8 +13,8 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
-      SOURCE_SHA: 41c0ec4b00b2590d1d828c26bb33e7034e9b7b00
-      SOURCE_TREE: f251beacaaca5af20bff7928c6d6b27cae78cfcb
+      SOURCE_SHA: cf95ec06db0c3ae381d4b5d978ca2750341f5c1d
+      SOURCE_TREE: d79681b13e13811ca42bb4ed68b3e94fa59c167c
       CARGO_BUILD_JOBS: '1'
       CARGO_INCREMENTAL: '0'
       CARGO_PROFILE_DEV_DEBUG: '0'
@@ -27,15 +27,13 @@ jobs:
           ref: ${{ env.SOURCE_SHA }}
           persist-credentials: false
 
-      - name: Build one SQLite library harness and verify exact STOP selectors
+      - name: Build one SQLite library harness and verify cold STOP recovery
         shell: bash
         run: |
           set -euo pipefail
           umask 077
           selectors=(
-            broker::enforcer::server::prospective::tests::named_guardian_custody_survives_authenticated_reconnect
-            broker::enforcer::legacy_named_stop_auth::tests::first_authentication_preserves_legacy_and_closes_stops_only
-            broker::enforcer::legacy_named_stop_auth::tests::stops_only_proofs_bind_roles_epoch_filesystem_and_packet
+            broker::checkpoint::legacy_named::tests::explicit_named_admission_requires_an_immutable_archive_digest
           )
 
           report_not_run() {

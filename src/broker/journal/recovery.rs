@@ -39,7 +39,7 @@ pub struct StopRecoveryReaderV1 {
 /// profile actor can then inherit that same FD before this report is dropped;
 /// admission never releases and reacquires the lease or grants a fresh start.
 pub struct StopRecoveryReportV1 {
-    reader: StopRecoveryReaderV1,
+    reader: Arc<StopRecoveryReaderV1>,
     jobs: Vec<RecoveredJobV1>,
     issues: Vec<StopRecoveryIssueV1>,
     incomplete: bool,
@@ -83,11 +83,11 @@ pub struct RecoveredStopV1 {
     retirement: Option<crate::broker::retirement_checkpoint::RetirementEntryV1>,
 }
 
-/// A verified, immutable cancellation prefix. Its retained reader shares the
-/// writer's existing lock FD; it neither acquires nor releases another lease.
+/// A verified, immutable cancellation prefix that shares the lock FD of the
+/// existing writer or startup reader.
 /// No business job, credential bytes or start capability can be obtained here.
 pub struct CancelStopProjectionV1 {
-    reader: StopRecoveryReaderV1,
+    reader: Arc<StopRecoveryReaderV1>,
     operation_id: Uuid,
     command_id: Uuid,
     receipt: LocalCommandReceiptV1,
@@ -572,7 +572,7 @@ impl StopJournal {
         else {
             return Ok(None);
         };
-        project_cancel(reader, recovered, incomplete, command_id)
+        project_cancel(Arc::new(reader), recovered, incomplete, command_id)
     }
 
     pub fn recovery_status(&self, operation_id: Uuid) -> JournalResult<Option<StopJobSnapshotV1>> {
@@ -618,7 +618,7 @@ impl StopJournal {
             .read_locked(operation_id, &mut writer)?
             .ok_or(JournalError::InvalidInput)?;
         if recovered.command_receipts.contains_key(&command_id) {
-            let result = project_cancel(reader, recovered, incomplete, command_id)?
+            let result = project_cancel(Arc::new(reader), recovered, incomplete, command_id)?
                 .ok_or(JournalError::Conflict)?;
             #[cfg(test)]
             stop_before_ack()?;
@@ -737,7 +737,7 @@ impl StopJournal {
         if confirmed.head != head {
             return Err(JournalError::Corrupt);
         }
-        let result = project_cancel(reader, confirmed, incomplete, command_id)?
+        let result = project_cancel(Arc::new(reader), confirmed, incomplete, command_id)?
             .ok_or(JournalError::Corrupt)?;
         #[cfg(test)]
         stop_before_ack()?;
@@ -969,7 +969,7 @@ impl StopJournal {
 }
 
 fn project_cancel(
-    reader: StopRecoveryReaderV1,
+    reader: Arc<StopRecoveryReaderV1>,
     recovered: RecoveredJobV1,
     incomplete: bool,
     command_id: Uuid,
@@ -1014,6 +1014,14 @@ fn project_cancel(
         named_import,
         incomplete,
     }))
+}
+
+fn first_named_import_stop_receipt(job: &RecoveredJobV1) -> Option<(u64, &LocalCommandReceiptV1)> {
+    let arm_revision = job.named_import_arm_revision?;
+    job.cancel_command_ids().iter().find_map(|command| {
+        let receipt = job.cancel_receipt(*command)?;
+        (receipt.head().revision() > arm_revision).then_some((arm_revision, receipt))
+    })
 }
 
 fn named_import_stop(
@@ -1423,6 +1431,57 @@ impl StopRecoveryReportV1 {
     pub fn jobs(&self) -> &[RecoveredJobV1] {
         &self.jobs
     }
+
+    pub(in crate::broker) fn named_import_stop_jobs(&self) -> impl Iterator<Item = usize> + '_ {
+        self.jobs
+            .iter()
+            .enumerate()
+            .filter_map(|(index, job)| first_named_import_stop_receipt(job).map(|_| index))
+    }
+
+    /// Resolve the first confirmed STOP after this report's named Import Arm.
+    /// Reread just the selected job under the same reader and check the
+    /// retained prefix before projecting it across a later checkpoint ACK.
+    pub(in crate::broker) fn named_import_stop_projection(
+        &self,
+        job_index: usize,
+    ) -> JournalResult<Option<CancelStopProjectionV1>> {
+        let retained = self.jobs.get(job_index).ok_or(JournalError::InvalidInput)?;
+        let Some((arm_revision, receipt)) = first_named_import_stop_receipt(retained) else {
+            return Ok(None);
+        };
+
+        let (recovered, rejected, partial) = self.reader.read_job(
+            retained.operation_id(),
+            &mut Usage::default(),
+            &mut RecoveryBlobBytes::default(),
+        )?;
+        let (Some(recovered), None) = (recovered, rejected) else {
+            return Err(JournalError::Conflict);
+        };
+        let floor =
+            usize::try_from(retained.head().revision()).map_err(|_| JournalError::Corrupt)?;
+        if recovered.chain.get(floor) != Some(retained.head())
+            || recovered.named_import_arm_revision != Some(arm_revision)
+        {
+            return Err(JournalError::Conflict);
+        }
+        let projection = project_cancel(
+            Arc::clone(&self.reader),
+            recovered,
+            self.incomplete || partial,
+            receipt.command_id(),
+        )?
+        .ok_or(JournalError::Conflict)?;
+        if projection.receipt().head() != receipt.head()
+            || projection.receipt().input_hash() != receipt.input_hash()
+        {
+            return Err(JournalError::Conflict);
+        }
+        projection.revalidate()?;
+        Ok(projection.named_import().is_some().then_some(projection))
+    }
+
     pub fn issues(&self) -> &[StopRecoveryIssueV1] {
         &self.issues
     }
@@ -1658,7 +1717,7 @@ impl StopRecoveryReaderV1 {
 
     pub fn scan(self) -> StopRecoveryReportV1 {
         let mut report = StopRecoveryReportV1 {
-            reader: self,
+            reader: Arc::new(self),
             jobs: Vec::new(),
             issues: Vec::new(),
             incomplete: false,
