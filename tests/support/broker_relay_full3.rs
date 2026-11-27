@@ -2244,9 +2244,15 @@ impl Fixture {
         } else {
             true
         };
-        let (broker_reaped, broker_closed, read_closed_journal) = if !legacy_started
-            || engine_closed
-        {
+        let fresh_identity_ready = if self.fresh_start_attempted {
+            engine_closed && self.attest_fresh_guardian().await.is_ok()
+        } else {
+            true
+        };
+        let may_stop_broker = (!self.fresh_start_attempted
+            || (engine_closed && fresh_identity_ready))
+            && (!legacy_started || engine_closed);
+        let (broker_reaped, broker_closed, read_closed_journal) = if may_stop_broker {
             match self.broker.as_mut() {
                 Some(owner) => {
                     let endpoint = Directory::open_existing(&self.broker_root.join("broker"))
@@ -2372,18 +2378,6 @@ impl Fixture {
     }
 
     async fn close_fresh_guardian(&mut self) -> Result<()> {
-        if self.fresh_guardian.is_none() {
-            timeout(Duration::from_secs(4), async {
-                loop {
-                    if self.bind_fresh_guardian().await.is_ok() {
-                        return;
-                    }
-                    sleep(Duration::from_millis(25)).await;
-                }
-            })
-            .await
-            .context("Fresh guardian identity not attested")?;
-        }
         let guardian = self
             .fresh_guardian
             .take()
@@ -2392,6 +2386,22 @@ impl Fixture {
             .await
             .context("Fresh guardian closure timeout")??;
         Ok(())
+    }
+
+    async fn attest_fresh_guardian(&mut self) -> Result<()> {
+        if self.fresh_guardian.is_some() {
+            return Ok(());
+        }
+        timeout(Duration::from_secs(4), async {
+            loop {
+                if self.bind_fresh_guardian().await.is_ok() {
+                    return;
+                }
+                sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .context("Fresh guardian identity not attested while broker is live")
     }
 }
 impl Drop for Fixture {
