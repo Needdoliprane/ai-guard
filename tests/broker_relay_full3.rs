@@ -59,18 +59,29 @@ async fn software_full3_restores_original_assignments_before_late_issue_two_endp
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn software_full3_existing_reads_original_relay_assignment_without_authorizing_execution()
 -> Result<()> {
+    println!("full3_read_stage=fresh_requested");
     let mut fixture = Fixture::new_fresh().await?;
+    println!("full3_read_stage=fresh_ready");
     let exercise = async {
         let job = fixture.submit("a", 90).await?;
+        println!("full3_read_stage=submitted");
         fixture.wait_endpoint(job).await?;
+        println!("full3_read_stage=endpoint_retained");
         let before = fixture.history(job, Role::FullA).await?;
         fixture.assert_no_relay_effects().await?;
+        println!("full3_read_stage=history_confirmed");
         fixture.restart(Role::FullA).await?;
+        println!("full3_read_stage=existing_ready");
         fixture.verify_retained_relay_assignment(job, &before).await
     }
     .await;
     let ticket = fixture.timeout_observation_ticket();
     let cleanup = fixture.close().await;
+    if cleanup.is_ok() {
+        println!("full3_read_cleanup=closed");
+    } else {
+        println!("full3_read_cleanup=unconfirmed");
+    }
     if let Some(ticket) = ticket {
         ticket.emit_after_cleanup(cleanup.is_ok());
     }

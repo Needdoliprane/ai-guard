@@ -18,7 +18,7 @@ use crate::{
         journal::{
             AcceptedJobV1, CancelStopProjectionV1, ControlSecrets, FsExclusions, Journal,
             JournalLimitsV1, JournalScopeV1, JournalStatusV1, RejectionCodeV1, RejectionPhaseV1,
-            RejectionReceiptV1, ReservationMode, ReserveResult, canonical,
+            RejectionReceiptV1, ReservationMode, ReserveResult, StopJobSnapshotV1, canonical,
             recovery::{StopRecoveryReaderV1, StopRecoveryReportV1},
         },
         lifecycle::{LocalCommandReceiptV1, LocalCommandRequestV1},
@@ -1407,15 +1407,14 @@ impl Service {
         {
             return Err(BrokerErrorCodeV1::Conflict);
         }
+        let snapshot = self.revalidate_relay_recovery_snapshot(snapshot).await?;
         if snapshot.incomplete() {
-            snapshot.revalidate().map_err(jobs::journal_error)?;
             return Ok(recovery_relay_unknown(
                 operation,
                 scope,
                 RecoveryRelayReasonV1::StopSnapshotIncomplete,
             ));
         }
-        snapshot.revalidate().map_err(jobs::journal_error)?;
         let relays = self
             .registry
             .relay_service
@@ -1424,7 +1423,7 @@ impl Service {
         let read = relays.read_retained_channel(scope, operation).await;
         // STOP's retained reader remains open across the relay read. A changed
         // head or lease invalidates the join rather than returning a stale link.
-        snapshot.revalidate().map_err(jobs::journal_error)?;
+        let snapshot = self.revalidate_relay_recovery_snapshot(snapshot).await?;
         let current = capabilities
             .stops()
             .recovery_status(operation)
@@ -1438,7 +1437,7 @@ impl Service {
         {
             return Err(BrokerErrorCodeV1::NeedsReconciliation);
         }
-        current.revalidate().map_err(jobs::journal_error)?;
+        let current = self.revalidate_relay_recovery_snapshot(current).await?;
         if current.incomplete() {
             return Ok(recovery_relay_unknown(
                 operation,
@@ -1491,10 +1490,20 @@ impl Service {
             matching_worker_arms,
             source_head_is_ancestor,
         )?;
-        current.revalidate().map_err(jobs::journal_error)?;
         Ok(Response::reply(BrokerReplyV1::RecoveryRelayStatus {
             status,
         }))
+    }
+
+    async fn revalidate_relay_recovery_snapshot(
+        &self,
+        snapshot: StopJobSnapshotV1,
+    ) -> Result<StopJobSnapshotV1, BrokerErrorCodeV1> {
+        self.filesystem(move || {
+            snapshot.revalidate().map_err(jobs::journal_error)?;
+            Ok(snapshot)
+        })
+        .await
     }
 
     async fn recovery_status_snapshot_for_profile(
