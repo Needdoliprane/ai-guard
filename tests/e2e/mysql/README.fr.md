@@ -239,12 +239,13 @@ agentsandbox prepare-mysql-owned \
 
 En cas de succès, la sortie standard contient un seul reçu JSON vérifié.
 Après la perte d’un reçu, répéter la commande avec la même cible, le même
-format et les mêmes UUID. Sur un schéma non vide, le contrôle se fait en
-lecture seule sur la session SQL verrouillée. Il vérifie le manifeste, l’ancre
-exacte de l’opération, le tenant et le namespace, la chaîne et la tête
-initiales d’audit ainsi que les projections vides. Une correspondance exacte
-rend la même tête de publication. Une cible incomplète, étrangère, divergente
-ou passée au-delà de la publication initiale est refusée et conservée.
+format et les mêmes UUID, en ajoutant `--verify-only`. Ce mode refuse un
+schéma vide avant toute installation. Dans un instantané en lecture seule sur
+la session SQL verrouillée, il contrôle le manifeste, l’ancre exacte de
+l’opération, le tenant et le namespace, la chaîne et la tête initiales d’audit
+ainsi que les projections vides. Une correspondance exacte rend la même tête
+de publication. Une cible incomplète, étrangère, divergente ou passée au-delà
+de la publication initiale est refusée et conservée.
 
 Sur MySQL 8.4.13 sous Docker Desktop ARM64, `prepare-mysql-owned` construit
 depuis `38b64857` passe la publication sur base neuve et le rejeu exact au

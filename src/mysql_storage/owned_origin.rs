@@ -9,6 +9,7 @@ mod preparation;
 pub use preparation::{
     MysqlOwnedPreparationPreflight, MysqlOwnedPreparationReceipt, MysqlOwnedPreparationRefusal,
     MysqlOwnedPreparationRequest, preflight_owned_preparation, publish_owned_fresh_source,
+    verify_owned_fresh_source,
 };
 
 /// Cooperative ownership of a physical schema on one dedicated SQL session.

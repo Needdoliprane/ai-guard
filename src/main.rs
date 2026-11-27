@@ -58,8 +58,8 @@ enum Command {
     /// Publish or verify the same fresh owned MySQL audit format.
     ///
     /// Use a dedicated schema and keep other writers and schema administration
-    /// off the target. After a lost receipt, repeat the same request for
-    /// read-only verification. Preserve the target if verification is refused.
+    /// off the target. After a lost receipt, repeat the same request with
+    /// --verify-only. Preserve the target if verification is refused.
     #[cfg(feature = "mysql-storage")]
     PrepareMysqlOwned(mysql_prepare_cli::PrepareMysqlOwnedArgs),
     /// Prepare or recover a new private local OIDC installation offline.
@@ -1864,9 +1864,15 @@ mod tests {
             "--source-id",
             SOURCE,
         ];
-        for (format, expected) in [("14", 14_u16), ("15", 15)] {
+        for (format, expected, verify_only) in
+            [("14", 14_u16, false), ("15", 15, false), ("14", 14, true)]
+        {
             let parsed = Cli::command()
-                .try_get_matches_from(base.into_iter().chain(["--schema-version", format]))
+                .try_get_matches_from(
+                    base.into_iter()
+                        .chain(["--schema-version", format])
+                        .chain(verify_only.then_some("--verify-only")),
+                )
                 .unwrap();
             let args = parsed.subcommand_matches("prepare-mysql-owned").unwrap();
             assert_eq!(
@@ -1875,6 +1881,7 @@ mod tests {
                 Some(Path::new("gateway.json"))
             );
             assert_eq!(args.get_one::<u16>("schema_version"), Some(&expected));
+            assert_eq!(args.get_flag("verify_only"), verify_only);
             for (name, value) in [
                 ("server_uuid", SERVER),
                 ("operation_id", OPERATION),
@@ -1894,7 +1901,11 @@ mod tests {
                     .is_err()
             );
         }
-        assert!(Cli::command().try_get_matches_from(base).is_err());
+        assert!(
+            Cli::command()
+                .try_get_matches_from(base.into_iter().chain(["--verify-only"]))
+                .is_err()
+        );
         for omitted in (2..base.len()).step_by(2) {
             let args = base
                 .into_iter()
@@ -1903,7 +1914,7 @@ mod tests {
                 .map(|(_, arg)| arg);
             assert!(
                 Cli::command()
-                    .try_get_matches_from(args.chain(["--schema-version", "14"]))
+                    .try_get_matches_from(args.chain(["--schema-version", "14", "--verify-only"]))
                     .is_err(),
                 "accepted omission of {}",
                 base[omitted]

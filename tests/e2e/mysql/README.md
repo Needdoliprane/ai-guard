@@ -237,12 +237,14 @@ agentsandbox prepare-mysql-owned \
 ```
 
 On success, stdout contains one verified JSON receipt. After a lost receipt,
-repeat the command with the same target, format and UUIDs. On a nonempty
-schema, this is a read-only check on the locked SQL session. It verifies the
-manifest, the exact operation anchor, the tenant and namespace, the initial
-audit chain and head, and the empty projections. An exact match returns the
-same publication head. An incomplete, foreign or divergent target, or a
-target that has advanced beyond initial publication, is refused and preserved.
+repeat the command with the same target, format and UUIDs and add
+`--verify-only`. This mode refuses an empty schema before installation and
+checks for an existing publication in a read-only snapshot on the locked SQL
+session. It verifies the manifest, the exact operation anchor, the tenant and
+namespace, the initial audit chain and head, and the empty projections. An
+exact match returns the same publication head. An incomplete, foreign or
+divergent target, or a target that has advanced beyond initial publication,
+is refused and preserved.
 
 On MySQL 8.4.13 under Docker Desktop ARM64, `prepare-mysql-owned` built from
 `38b64857` passed fresh publication and exact replay for format 14 with

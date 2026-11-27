@@ -1,7 +1,7 @@
 use super::super::fresh_anchor::{ConfiguredTenantNamespace, FreshAnchorRequestV1};
 use super::{
-    EmptyTargetOperation, MysqlOwnedPreparationRefusal, OwnedAuditLock, prepare_empty_owned_target,
-    prepare_owned_fresh_source,
+    EmptyTargetOperation, FreshSourceMode, MysqlOwnedPreparationRefusal, OwnedAuditLock,
+    prepare_empty_owned_target, prepare_owned_fresh_source,
 };
 use crate::{
     control_fs::PrivateFile,
@@ -122,11 +122,10 @@ async fn owned_audit_tables_remain_unpublished_and_refuse_reentry() -> Result<()
         let refusal = prepare_owned_fresh_source(
             endpoint(),
             credentials(),
-            server,
-            version,
             &anchor,
             configured,
             &redactor,
+            FreshSourceMode::PublishOrVerify,
         )
         .await
         .err()
@@ -245,11 +244,10 @@ async fn owned_fresh_source_publishes_once_and_replays_exactly() -> Result<()> {
             prepare_owned_fresh_source(
                 endpoint(),
                 credentials(),
-                server,
-                version,
                 &anchor,
                 configured,
                 &redactor,
+                FreshSourceMode::PublishOrVerify,
             )
         };
         let receipt = publish().await?;
@@ -332,11 +330,10 @@ async fn owned_fresh_source_publishes_once_and_replays_exactly() -> Result<()> {
                 prepare_owned_fresh_source(
                     endpoint(),
                     credentials(),
-                    divergent.server_uuid,
-                    divergent.schema_version,
                     &divergent,
                     divergent_scope,
                     &redactor,
+                    FreshSourceMode::PublishOrVerify,
                 )
                 .await
                 .is_err(),

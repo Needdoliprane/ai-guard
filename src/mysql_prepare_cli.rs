@@ -1,7 +1,7 @@
 use crate::gateway_config::{MysqlPreparationProfileRefusal, load_mysql_preparation_target};
 use agentsandbox::mysql_storage::{
     MysqlOwnedPreparationRefusal, MysqlOwnedPreparationRequest, MysqlProbeError,
-    publish_owned_fresh_source,
+    publish_owned_fresh_source, verify_owned_fresh_source,
 };
 use anyhow::{Context, Result, anyhow};
 use clap::Args;
@@ -37,6 +37,9 @@ pub(crate) struct PrepareMysqlOwnedArgs {
     /// Stable identity assigned to this source.
     #[arg(long, value_parser = parse_uuid)]
     source_id: Uuid,
+    /// Verify the exact fresh publication in read-only mode. Refuse an empty schema.
+    #[arg(long)]
+    verify_only: bool,
 }
 
 fn parse_schema_version(value: &str) -> std::result::Result<u16, &'static str> {
@@ -66,20 +69,22 @@ pub(crate) async fn run(args: PrepareMysqlOwnedArgs) -> Result<()> {
                 "Cannot load MySQL publication configuration; check both private registries, the selected tenant and the operator authentication files"
             )
         })?;
-    let receipt = publish_owned_fresh_source(
-        target.endpoint(),
-        target.credentials(),
-        MysqlOwnedPreparationRequest {
-            tenant_id: &args.tenant,
-            namespace_id: target.namespace,
-            schema_version: args.schema_version,
-            server_uuid: args.server_uuid,
-            operation_id: args.operation_id,
-            installation_id: args.installation_id,
-            source_id: args.source_id,
-        },
-    )
-    .await
+    let request = MysqlOwnedPreparationRequest {
+        tenant_id: &args.tenant,
+        namespace_id: target.namespace,
+        schema_version: args.schema_version,
+        server_uuid: args.server_uuid,
+        operation_id: args.operation_id,
+        installation_id: args.installation_id,
+        source_id: args.source_id,
+    };
+    let endpoint = target.endpoint();
+    let credentials = target.credentials();
+    let receipt = if args.verify_only {
+        verify_owned_fresh_source(endpoint, credentials, request).await
+    } else {
+        publish_owned_fresh_source(endpoint, credentials, request).await
+    }
     .map_err(|error| {
         if let Some(refusal) = error.downcast_ref::<MysqlOwnedPreparationRefusal>() {
             return (*refusal).into();

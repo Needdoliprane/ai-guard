@@ -36,6 +36,7 @@ const REQUIRED_GRANTS: [&str; 6] = [
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MysqlOwnedPreparationRefusal {
     TargetNotEmpty,
+    PublicationMissing,
     CatalogVisibilityUnconfirmed,
     IncompatibleServer,
 }
@@ -46,6 +47,7 @@ impl fmt::Display for MysqlOwnedPreparationRefusal {
             Self::TargetNotEmpty => {
                 "MySQL owned preparation requires an empty schema; preserve this target"
             }
+            Self::PublicationMissing => "MySQL owned verification found an empty schema",
             Self::CatalogVisibilityUnconfirmed => {
                 "MySQL owned preparation cannot prove complete catalog visibility with this account"
             }
@@ -115,12 +117,43 @@ pub struct MysqlOwnedPreparationRequest<'a> {
     pub source_id: Uuid,
 }
 
+enum FreshSourceMode {
+    PublishOrVerify,
+    VerifyOnly,
+}
+
 /// Publish on a dedicated empty schema or verify the same fresh publication
 /// read-only. Resolve the endpoint and scope from trusted operator configuration.
 pub async fn publish_owned_fresh_source(
     endpoint: MysqlEndpoint<'_>,
     credentials: MysqlCredentials<'_>,
     request: MysqlOwnedPreparationRequest<'_>,
+) -> Result<MysqlOwnedPreparationReceipt> {
+    prepare_configured_fresh_source(
+        endpoint,
+        credentials,
+        request,
+        FreshSourceMode::PublishOrVerify,
+    )
+    .await
+}
+
+/// Verify an existing fresh publication on the exact configured operator target.
+/// An empty schema is refused before any installation can occur.
+pub async fn verify_owned_fresh_source(
+    endpoint: MysqlEndpoint<'_>,
+    credentials: MysqlCredentials<'_>,
+    request: MysqlOwnedPreparationRequest<'_>,
+) -> Result<MysqlOwnedPreparationReceipt> {
+    prepare_configured_fresh_source(endpoint, credentials, request, FreshSourceMode::VerifyOnly)
+        .await
+}
+
+async fn prepare_configured_fresh_source(
+    endpoint: MysqlEndpoint<'_>,
+    credentials: MysqlCredentials<'_>,
+    request: MysqlOwnedPreparationRequest<'_>,
+    mode: FreshSourceMode,
 ) -> Result<MysqlOwnedPreparationReceipt> {
     let anchor = FreshAnchorRequestV1 {
         operation_id: request.operation_id,
@@ -139,37 +172,35 @@ pub async fn publish_owned_fresh_source(
     prepare_owned_fresh_source(
         endpoint,
         credentials,
-        request.server_uuid,
-        request.schema_version,
         &anchor,
         configured,
         &Redactor::new(Vec::new()),
+        mode,
     )
     .await
 }
 
-/// Install the selected owned format on a verified empty target and publish the
-/// genesis, the fresh creation anchor and the singleton in one durable
-/// transaction, then re-verify the published prefix under the same lock. A
-/// nonempty target can only yield a receipt through read-only verification.
-pub(crate) async fn prepare_owned_fresh_source(
+/// Resolve a fresh publication under the physical lock. Only publication
+/// mode can install the selected format and create its genesis and anchor.
+async fn prepare_owned_fresh_source(
     endpoint: MysqlEndpoint<'_>,
     credentials: MysqlCredentials<'_>,
-    server: Uuid,
-    schema_version: u16,
     request: &FreshAnchorRequestV1,
     configured: ConfiguredTenantNamespace<'_>,
     redactor: &Redactor,
+    mode: FreshSourceMode,
 ) -> Result<MysqlOwnedPreparationReceipt> {
+    let schema_version = request.schema_version;
     let (configured_authentication, tls_version, head) = prepare_empty_owned_target(
         endpoint,
         credentials,
-        server,
+        request.server_uuid,
         schema_version,
-        EmptyTargetOperation::PublishFreshSource {
+        EmptyTargetOperation::FreshSource {
             request,
             configured,
             redactor,
+            mode,
         },
     )
     .await?;
@@ -200,10 +231,11 @@ enum EmptyTargetOperation<'a> {
         configured: ConfiguredTenantNamespace<'a>,
         redactor: &'a Redactor,
     },
-    PublishFreshSource {
+    FreshSource {
         request: &'a FreshAnchorRequestV1,
         configured: ConfiguredTenantNamespace<'a>,
         redactor: &'a Redactor,
+        mode: FreshSourceMode,
     },
 }
 
@@ -271,10 +303,11 @@ async fn prepare_empty_owned_target(
                     }
                     Ok(None)
                 }
-                EmptyTargetOperation::PublishFreshSource {
+                EmptyTargetOperation::FreshSource {
                     request,
                     configured,
                     redactor,
+                    mode,
                 } => {
                     let redactor = redactor.with_secrets([password.to_owned()]);
                     let anchor = request.plan(
@@ -284,6 +317,15 @@ async fn prepare_empty_owned_target(
                         configured,
                         &redactor,
                     )?;
+                    if let FreshSourceMode::VerifyOnly = mode {
+                        ensure!(
+                            schema_has_user_objects(&mut conn, &ownership).await?,
+                            MysqlOwnedPreparationRefusal::PublicationMissing
+                        );
+                        return publication::verify_published(&mut conn, &ownership, &anchor)
+                            .await
+                            .map(Some);
+                    }
                     let target = match check_empty_schema(&mut conn, &ownership).await {
                         Ok(target) => target,
                         Err(error)
@@ -341,16 +383,8 @@ async fn check_empty_schema<'a>(
     conn: &'a mut Conn,
     lock: &'a OwnedAuditLock,
 ) -> Result<CheckedEmptyTarget<'a>> {
-    lock.verify(conn).await?;
-    require_catalog_visibility(conn).await?;
-    let row = conn.query_first::<Row, _>(
-        "SELECT EXISTS (SELECT 1 FROM information_schema.TABLES WHERE BINARY TABLE_SCHEMA = BINARY DATABASE()) \
-         OR EXISTS (SELECT 1 FROM information_schema.ROUTINES WHERE BINARY ROUTINE_SCHEMA = BINARY DATABASE()) \
-         OR EXISTS (SELECT 1 FROM information_schema.EVENTS WHERE BINARY EVENT_SCHEMA = BINARY DATABASE()) \
-         OR EXISTS (SELECT 1 FROM information_schema.TRIGGERS WHERE BINARY TRIGGER_SCHEMA = BINARY DATABASE())",
-    ).await.map_err(driver_error)?.context("MySQL owned schema inventory unavailable")?;
     ensure!(
-        decode_row::<u8>(row)? == 0,
+        !schema_has_user_objects(conn, lock).await?,
         MysqlOwnedPreparationRefusal::TargetNotEmpty
     );
     let row = conn.query_first::<Row, _>(
@@ -363,6 +397,18 @@ async fn check_empty_schema<'a>(
     );
     lock.verify(conn).await?;
     Ok(CheckedEmptyTarget { conn, lock })
+}
+
+async fn schema_has_user_objects(conn: &mut Conn, lock: &OwnedAuditLock) -> Result<bool> {
+    lock.verify(conn).await?;
+    require_catalog_visibility(conn).await?;
+    let row = conn.query_first::<Row, _>(
+        "SELECT EXISTS (SELECT 1 FROM information_schema.TABLES WHERE BINARY TABLE_SCHEMA = BINARY DATABASE()) \
+         OR EXISTS (SELECT 1 FROM information_schema.ROUTINES WHERE BINARY ROUTINE_SCHEMA = BINARY DATABASE()) \
+         OR EXISTS (SELECT 1 FROM information_schema.EVENTS WHERE BINARY EVENT_SCHEMA = BINARY DATABASE()) \
+         OR EXISTS (SELECT 1 FROM information_schema.TRIGGERS WHERE BINARY TRIGGER_SCHEMA = BINARY DATABASE())",
+    ).await.map_err(driver_error)?.context("MySQL owned schema inventory unavailable")?;
+    Ok(decode_row::<u8>(row)? != 0)
 }
 
 async fn require_catalog_visibility(conn: &mut impl Queryable) -> Result<()> {
