@@ -1,0 +1,115 @@
+name: G06 empty historical SQLite catalogs Linux QA
+
+on:
+  push:
+    branches: [codex/g06-empty-historical-sqlite-linux-20261127]
+    paths: [.github/workflows/g06-empty-historical-sqlite-linux-qa.yaml]
+
+permissions:
+  contents: read
+
+jobs:
+  sqlite_catalog:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      SOURCE_SHA: 'cded1d66f45fd7f3047e38f9d22e873f28d935f3'
+      SOURCE_TREE: '44ce0c4387db16d92d2c52b6e9916cfd03ed4c8a'
+      CARGO_BUILD_JOBS: '1'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      CARGO_TERM_COLOR: never
+      RUST_MIN_STACK: '8388608'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          persist-credentials: false
+
+      - name: Build and verify the empty historical catalog upgrade
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          selector=audit::egress::fixtures::identity_markers_tests::historical_session_prepare_empty_catalogs_upgrade_through_owned_operator
+
+          report_not_run() {
+            printf 'test=%s status=NOT_RUN\n' "$selector"
+          }
+
+          if [[ "$(git rev-parse HEAD 2>/dev/null)" != "$SOURCE_SHA" ||
+                "$(git rev-parse 'HEAD^{tree}' 2>/dev/null)" != "$SOURCE_TREE" ]]; then
+            printf 'source=FAIL\n'
+            report_not_run
+            exit 1
+          fi
+          printf 'source=PASS\nsource_sha=%s\nsource_tree=%s\n' "$SOURCE_SHA" "$SOURCE_TREE"
+          export AI_GUARD_BUILD_REVISION="$SOURCE_SHA"
+
+          # Keep fixture paths short for Unix sockets and keep all raw output private.
+          scratch=$(mktemp -d /tmp/aig-g06.XXXXXX)
+          trap 'rm -rf -- "$scratch"' EXIT
+          export TMPDIR="$scratch"
+          export CARGO_TARGET_DIR="$scratch/target"
+          build_json="$scratch/build.jsonl"
+
+          if ! cargo fetch --locked --target host-tuple >"$scratch/fetch.log" 2>&1; then
+            printf 'fetch=FAIL\nbuild=NOT_RUN\n'
+            report_not_run
+            exit 1
+          fi
+          printf 'fetch=PASS\n'
+
+          if ! cargo test --locked --offline --features mysql-storage --lib --no-run \
+              --message-format=json >"$build_json" 2>"$scratch/build.stderr"; then
+            printf 'build=FAIL\n'
+            jq -Rr 'fromjson? | objects
+              | select(.reason == "compiler-message" and .message.level == "error")
+              | .message as $message
+              | ($message.code.code // empty) as $code
+              | select($code | test("\\AE[0-9]{4}\\z"))
+              | $message.spans[] | select(.is_primary)
+              | select(.file_name | test("\\Asrc/[A-Za-z0-9_./-]+[.]rs\\z"))
+              | "compiler_error=\($code) file=\(.file_name) line=\(.line_start)"' "$build_json" 2>/dev/null | sort -u || true
+            report_not_run
+            exit 1
+          fi
+          printf 'build=PASS\n'
+
+          if ! libtest=$(jq -ers '[.[] | select(.reason == "compiler-artifact"
+              and .target.name == "agentsandbox" and .target.kind == ["lib"]
+              and .profile.test == true and (.executable | type) == "string") | .executable]
+              | unique | select(length == 1) | .[0]' "$build_json" 2>/dev/null) ||
+              [[ "$libtest" != "$CARGO_TARGET_DIR"/debug/deps/agentsandbox-* ||
+                 ! -f "$libtest" || ! -x "$libtest" || -L "$libtest" ]]; then
+            printf 'libtest=FAIL\n'
+            report_not_run
+            exit 1
+          fi
+          if ! checksum=$(sha256sum -- "$libtest" 2>/dev/null) ||
+              [[ ! ${checksum%% *} =~ ^[0-9a-f]{64}$ ]]; then
+            printf 'libtest=FAIL\n'
+            report_not_run
+            exit 1
+          fi
+          printf 'libtest=PASS\nlibtest_sha256=%s\n' "${checksum%% *}"
+
+          test_log="$scratch/test.log"
+          if ! "$libtest" --exact "$selector" --test-threads=1 --color never >"$test_log" 2>&1; then
+            status=FAIL
+          elif grep -Fqx 'running 0 tests' "$test_log"; then
+            status=NO_TEST
+          elif grep -Fqx 'running 1 test' "$test_log" &&
+            grep -Fqx "test $selector ... ok" "$test_log" &&
+            grep -Eq '^test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; [0-9]+ filtered out;' "$test_log"; then
+            status=PASS
+          else
+            status=FAIL
+          fi
+          printf 'test=%s status=%s\n' "$selector" "$status"
+          if [[ "$status" != PASS ]]; then
+            grep -E '^(Error: (Conflict|Corrupt|Interrupted|InvalidInput|UnsafeFilesystem|UnsupportedVersion|Capacity|Io))$' "$test_log" || true
+            grep -Eo 'panicked at src/[A-Za-z0-9_./-]+[.]rs:[0-9]+:[0-9]+' "$test_log" || true
+            exit 1
+          fi
