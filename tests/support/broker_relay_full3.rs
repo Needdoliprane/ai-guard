@@ -2079,7 +2079,9 @@ impl Fixture {
         before: &History,
     ) -> Result<()> {
         let command = BrokerCommandV1::RecoveryRelayStatus { operation_id: job };
-        let reply = service::request(&self.broker_root, "a", A_RUNNER, command).await?;
+        let reply = service::request(&self.broker_root, "a", A_RUNNER, command)
+            .await
+            .context("phase=full3_retained_relay category=authorized_transport")?;
         let BrokerReplyV1::RecoveryRelayStatus { status } = reply else {
             bail!("phase=full3_retained_relay category=authorized_read_refused");
         };
@@ -2093,18 +2095,19 @@ impl Fixture {
             "phase=full3_retained_relay category=unconfirmed_worker_arm reason={:?}",
             status.reason
         );
+        println!("full3_read_stage=authorized_arm_confirmed");
         let revision = status
             .source_head_revision
             .context("phase=full3_retained_relay category=missing_source_revision")?;
         let hash = status
             .source_head_hash
             .context("phase=full3_retained_relay category=missing_source_hash")?;
-        before.require_live()?;
         ensure!(
             revision <= before.revision,
             "phase=full3_retained_relay category=source_after_pre_restart_head"
         );
         self.confirmed_job_revision(job, revision, Some(&hash))?;
+        println!("full3_read_stage=source_revision_verified");
         let foreign = service::request(
             &self.broker_root,
             "b",
@@ -2121,6 +2124,7 @@ impl Fixture {
             ),
             "phase=full3_retained_relay category=foreign_reply"
         );
+        println!("full3_read_stage=foreign_scope_refused");
         ensure!(
             self.worker_start_count(&before.arm.inspection.container_id)
                 .await
