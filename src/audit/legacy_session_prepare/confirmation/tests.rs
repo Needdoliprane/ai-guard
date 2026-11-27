@@ -10,7 +10,9 @@ use crate::{
         RestartPolicyV1, RuntimeInspectionV1, SecurityPresetV1, WorkerMutationV1, WorkerStateV1,
         WorkerTransitionV1, WorkerV1,
         kubernetes_admission::{KubernetesHeldCreateApprovalV1, KubernetesHeldCreatePolicyV1},
-        session_control::{LegacySessionTargetV1, SessionLaunchTargetRecordV1},
+        session_control::{
+            LegacySessionTargetV1, SessionLaunchTargetRecordV1, SessionLaunchTargetSelectionV1,
+        },
     },
     identity::{
         HumanAccountV1, IdentityChangeV1, IdentityMutationV1, LocalCredentialV1, MembershipV1,
@@ -224,6 +226,7 @@ impl Fixture {
                         broker_grant_revision: 1,
                         broker_profile_id: "fixture-profile".into(),
                         launch,
+                        source_identity_hash: None,
                     },
                 },
             )
@@ -511,6 +514,161 @@ async fn confirmed_plan_is_private_and_requires_current_initiator() {
         StatusCode::NOT_FOUND
     );
     assert_eq!(store.head().unwrap(), after_revocation);
+}
+
+#[test]
+fn legacy_confirmed_launch_spec_carries_the_audited_source_revision() {
+    let fixture = Fixture::new();
+    let prepare = |revision| {
+        fixture
+            .store
+            .legacy_session_prepare_local(
+                fixture.proof(),
+                SessionLaunchPrepareRequestV1 {
+                    expected_target_revision: revision,
+                    ..fixture.request()
+                },
+            )
+            .unwrap()
+    };
+    let confirmation_request = |prepared: &SessionPrepareReceiptV1| SessionLaunchRequestV1 {
+        version: 1,
+        operation_id: Uuid::new_v4(),
+        launch_target_id: prepared.launch_target_id,
+        expected_target_revision: prepared.target_revision,
+        preparation_operation_id: prepared.operation_id,
+        preparation_input_hash: prepared.input_hash.clone(),
+    };
+    let mut command = {
+        let db = fixture.store.db.lock().unwrap();
+        let (stored, record) = target(&db, fixture.request().selection().unwrap()).unwrap();
+        assert!(
+            stored.event.data["command"]["target"]
+                .get("source_identity_hash")
+                .is_none()
+        );
+        record.command
+    };
+    let actor = PrincipalRefV1::LegacyControl {
+        credential_id: "fixture-control".into(),
+        role: LegacyControlRoleV1::Runner,
+    };
+    let source_a = "c".repeat(64);
+    let source_b = "d".repeat(64);
+    command.expected_revision = 1;
+    command.target.catalogue.revision = 2;
+    command.target.source_identity_hash = Some(source_a.clone());
+    assert!(command.validate().is_err());
+    command.target.version = 2;
+    let target_receipt = fixture
+        .store
+        .provision_legacy_session_target(actor.clone(), command.clone())
+        .unwrap();
+    let prepared = prepare(2);
+    {
+        let db = fixture.store.db.lock().unwrap();
+        let (target_event, _) = target(
+            &db,
+            SessionLaunchTargetSelectionV1::new(fixture.target_id, 2).unwrap(),
+        )
+        .unwrap();
+        let prepared_event = event_by_id(&db, &prepared.preparation_id).unwrap().unwrap();
+        let record: Prepared = decoded(&prepared_event, PREPARED).unwrap();
+        assert_eq!(target_event.hash, target_receipt.audit_hash);
+        assert_eq!(record.target_audit_hash, target_event.hash);
+        // Existing tenant audit readers can inspect this opaque fact. The
+        // human Prepare receipt keeps the same projection.
+        assert_eq!(
+            target_event.event.data["command"]["target"]["source_identity_hash"].as_str(),
+            Some(source_a.as_str())
+        );
+        assert!(
+            serde_json::to_value(&prepared)
+                .unwrap()
+                .get("source_identity_hash")
+                .is_none()
+        );
+    }
+    let confirmation = fixture
+        .store
+        .legacy_session_confirm_local(fixture.proof(), confirmation_request(&prepared))
+        .unwrap();
+    let pending = prepare(2);
+    let Some(AuthenticatedWorkload::Broker(broker)) = fixture
+        .store
+        .authenticate_workload_token(BROKER_TOKEN)
+        .unwrap()
+    else {
+        panic!("expected the retained broker binding and grant");
+    };
+    let binding_ref = canonical_uuid(&confirmation.binding_ref).unwrap();
+    let encoded = fixture
+        .store
+        .prepare_legacy_confirmed_launch_spec(&broker, binding_ref, |material| {
+            Ok(serde_json::to_vec(material)?)
+        })
+        .unwrap();
+    let material: LegacyConfirmedLaunchSpecV1 = serde_json::from_slice(&encoded).unwrap();
+    assert_eq!(material.version, 2);
+    assert_eq!(material.plan.version, 1);
+    assert_eq!(material.plan.target_revision, 2);
+    assert_eq!(
+        material.source_identity_hash.as_deref(),
+        Some(source_a.as_str())
+    );
+    let mut missing_source = material.clone();
+    missing_source.source_identity_hash = None;
+    assert!(missing_source.validate().is_err());
+
+    command.target.source_identity_hash = Some(source_b);
+    let before = fixture.store.head().unwrap();
+    assert_eq!(
+        fixture
+            .store
+            .provision_legacy_session_target(actor.clone(), command.clone())
+            .err()
+            .and_then(|error| error.downcast::<IdentityFailureV1>().ok()),
+        Some(IdentityFailureV1::Conflict)
+    );
+    assert_eq!(fixture.store.head().unwrap(), before);
+
+    command.expected_revision = 2;
+    command.target.catalogue.revision = 3;
+    assert_eq!(
+        command.target.launch.workspace_manifest_digest,
+        material.launch.workspace_manifest_digest
+    );
+    fixture
+        .store
+        .provision_legacy_session_target(actor, command)
+        .unwrap();
+    let after = fixture.store.head().unwrap();
+    assert_eq!(
+        fixture
+            .store
+            .legacy_session_confirm_local(fixture.proof(), confirmation_request(&pending))
+            .err()
+            .and_then(|error| error.downcast::<IdentityFailureV1>().ok()),
+        Some(IdentityFailureV1::Conflict)
+    );
+    assert_eq!(
+        fixture
+            .store
+            .prepare_legacy_confirmed_launch_spec(&broker, binding_ref, |_| Ok(()))
+            .unwrap_err()
+            .downcast_ref::<ControlFailure>(),
+        Some(&ControlFailure::NotFound)
+    );
+    assert_eq!(fixture.store.head().unwrap(), after);
+    let path = fixture
+        .directory
+        .path()
+        .canonicalize()
+        .unwrap()
+        .join("legacy.sqlite");
+    drop(fixture.store);
+    let reopened = Fixture::open(&path, Redactor::new(vec![]));
+    assert_eq!(reopened.head().unwrap(), after);
 }
 
 fn mutation(worker: &WorkerV1, transition: WorkerTransitionV1) -> WorkerMutationV1 {

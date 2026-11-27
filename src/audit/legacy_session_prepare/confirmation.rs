@@ -100,6 +100,7 @@ struct ConfirmationAuthority {
 struct ResolvedLegacyConfirmedPlan {
     plan: LegacyConfirmedPlanV1,
     launch: LaunchSpecV1,
+    source_identity_hash: Option<String>,
     confirmed: StoredEvent,
     initiator: Initiator,
     authorization_revision: u64,
@@ -558,9 +559,14 @@ impl Store {
     ) -> anyhow::Result<T> {
         let resolved = self.read_resolved_legacy_confirmed_plan(broker, binding_ref)?;
         let material = LegacyConfirmedLaunchSpecV1 {
-            version: 1,
+            version: if resolved.source_identity_hash.is_some() {
+                2
+            } else {
+                1
+            },
             plan: resolved.plan,
             launch: resolved.launch,
+            source_identity_hash: resolved.source_identity_hash,
         };
         material.validate()?;
         let response = prepare(&material)?;
@@ -670,10 +676,14 @@ impl Store {
                 && expires_at > clock.at(),
             ControlFailure::NotFound
         );
+        // Prepare pinned the hash of the entire target event, including its
+        // optional source identity.
+        let source_identity_hash = target.command.target.source_identity_hash.clone();
         let (plan, launch) = confirmed_plan(binding_ref, &record, &prepared, target, expires_at)?;
         Ok(ResolvedLegacyConfirmedPlan {
             plan,
             launch,
+            source_identity_hash,
             confirmed,
             initiator: prepared.initiator,
             authorization_revision: scope.authorization_revision(),

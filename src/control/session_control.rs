@@ -184,24 +184,26 @@ impl LegacyConfirmedPlanV1 {
 }
 
 /// Private projection of the exact sandbox launch prepared for this broker.
-/// This carries no host source locator, credential or runtime permission.
+/// V2 also identifies the authorized source by its opaque identity hash.
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct LegacyConfirmedLaunchSpecV1 {
     pub version: u32,
     pub plan: LegacyConfirmedPlanV1,
     pub launch: LaunchSpecV1,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_identity_hash: Option<String>,
 }
 
 impl LegacyConfirmedLaunchSpecV1 {
     pub(crate) fn validate(&self) -> anyhow::Result<()> {
+        validate_legacy_source_identity(self.version, self.source_identity_hash.as_deref())?;
         self.plan.validate()?;
         self.launch.validate()?;
         self.launch.validate_supervised()?;
         validate_legacy_launch_command(&self.launch.command)?;
         invalid(
-            self.version == 1
-                && self.launch.credential_binding_id.is_none()
+            self.launch.credential_binding_id.is_none()
                 && self.launch.provider_resolution.is_none()
                 && self.launch.egress.is_none(),
         )?;
@@ -744,6 +746,7 @@ impl ProvisionSessionLaunchTargetV1 {
 
 /// Offline trusted target for the first Legacy rail. The launch spec uses the
 /// target UUID in its session field until Prepare assigns the real session.
+/// V2 pins the opaque source identity in the audited target revision.
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct LegacySessionTargetV1 {
@@ -754,6 +757,8 @@ pub(crate) struct LegacySessionTargetV1 {
     pub broker_grant_revision: u64,
     pub broker_profile_id: String,
     pub launch: super::LaunchSpecV1,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_identity_hash: Option<String>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -766,12 +771,12 @@ pub(crate) struct ProvisionLegacySessionTargetV1 {
 impl ProvisionLegacySessionTargetV1 {
     pub(crate) fn validate(&self) -> anyhow::Result<()> {
         let target = &self.target;
+        validate_legacy_source_identity(target.version, target.source_identity_hash.as_deref())?;
         target.catalogue.validate()?;
         target.launch.validate()?;
         bounded(&target.broker_profile_id, 128)?;
         invalid(
-            target.version == 1
-                && self.expected_revision.checked_add(1) == Some(target.catalogue.revision)
+            self.expected_revision.checked_add(1) == Some(target.catalogue.revision)
                 && !target.broker_id.is_nil()
                 && !target.incarnation_id.is_nil()
                 && (1..=i64::MAX as u64).contains(&target.broker_grant_revision)
@@ -790,6 +795,17 @@ impl ProvisionLegacySessionTargetV1 {
                 && target.launch.egress.is_none(),
         )?;
         validate_legacy_launch_command(&target.launch.command)
+    }
+}
+
+fn validate_legacy_source_identity(
+    version: u32,
+    identity_hash: Option<&str>,
+) -> anyhow::Result<()> {
+    match (version, identity_hash) {
+        (1, None) => Ok(()),
+        (2, Some(identity_hash)) => hash(identity_hash),
+        _ => Err(ControlFailure::InvalidRequest.into()),
     }
 }
 
