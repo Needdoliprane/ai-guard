@@ -12,10 +12,11 @@ use crate::{
         lifecycle::LocalCommandRequestV1,
     },
     control::{
-        AdmissionV1, SupervisedAdmissionV1, SupervisionProtocolV1,
+        AdmissionV1, ArmReceiptV1, ArmResultV1, ArmV1, SupervisedAdmissionV1,
+        SupervisionProtocolV1,
         session_control::{
-            LegacyConfirmedPlanV1, LegacyNamedAdmissionReceiptV1, LegacyNamedInitialDecisionV1,
-            LegacyNamedSupervisedAdmissionV1,
+            LegacyConfirmedPlanV1, LegacyNamedAdmissionReceiptV1, LegacyNamedImportArmRequestV1,
+            LegacyNamedInitialDecisionV1, LegacyNamedSupervisedAdmissionV1,
         },
     },
 };
@@ -25,6 +26,24 @@ pub(in crate::broker) struct RecordedLegacyNamedAdmission(LegacyNamedSupervisedA
 
 impl RecordedLegacyNamedAdmission {
     pub(in crate::broker) fn into_request(self) -> LegacyNamedSupervisedAdmissionV1 {
+        self.0
+    }
+}
+
+/// Acknowledgement of the first local write grants a single control request.
+/// The persisted view never reconstructs this value.
+#[allow(
+    dead_code,
+    reason = "the named import transport is composed separately"
+)]
+pub(in crate::broker) struct RecordedLegacyNamedImportArm(LegacyNamedImportArmRequestV1);
+
+impl RecordedLegacyNamedImportArm {
+    #[allow(
+        dead_code,
+        reason = "the named import transport is composed separately"
+    )]
+    pub(in crate::broker) fn into_request(self) -> LegacyNamedImportArmRequestV1 {
         self.0
     }
 }
@@ -156,6 +175,110 @@ impl WriterClient {
             let current = super::lifecycle(&job)?;
             let next = with_admission(&current, acknowledged)?;
             self.advance_lifecycle(job.operation_id(), job.head().clone(), next)
+                .await?;
+        }
+        Ok(())
+    }
+
+    #[allow(
+        dead_code,
+        reason = "the named import transport is composed separately"
+    )]
+    pub(in crate::broker) async fn record_legacy_named_import_arm(
+        &self,
+        plan: &LegacyConfirmedPlanV1,
+        archive_digest: &str,
+        arm: ArmV1,
+    ) -> JournalResult<RecordedLegacyNamedImportArm> {
+        let job = self.load_named_job(plan).await?;
+        let current = super::lifecycle(&job)?;
+        require_open(&current)?;
+        let retained = retained_admission(&job)?;
+        if retained.archive_digest() != Some(archive_digest) {
+            return Err(JournalError::Conflict);
+        }
+        let pending = retained.clone().with_import_arm(arm)?;
+        let request = pending.import_arm_request().ok_or(JournalError::Conflict)?;
+        let receipt = self
+            .advance_lifecycle(
+                job.operation_id(),
+                job.head().clone(),
+                with_admission(&current, pending)?,
+            )
+            .await?;
+        let saved = self
+            .load(job.operation_id())
+            .await?
+            .ok_or(JournalError::Corrupt)?;
+        let confirmed = retained_admission(&saved)?;
+        let confirmed_request = confirmed
+            .import_arm_request()
+            .ok_or(JournalError::Conflict)?;
+        if saved.head() != receipt.head()
+            || confirmed.plan() != plan
+            || confirmed.archive_digest() != Some(archive_digest)
+            || confirmed
+                .import_arm()
+                .is_none_or(|arm| arm.receipt().is_some())
+            || canonical(&confirmed_request)? != canonical(&request)?
+        {
+            return Err(JournalError::Conflict);
+        }
+        Ok(RecordedLegacyNamedImportArm(confirmed_request))
+    }
+
+    /// A reloaded request is for reconciliation. Only the original CAS
+    /// acknowledgement can authorize its first submission.
+    #[allow(
+        dead_code,
+        reason = "the named import transport is composed separately"
+    )]
+    pub(in crate::broker) async fn load_legacy_named_import_arm(
+        &self,
+        operation: Uuid,
+    ) -> JournalResult<Option<(LegacyNamedImportArmRequestV1, Option<ArmReceiptV1>)>> {
+        let job = self
+            .load(operation)
+            .await?
+            .ok_or(JournalError::InvalidInput)?;
+        let retained = retained_admission(&job)?;
+        Ok(retained.import_arm_request().map(|request| {
+            let receipt = retained.import_arm().and_then(|arm| arm.receipt()).cloned();
+            (request, receipt)
+        }))
+    }
+
+    /// Retain the exact response to a prior request, including after STOP.
+    #[allow(
+        dead_code,
+        reason = "the named import transport is composed separately"
+    )]
+    pub(in crate::broker) async fn acknowledge_legacy_named_import_arm(
+        &self,
+        operation: Uuid,
+        request: &LegacyNamedImportArmRequestV1,
+        result: ArmResultV1,
+    ) -> JournalResult<()> {
+        let job = self
+            .load(operation)
+            .await?
+            .ok_or(JournalError::InvalidInput)?;
+        let retained = retained_admission(&job)?;
+        let exact = retained
+            .import_arm_request()
+            .ok_or(JournalError::Conflict)?;
+        if canonical(&exact)? != canonical(request)? {
+            return Err(JournalError::Conflict);
+        }
+        let acknowledged = retained.clone().acknowledge_import_arm(result)?;
+        if retained
+            .import_arm()
+            .and_then(|arm| arm.receipt())
+            .is_none()
+        {
+            let current = super::lifecycle(&job)?;
+            let next = with_admission(&current, acknowledged)?;
+            self.advance_lifecycle(operation, job.head().clone(), next)
                 .await?;
         }
         Ok(())

@@ -1764,8 +1764,7 @@ impl Journal {
             .broker()
             .supervision()
             .legacy_named_admission()
-            .and_then(|named| named.pending_v2())
-            .is_some()
+            .is_some_and(|named| named.requires_strict_cas())
             && loaded.head() != &expected
         {
             return Err(JournalError::Conflict);

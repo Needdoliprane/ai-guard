@@ -1,7 +1,8 @@
 //! Private named admission facts retained in the broker checkpoint.
 use super::*;
 use crate::control::session_control::{
-    LegacyConfirmedPlanV1, LegacyNamedAdmissionReceiptV1, LegacyNamedSupervisedAdmissionV1,
+    LegacyConfirmedPlanV1, LegacyNamedAdmissionReceiptV1, LegacyNamedImportArmRequestV1,
+    LegacyNamedSupervisedAdmissionV1,
 };
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -13,17 +14,40 @@ pub(crate) struct LegacyNamedAdmissionCheckpoint {
     receipt: Option<LegacyNamedAdmissionReceiptV1>,
     #[serde(
         default,
-        deserialize_with = "deserialize_archive_digest",
+        deserialize_with = "deserialize_present",
         skip_serializing_if = "Option::is_none"
     )]
     archive_digest: Option<String>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    import_arm: Option<Box<LegacyNamedImportArmCheckpointV1>>,
 }
 
-fn deserialize_archive_digest<'de, D>(decoder: D) -> Result<Option<String>, D::Error>
+fn deserialize_present<'de, D, T>(decoder: D) -> Result<Option<T>, D::Error>
 where
     D: Deserializer<'de>,
+    T: Deserialize<'de>,
 {
-    String::deserialize(decoder).map(Some)
+    T::deserialize(decoder).map(Some)
+}
+
+/// The retained control request and receipt. Neither proves that any runtime
+/// effect is known or gives permission to start the helper.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct LegacyNamedImportArmCheckpointV1 {
+    version: u32,
+    arm: ArmV1,
+    receipt: Option<ArmReceiptV1>,
+}
+
+impl LegacyNamedImportArmCheckpointV1 {
+    pub(crate) fn receipt(&self) -> Option<&ArmReceiptV1> {
+        self.receipt.as_ref()
+    }
 }
 
 /// The exact request and archive pinned by a V2 pending checkpoint.
@@ -66,6 +90,7 @@ impl LegacyNamedAdmissionCheckpoint {
             request,
             receipt: None,
             archive_digest,
+            import_arm: None,
         };
         let namespace = uuid(&value.plan.control_namespace_uuid)?;
         value.validate_shape(namespace)?;
@@ -113,6 +138,47 @@ impl LegacyNamedAdmissionCheckpoint {
         self.archive_digest.as_deref()
     }
 
+    pub(crate) fn import_arm(&self) -> Option<&LegacyNamedImportArmCheckpointV1> {
+        self.import_arm.as_deref()
+    }
+
+    pub(crate) fn import_arm_request(&self) -> Option<LegacyNamedImportArmRequestV1> {
+        self.import_arm()
+            .map(|record| LegacyNamedImportArmRequestV1 {
+                version: 1,
+                binding_ref: self.plan.binding_ref,
+                namespace: self.plan.control_namespace_uuid.clone(),
+                arm: record.arm.clone(),
+            })
+    }
+
+    pub(crate) fn with_import_arm(mut self, arm: ArmV1) -> JournalResult<Self> {
+        ensure(self.import_arm.is_none())?;
+        self.import_arm = Some(Box::new(LegacyNamedImportArmCheckpointV1 {
+            version: 1,
+            arm,
+            receipt: None,
+        }));
+        self.validate_shape(uuid(&self.plan.control_namespace_uuid)?)?;
+        Ok(self)
+    }
+
+    pub(crate) fn acknowledge_import_arm(mut self, result: ArmResultV1) -> JournalResult<Self> {
+        let saved = self.import_arm.as_mut().ok_or(JournalError::Conflict)?;
+        ensure(equal(&saved.arm, &result.arm)?)?;
+        if let Some(previous) = saved.receipt() {
+            ensure(equal(previous, &result.receipt)?)?;
+        } else {
+            saved.receipt = Some(result.receipt);
+        }
+        self.validate_shape(uuid(&self.plan.control_namespace_uuid)?)?;
+        Ok(self)
+    }
+
+    pub(crate) fn requires_strict_cas(&self) -> bool {
+        self.pending_v2().is_some() || self.import_arm().is_some_and(|arm| arm.receipt().is_none())
+    }
+
     #[allow(
         dead_code,
         reason = "the broker orchestrator will dispatch the exact committed pending"
@@ -132,7 +198,7 @@ impl LegacyNamedAdmissionCheckpoint {
 
     pub(super) fn validate_shape(&self, namespace: Uuid) -> JournalResult<()> {
         match self.version {
-            1 => ensure(self.archive_digest.is_none())?,
+            1 => ensure(self.archive_digest.is_none() && self.import_arm.is_none())?,
             2 => hash(self.archive_digest().ok_or(JournalError::Conflict)?)?,
             _ => return Err(JournalError::UnsupportedVersion),
         }
@@ -148,12 +214,56 @@ impl LegacyNamedAdmissionCheckpoint {
         if let Some(saved) = &self.receipt {
             validate_legacy_named_admission_receipt(namespace, &self.request, saved)?;
         }
+        if let Some(arm) = self.import_arm() {
+            self.validate_import_arm(arm)?;
+        }
         ensure(canonical(self)?.len() <= MAX_OPERATION_BYTES)
+    }
+
+    fn validate_import_arm(&self, saved: &LegacyNamedImportArmCheckpointV1) -> JournalResult<()> {
+        if saved.version != 1 {
+            return Err(JournalError::UnsupportedVersion);
+        }
+        let admission = self.receipt().ok_or(JournalError::Conflict)?;
+        let parent = admission
+            .admission
+            .worker
+            .as_ref()
+            .ok_or(JournalError::Conflict)?;
+        let arm = &saved.arm;
+        ensure(
+            self.version == 2
+                && arm.operation_id != self.plan.operation_id.to_string()
+                && arm.intent_hash == self.request.admission.intent_hash
+                && matches!(
+                    &arm.subject,
+                    ArmSubjectV1::Helper { purpose: HelperPurposeV1::Import, permission, .. }
+                    if matches!(permission.as_ref(), HelperPermissionV1::Admission { receipt } if receipt == &admission.admission.receipt)
+                ),
+        )?;
+        let prepare = WorkerMutationV1 {
+            version: 1,
+            operation_id: arm.operation_id.clone(),
+            worker_id: parent.worker_id.clone(),
+            attempt_id: parent.attempt.attempt_id.clone(),
+            expected_revision: parent.revision,
+            transition: WorkerTransitionV1::Prepare,
+        };
+        let prepared = checked(crate::audit::expected_worker_transition(parent, &prepare))?;
+        checked(arm.validate_for_parent(&prepared))?;
+        if let Some(receipt) = saved.receipt() {
+            checked(receipt.validate_for_arm(arm))?;
+            ensure(
+                receipt.control_namespace_uuid == self.plan.control_namespace_uuid
+                    && receipt.audit_seq > admission.audit_seq,
+            )?;
+        }
+        Ok(())
     }
 
     pub(super) fn validate_transition(&self, previous: Option<&Self>) -> JournalResult<()> {
         match previous {
-            None => ensure(self.receipt.is_none()),
+            None => ensure(self.receipt.is_none() && self.import_arm.is_none()),
             Some(old) => {
                 ensure(
                     self.version == old.version
@@ -161,7 +271,19 @@ impl LegacyNamedAdmissionCheckpoint {
                         && self.plan == old.plan
                         && equal(&self.request, &old.request)?,
                 )?;
-                ensure(old.receipt.is_none() || equal(&self.receipt, &old.receipt)?)
+                ensure(old.receipt.is_none() || equal(&self.receipt, &old.receipt)?)?;
+                match (old.import_arm(), self.import_arm()) {
+                    (None, None) => Ok(()),
+                    (None, Some(new)) => ensure(
+                        old.admission_result().is_some_and(|result| result.accepted)
+                            && new.receipt().is_none(),
+                    ),
+                    (Some(old), Some(new)) => ensure(
+                        equal(&old.arm, &new.arm)?
+                            && (old.receipt().is_none() || equal(&old.receipt, &new.receipt)?),
+                    ),
+                    (Some(_), None) => Err(JournalError::Conflict),
+                }
             }
         }
     }
@@ -386,6 +508,13 @@ mod tests {
             request.clone(),
             digest.clone(),
         )?;
+        assert_eq!(
+            canonical(&pending)?,
+            canonical(&json!({
+                "version": 2, "plan": plan, "request": request, "receipt": null,
+                "archive_digest": digest
+            }))?
+        );
         let prepared = checkpoint(pending.clone())?;
         prepared.validate_transition(Some(&before))?;
         prepared.validate_context(&intent, &scope, &binding)?;
@@ -463,9 +592,8 @@ mod tests {
         let named = reopened.supervision().legacy_named_admission().unwrap();
         assert!(equal(named.receipt().unwrap(), &saved)?);
 
-        for stop_first in [true, false] {
-            let journal_dir =
-                Directory::open_or_create(&root.join(format!("journal-{stop_first}")))?;
+        let start_writer = async |name: &str| -> anyhow::Result<WriterClient> {
+            let journal_dir = Directory::open_or_create(&root.join(name))?;
             let journal = Journal::open(
                 &journal_dir,
                 scope.clone(),
@@ -492,6 +620,10 @@ mod tests {
             writer
                 .acknowledge_legacy_named_initial_decision(&plan, &initial_decision)
                 .await?;
+            Ok(writer)
+        };
+        for stop_first in [true, false] {
+            let writer = start_writer(&format!("journal-{stop_first}")).await?;
             if stop_first {
                 let stop = writer
                     .stops()
@@ -566,6 +698,254 @@ mod tests {
             let retained = writer.load_legacy_named_admission(operation).await?;
             assert_eq!(retained.archive_digest(), Some(digest.as_str()));
             assert!(equal(retained.receipt().unwrap(), &saved)?);
+        }
+
+        let worker = Uuid::new_v4();
+        let stable_name = format!("aig-{}-{}", namespace.simple(), worker.simple());
+        let reserved = WorkerV1 {
+            worker_id: worker.to_string(),
+            admission_operation_id: operation.to_string(),
+            request_id: request
+                .admission
+                .admission
+                .decision_request
+                .request_id
+                .clone(),
+            receipt: request.admission.admission.receipt.clone(),
+            launch: request.admission.admission.launch.clone(),
+            spec_hash: plan.launch_spec_hash.clone(),
+            policy_hash: "3".repeat(64),
+            state: WorkerStateV1::Reserved,
+            quota_held: true,
+            revision: 1,
+            attempt: WorkerAttemptV1 {
+                attempt_id: Uuid::new_v4().to_string(),
+                volume_name: format!("{stable_name}-work"),
+                stable_name,
+                container_id: None,
+                created_inspection: None,
+                create_operation_id: None,
+                start_operation_id: None,
+                start_emitter_id: None,
+            },
+            observed_started_at: None,
+            allocation_inconsistent: false,
+            last_observation: None,
+            unknown_reason: None,
+            cleanup_removed: None,
+            cleanup_error: None,
+        };
+        let admission = LegacyNamedAdmissionReceiptV1 {
+            version: 1,
+            admission: AdmissionResultV1 {
+                accepted: true,
+                replayed: false,
+                refusal: None,
+                worker: Some(reserved.clone()),
+                receipt: MutationReceiptV1 {
+                    worker_id: Some(worker.to_string()),
+                    revision: Some(1),
+                    ..saved.admission.receipt.clone()
+                },
+            },
+            grant: Some(IdentityReceiptV1 {
+                version: 1,
+                operation_id: Uuid::new_v4().to_string(),
+                input_hash: "4".repeat(64),
+                authorization_revision: 1,
+                audit_seq: 3,
+                audit_hash: "5".repeat(64),
+            }),
+            audit_seq: 4,
+            audit_hash: "6".repeat(64),
+        };
+        let helper_id = Uuid::new_v4();
+        let helper = helper_execution_policy_v1(&reserved, HelperPurposeV1::Import, helper_id)?;
+        let arm = ArmV1 {
+            version: 1,
+            operation_id: Uuid::new_v4().to_string(),
+            worker_id: reserved.worker_id.clone(),
+            attempt_id: reserved.attempt.attempt_id.clone(),
+            expected_revision: 2,
+            intent_hash: request.admission.intent_hash.clone(),
+            subject: ArmSubjectV1::Helper {
+                helper_id: helper_id.to_string(),
+                purpose: HelperPurposeV1::Import,
+                policy_version: helper.version,
+                permission: Box::new(HelperPermissionV1::Admission {
+                    receipt: admission.admission.receipt.clone(),
+                }),
+            },
+            inspection: RuntimeInspectionV1 {
+                authority_id: helper.authority_id.clone(),
+                runtime_kind: helper.runtime_kind,
+                container_id: "7".repeat(64),
+                stable_name: helper.stable_name.clone(),
+                volume_name: helper.volume_name.clone(),
+                image_id: helper.image_id.clone(),
+                spec_hash: helper.spec_hash()?,
+                cpu_millis: helper.cpu_millis,
+                memory_bytes: helper.memory_bytes,
+                pids_limit: helper.pids_limit,
+                network: helper.network,
+                security_preset: helper.security_preset,
+                restart_policy: helper.restart_policy,
+            },
+            authority_binding_hash: "8".repeat(64),
+            configuration_fingerprint_version: 2,
+            configuration_fingerprint: "9".repeat(64),
+            clock: HostClockSampleV1 {
+                version: 1,
+                method: HostClockMethodV1::DarwinMachContinuousV1,
+                boot_id: Uuid::new_v4().to_string(),
+                continuous_ns_decimal: "100000000000".into(),
+                observed_utc: None,
+            },
+            timeout_seconds: 120,
+            deadline_ns_decimal: "220000000000".into(),
+        };
+        let arm_result = ArmResultV1 {
+            replayed: true,
+            arm: arm.clone(),
+            receipt: ArmReceiptV1 {
+                version: 1,
+                arm_id: arm.operation_id.clone(),
+                worker_id: arm.worker_id.clone(),
+                attempt_id: arm.attempt_id.clone(),
+                input_hash: arm.input_hash()?,
+                control_namespace_uuid: namespace.to_string(),
+                audit_seq: 5,
+                audit_hash: "a".repeat(64),
+            },
+        };
+        let accepted = pending.clone().acknowledge(admission.clone())?;
+        let named_arm = accepted.with_import_arm(arm.clone())?;
+        assert!(matches!(
+            checkpoint(named_arm.clone())?.validate_transition(Some(&prepared)),
+            Err(JournalError::Conflict)
+        ));
+
+        for stop_first in [true, false] {
+            let writer = start_writer(&format!("import-{stop_first}")).await?;
+            let recorded = writer
+                .record_legacy_named_admission(&plan, digest.clone())
+                .await?;
+            writer
+                .acknowledge_legacy_named_admission(
+                    &plan,
+                    &recorded.into_request(),
+                    admission.clone(),
+                )
+                .await?;
+            let admitted = writer.load(operation).await?.unwrap();
+            assert!(
+                writer
+                    .load_legacy_named_import_arm(operation)
+                    .await?
+                    .is_none()
+            );
+            if stop_first {
+                writer
+                    .stops()
+                    .append_cancel(CancelInputV1::new(operation, Uuid::new_v4())?)
+                    .await
+                    .map_err(|failure| failure.error())?;
+                let stale = BrokerCheckpointV3::new(checkpoint(named_arm.clone())?, Vec::new())?;
+                assert!(matches!(
+                    writer
+                        .advance_lifecycle(operation, admitted.head().clone(), stale)
+                        .await,
+                    Err(JournalError::Conflict)
+                ));
+                let stopped = writer.load(operation).await?.unwrap();
+                let next = BrokerCheckpointV3::new(
+                    checkpoint(named_arm.clone())?,
+                    stopped.broker_checkpoint_v3().unwrap().commands().to_vec(),
+                )?;
+                assert!(matches!(
+                    writer
+                        .advance_lifecycle(operation, stopped.head().clone(), next)
+                        .await,
+                    Err(JournalError::Conflict)
+                ));
+                assert!(matches!(
+                    writer
+                        .record_legacy_named_import_arm(&plan, &digest, arm.clone())
+                        .await,
+                    Err(JournalError::Interrupted)
+                ));
+                continue;
+            }
+
+            assert!(matches!(
+                writer
+                    .record_legacy_named_import_arm(&plan, &"0".repeat(64), arm.clone())
+                    .await,
+                Err(JournalError::Conflict)
+            ));
+            let mut different_attempt = arm.clone();
+            different_attempt.attempt_id = Uuid::new_v4().to_string();
+            assert!(matches!(
+                writer
+                    .record_legacy_named_import_arm(&plan, &digest, different_attempt)
+                    .await,
+                Err(JournalError::Conflict)
+            ));
+            let (first, second) = tokio::join!(
+                writer.record_legacy_named_import_arm(&plan, &digest, arm.clone()),
+                writer.record_legacy_named_import_arm(&plan, &digest, arm.clone()),
+            );
+            let submitted = match (first, second) {
+                (Ok(recorded), Err(JournalError::Conflict))
+                | (Err(JournalError::Conflict), Ok(recorded)) => recorded.into_request(),
+                _ => panic!("only one exact import Arm write may issue a ticket"),
+            };
+            let next = BrokerCheckpointV3::new(checkpoint(named_arm.clone())?, Vec::new())?;
+            assert!(matches!(
+                writer
+                    .advance_lifecycle(operation, admitted.head().clone(), next)
+                    .await,
+                Err(JournalError::Conflict)
+            ));
+
+            writer
+                .stops()
+                .append_cancel(CancelInputV1::new(operation, Uuid::new_v4())?)
+                .await
+                .map_err(|failure| failure.error())?;
+            let (retained, receipt) = writer
+                .load_legacy_named_import_arm(operation)
+                .await?
+                .unwrap();
+            assert!(equal(&retained, &submitted)?);
+            assert!(receipt.is_none());
+            let mut wrong = arm_result.clone();
+            wrong.receipt.control_namespace_uuid = Uuid::new_v4().to_string();
+            assert!(matches!(
+                writer
+                    .acknowledge_legacy_named_import_arm(operation, &retained, wrong)
+                    .await,
+                Err(JournalError::Conflict)
+            ));
+            writer
+                .acknowledge_legacy_named_import_arm(operation, &retained, arm_result.clone())
+                .await?;
+            let acknowledged = writer.load(operation).await?.unwrap();
+            let (retained, receipt) = writer
+                .load_legacy_named_import_arm(operation)
+                .await?
+                .unwrap();
+            assert!(equal(&retained, &submitted)?);
+            assert!(equal(&receipt.unwrap(), &arm_result.receipt)?);
+            let mut replay = arm_result.clone();
+            replay.replayed = false;
+            writer
+                .acknowledge_legacy_named_import_arm(operation, &retained, replay)
+                .await?;
+            assert_eq!(
+                writer.load(operation).await?.unwrap().head(),
+                acknowledged.head()
+            );
         }
         Ok(())
     }
