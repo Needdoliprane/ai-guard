@@ -174,7 +174,7 @@ impl Execution<'_> {
         if !draft.cancelled() {
             self.generation_current()?;
         }
-        Box::pin(self.save_observed_result(&terminal)).await?;
+        let terminal = Box::pin(self.save_observed_result(&terminal)).await?;
         let acknowledged = Box::pin(self.mutate(WorkerTransitionV1::Observe {
             observation: managed::observation_dto(worker, &terminal)?,
         }))

@@ -6,6 +6,38 @@ use crate::broker::terminal_facts::{
 };
 use futures_util::FutureExt;
 
+fn confirmed_result_observation(
+    data: &serde_json::Value,
+    worker_id: &str,
+    attempt_id: &str,
+    container_id: &str,
+    terminal: &ContainerObservation,
+) -> Result<ContainerObservation> {
+    let facts: BatchResultFactsV1 = serde_json::from_value(data.clone())?;
+    ensure!(
+        facts.version == 1
+            && facts.worker_id == worker_id
+            && facts.attempt_id == attempt_id
+            && facts.observation.id.as_deref() == Some(container_id)
+            && terminal.id.as_deref() == Some(container_id),
+        "batch result belongs to a different worker or container"
+    );
+    let observed = facts.observation;
+    terminal.validate_identity_allocation(&observed)?;
+    ensure!(
+        observed.configuration_fingerprint == terminal.configuration_fingerprint
+            && observed.process.status == terminal.process.status
+            && observed.process.running == terminal.process.running
+            && observed.process.started_at == terminal.process.started_at
+            && observed.process.finished_at == terminal.process.finished_at
+            && observed.process.exit_code == terminal.process.exit_code
+            && observed.process.oom_killed == terminal.process.oom_killed,
+        "retained batch result differs from terminal observation"
+    );
+    // The matching retained observation supplies the sample time for Observe.
+    Ok(observed)
+}
+
 impl Execution<'_> {
     pub(super) async fn save_worker_result(
         &self,
@@ -143,30 +175,73 @@ impl Execution<'_> {
         .await
     }
 
-    pub(super) async fn save_observed_result(&self, terminal: &ContainerObservation) -> Result<()> {
+    pub(super) async fn save_observed_result(
+        &self,
+        terminal: &ContainerObservation,
+    ) -> Result<ContainerObservation> {
         let (job, draft) = self.load().await?;
-        if draft
+        let worker = draft.worker()?;
+        let container_id = worker
+            .attempt
+            .container_id
+            .as_deref()
+            .context("worker has no retained container")?;
+        let request = &draft.run.plan.request;
+        let confirm = |event: &crate::model::Event| {
+            event.validate()?;
+            ensure!(
+                event.kind == "broker.batch.result"
+                    && event.source == "runner"
+                    && event.provenance == "observed"
+                    && event.coverage == "observed"
+                    && event.session_id == request.session_id
+                    && event.project_id == request.project_id
+                    && event.sandbox_id == request.sandbox_id
+                    && event.agent_id == request.agent_id
+                    && event.correlation_id == request.correlation_id
+                    && event.trace_id == request.trace_id,
+                "batch result differs from the retained request"
+            );
+            confirmed_result_observation(
+                &event.data,
+                &worker.worker_id,
+                &worker.attempt.attempt_id,
+                container_id,
+                terminal,
+            )
+        };
+        let mut results = job
+            .broker_checkpoint_v4()
+            .into_iter()
+            .flat_map(|checkpoint| checkpoint.events())
+            .map(|entry| entry.event())
+            .filter(|event| event.kind == "broker.batch.result");
+        let outbox_result = results.next();
+        ensure!(results.next().is_none(), "multiple retained batch results");
+        if let Some(event) = draft
             .run
             .plan
             .managed
             .as_ref()
-            .is_some_and(|m| m.output_event.is_some())
+            .and_then(|managed| managed.output_event.as_ref())
         {
-            return Ok(());
+            let event = serde_json::from_value(event.clone())?;
+            let observed = confirm(&event)?;
+            if let Some(outbox) = outbox_result {
+                ensure!(
+                    same(&event, outbox)?,
+                    "checkpoint and outbox retain different batch results"
+                );
+            }
+            return Ok(observed);
         }
-        let existing = job.broker_checkpoint_v4().and_then(|cp| {
-            cp.events()
-                .iter()
-                .find(|entry| entry.event().kind == "broker.batch.result")
-                .map(|entry| entry.event().clone())
-        });
-        let event = if let Some(event) = existing {
-            event
+        let (event, observed) = if let Some(event) = outbox_result {
+            (event.clone(), confirm(event)?)
         } else {
             let facts = BatchResultFactsV1 {
                 version: 1,
-                worker_id: draft.worker()?.worker_id.clone(),
-                attempt_id: draft.worker()?.attempt.attempt_id.clone(),
+                worker_id: worker.worker_id.clone(),
+                attempt_id: worker.attempt.attempt_id.clone(),
                 observation: terminal.clone(),
                 transport: None,
             };
@@ -176,6 +251,7 @@ impl Execution<'_> {
                     "broker.batch.result",
                     serde_json::to_value(facts)?,
                 )))?;
+            let observed = confirm(&event)?;
             let coverage = CoverageFactsV1 {
                 version: 1,
                 normalized_events: None,
@@ -196,7 +272,7 @@ impl Execution<'_> {
                 .writer
                 .enqueue_events(self.operation, vec![coverage, event.clone()])
                 .await?;
-            event
+            (event, observed)
         };
         let event = serde_json::to_value(event)?;
         self.patch(|draft| {
@@ -214,7 +290,8 @@ impl Execution<'_> {
             managed.output_acknowledged = false;
             Ok(())
         })
-        .await
+        .await?;
+        Ok(observed)
     }
 
     pub(super) async fn post_worker_result(&self) -> Result<()> {
@@ -595,6 +672,96 @@ struct ExportPolicyFactsV1 {
     request_id: Uuid,
     manifest_digest: String,
     omitted_entries: u64,
+}
+
+#[cfg(test)]
+mod observed_result_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn retained_result_reuses_its_sample_only_for_the_same_terminal_facts() -> Result<()> {
+        const WORKER: &str = "00000000-0000-4000-8000-000000000001";
+        const ATTEMPT: &str = "00000000-0000-4000-8000-000000000002";
+        let container = "a".repeat(64);
+        let retained = json!({
+            "version": 1,
+            "worker_id": WORKER,
+            "attempt_id": ATTEMPT,
+            "observation": {
+                "id": container,
+                "name": "retained-worker",
+                "image_id": "b".repeat(64),
+                "restart_count": 0,
+                "process": {
+                    "status": "exited",
+                    "running": false,
+                    "started_at": "2026-11-27T12:00:00Z",
+                    "finished_at": "2026-11-27T12:00:02Z",
+                    "exit_code": 0,
+                    "oom_killed": false,
+                },
+                "allocation": {
+                    "cpu": {"quota": 1, "period": 1},
+                    "memory_bytes": 1073741824_u64,
+                    "pids_limit": 256,
+                },
+                "configuration_fingerprint": "c".repeat(64),
+                "observed_at": "2026-11-27T12:00:03Z",
+                "diagnostics": [],
+            },
+            "transport": {
+                "exit_code": 125,
+                "duration_ms_decimal": "2000",
+                "stdout": {"total_bytes": 0, "truncated": false, "text_clipped": null, "text": null},
+                "stderr": {"total_bytes": 0, "truncated": false, "text_clipped": null, "text": null},
+            },
+        });
+        let original: ContainerObservation =
+            serde_json::from_value(retained["observation"].clone())?;
+        let mut terminal = original.clone();
+        terminal.observed_at += chrono::Duration::seconds(3);
+        terminal.configuration_fingerprint_version = Some(1);
+        let confirm = |data: &serde_json::Value| {
+            confirmed_result_observation(data, WORKER, ATTEMPT, &container, &terminal)
+        };
+        assert!(same(&confirm(&retained)?, &original)?);
+        let mut observation_only = retained.clone();
+        observation_only["transport"] = serde_json::Value::Null;
+        assert!(same(&confirm(&observation_only)?, &original)?);
+
+        for (field, changed) in [
+            ("/version", json!(2)),
+            ("/worker_id", json!(ATTEMPT)),
+            ("/attempt_id", json!(WORKER)),
+            ("/observation/id", json!("d".repeat(64))),
+            ("/observation/name", json!("other-worker")),
+            ("/observation/image_id", json!("e".repeat(64))),
+            ("/observation/restart_count", json!(1)),
+            ("/observation/allocation/pids_limit", json!(257)),
+            (
+                "/observation/configuration_fingerprint",
+                json!("f".repeat(64)),
+            ),
+            ("/observation/process/status", json!("running")),
+            ("/observation/process/running", json!(true)),
+            (
+                "/observation/process/started_at",
+                json!("2026-11-27T12:00:01Z"),
+            ),
+            (
+                "/observation/process/finished_at",
+                json!("2026-11-27T12:00:04Z"),
+            ),
+            ("/observation/process/exit_code", json!(7)),
+            ("/observation/process/oom_killed", json!(true)),
+        ] {
+            let mut different = retained.clone();
+            *different.pointer_mut(field).unwrap() = changed;
+            assert!(confirm(&different).is_err(), "accepted divergence {field}");
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]

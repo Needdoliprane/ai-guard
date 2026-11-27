@@ -1111,7 +1111,7 @@ impl<'a> Execution<'a> {
                     .await?;
             }
             let terminal = runtime.resume_terminal(&owned.handle).await?;
-            self.save_observed_result(&terminal).await?;
+            let terminal = self.save_observed_result(&terminal).await?;
             self.mutate(WorkerTransitionV1::Observe {
                 observation: managed::observation_dto(&worker, &terminal)?,
             })
