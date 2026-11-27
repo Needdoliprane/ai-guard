@@ -226,12 +226,10 @@ fn named_import_registration(root: &Path) -> RegistrationV1 {
         }),
     };
     arm.timeout_seconds = 120;
-    arm.deadline_ns_decimal = checked_deadline(
-        arm.clock.continuous_ns().unwrap(),
-        u64::from(arm.timeout_seconds),
-    )
-    .unwrap()
-    .to_string();
+    arm.deadline_ns_decimal =
+        checked_deadline(arm.clock.continuous_ns().unwrap(), arm.timeout_seconds)
+            .unwrap()
+            .to_string();
     let receipt = ArmReceiptV1 {
         version: 1,
         arm_id: arm.operation_id.clone(),
@@ -568,7 +566,9 @@ async fn exercise(mode: &str, parent: &Directory) {
             Response::ProspectiveReserved { reservation } => reservation,
             _ => panic!("A's named reserve must retain the native target"),
         };
-        let pending = native.pending(&reserved).unwrap();
+        let pending = native
+            .pending(&reserved, LegacyProspectiveRailV1::Named(custody_a))
+            .unwrap();
         assert!(pending.runtime_installed.load(Ordering::SeqCst));
 
         // Reconnected B cannot claim the same target through either the
@@ -760,7 +760,9 @@ async fn exercise(mode: &str, parent: &Directory) {
         expiring.receipt.input_hash = expiring.arm.input_hash().unwrap();
         expiring.validate().unwrap();
         let reservation = reserve(&root, &expiring).await;
-        let pending = native.pending(&reservation).unwrap();
+        let pending = native
+            .pending(&reservation, LegacyProspectiveRailV1::Historical)
+            .unwrap();
         // The native target/deadline is already retained. Making its private
         // filesystem unavailable to a new writer cannot suppress that deadline.
         fs::set_permissions(root.path(), fs::Permissions::from_mode(0o500)).unwrap();
@@ -776,7 +778,9 @@ async fn exercise(mode: &str, parent: &Directory) {
         return;
     }
     let reserved = reserve(&root, &first).await;
-    let pending = native.pending(&reserved).unwrap();
+    let pending = native
+        .pending(&reserved, LegacyProspectiveRailV1::Historical)
+        .unwrap();
     assert!(pending.runtime_installed.load(Ordering::SeqCst));
     let original_thread = native.owners.keyed_thread_id(pending.key).unwrap();
     let original_identity = pending.native_identity.lock().unwrap().prospective.unwrap();
