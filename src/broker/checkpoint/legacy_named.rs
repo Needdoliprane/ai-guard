@@ -3,7 +3,8 @@ use super::*;
 use crate::{
     control::session_control::{
         LegacyConfirmedPlanV1, LegacyNamedAdmissionReceiptV1, LegacyNamedImportArmRequestV1,
-        LegacyNamedImportClaimRequestV1, LegacyNamedSupervisedAdmissionV1,
+        LegacyNamedImportClaimRequestV1, LegacyNamedImportObservationPhaseV1,
+        LegacyNamedImportObservationRequestV1, LegacyNamedSupervisedAdmissionV1,
     },
     runtime::{RuntimeAuthority, RuntimeKind},
 };
@@ -39,6 +40,8 @@ pub(crate) struct LegacyNamedAdmissionCheckpoint {
         skip_serializing_if = "Option::is_none"
     )]
     import_claim: Option<Box<LegacyNamedImportClaimCheckpointV1>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    import_observations: Vec<LegacyNamedImportObservationCheckpointV1>,
 }
 
 fn deserialize_present<'de, D, T>(decoder: D) -> Result<Option<T>, D::Error>
@@ -106,6 +109,26 @@ pub(crate) struct LegacyNamedImportClaimCheckpointV1 {
 
 impl LegacyNamedImportClaimCheckpointV1 {
     pub(crate) fn request(&self) -> &LegacyNamedImportClaimRequestV1 {
+        &self.request
+    }
+
+    pub(crate) fn receipt(&self) -> Option<&MutationReceiptV1> {
+        self.receipt.as_ref()
+    }
+}
+
+/// One exact, append-only runtime fact for the already-claimed Import helper.
+/// An ACK records the Store receipt; this checkpoint never grants start.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct LegacyNamedImportObservationCheckpointV1 {
+    version: u32,
+    request: LegacyNamedImportObservationRequestV1,
+    receipt: Option<MutationReceiptV1>,
+}
+
+impl LegacyNamedImportObservationCheckpointV1 {
+    pub(crate) fn request(&self) -> &LegacyNamedImportObservationRequestV1 {
         &self.request
     }
 
@@ -203,6 +226,7 @@ impl LegacyNamedAdmissionCheckpoint {
             import_arm: None,
             import_creation: None,
             import_claim: None,
+            import_observations: Vec::new(),
         };
         let namespace = uuid(&value.plan.control_namespace_uuid)?;
         value.validate_shape(namespace)?;
@@ -433,6 +457,64 @@ impl LegacyNamedAdmissionCheckpoint {
         Ok(self)
     }
 
+    pub(crate) fn import_observation(
+        &self,
+        phase: LegacyNamedImportObservationPhaseV1,
+    ) -> Option<(
+        &LegacyNamedImportObservationRequestV1,
+        Option<&MutationReceiptV1>,
+    )> {
+        self.import_observations
+            .iter()
+            .find(|saved| saved.request.phase == phase)
+            .map(|saved| (saved.request(), saved.receipt()))
+    }
+
+    /// Persist the exact observation payload before it is submitted to Store.
+    /// Reconciliation reuses this identity; it cannot manufacture an Arm or
+    /// a launch permission.
+    pub(crate) fn with_import_observation(
+        mut self,
+        request: LegacyNamedImportObservationRequestV1,
+    ) -> JournalResult<Self> {
+        checked(self.validate_import_observation_request(&request))?;
+        if let Some(saved) = self.import_observation(request.phase) {
+            ensure(equal(saved.request(), &request)?)?;
+            return Ok(self);
+        }
+        self.import_observations
+            .push(LegacyNamedImportObservationCheckpointV1 {
+                version: 1,
+                request,
+                receipt: None,
+            });
+        self.validate_shape(uuid(&self.plan.control_namespace_uuid)?)?;
+        Ok(self)
+    }
+
+    /// Retain the Store ACK against the previously persisted exact payload.
+    /// A concurrent STOP is preserved by the Writer's lifecycle CAS retry.
+    pub(crate) fn acknowledge_import_observation(
+        mut self,
+        request: &LegacyNamedImportObservationRequestV1,
+        receipt: MutationReceiptV1,
+    ) -> JournalResult<Self> {
+        checked(request.validate_receipt(&receipt))?;
+        let saved = self
+            .import_observations
+            .iter_mut()
+            .find(|saved| saved.request.phase == request.phase)
+            .ok_or(JournalError::Conflict)?;
+        ensure(equal(saved.request(), request)?)?;
+        if let Some(previous) = saved.receipt() {
+            ensure(equal(previous, &receipt)?)?;
+        } else {
+            saved.receipt = Some(receipt);
+        }
+        self.validate_shape(uuid(&self.plan.control_namespace_uuid)?)?;
+        Ok(self)
+    }
+
     pub(crate) fn requires_strict_cas(&self) -> bool {
         self.pending_v2().is_some()
             || (self.import_creation().is_some() && self.import_arm().is_none())
@@ -440,6 +522,10 @@ impl LegacyNamedAdmissionCheckpoint {
             || self
                 .import_claim()
                 .is_some_and(|claim| claim.receipt().is_none())
+            || self
+                .import_observations
+                .iter()
+                .any(|observation| observation.receipt().is_none())
     }
 
     #[allow(
@@ -465,7 +551,8 @@ impl LegacyNamedAdmissionCheckpoint {
                 self.archive_digest.is_none()
                     && self.import_arm.is_none()
                     && self.import_creation.is_none()
-                    && self.import_claim.is_none(),
+                    && self.import_claim.is_none()
+                    && self.import_observations.is_empty(),
             )?,
             2 => hash(self.archive_digest().ok_or(JournalError::Conflict)?)?,
             _ => return Err(JournalError::UnsupportedVersion),
@@ -522,6 +609,7 @@ impl LegacyNamedAdmissionCheckpoint {
         if let Some(claim) = self.import_claim() {
             self.validate_import_claim(claim)?;
         }
+        self.validate_import_observations()?;
         ensure(canonical(self)?.len() <= MAX_OPERATION_BYTES)
     }
 
@@ -622,6 +710,75 @@ impl LegacyNamedAdmissionCheckpoint {
         Ok(())
     }
 
+    fn validate_import_observation_request(
+        &self,
+        request: &LegacyNamedImportObservationRequestV1,
+    ) -> JournalResult<()> {
+        checked(request.validate())?;
+        let claim = self.import_claim().ok_or(JournalError::Conflict)?;
+        let claim_receipt = claim.receipt().ok_or(JournalError::Conflict)?;
+        let arm = self.import_arm().ok_or(JournalError::Conflict)?;
+        let arm_receipt = arm.receipt().ok_or(JournalError::Conflict)?;
+        let expected_operation = LegacyNamedImportObservationRequestV1::operation_id(
+            self.plan.binding_ref,
+            uuid(&claim.request.claim.operation_id)?,
+            request.phase,
+        );
+        ensure(
+            request.binding_ref == self.plan.binding_ref
+                && request.namespace == self.plan.control_namespace_uuid
+                && equal(&request.claim_receipt, claim_receipt)?
+                && equal(&request.observation.arm_receipt, arm_receipt)?
+                && request.observation.helper_id == claim.request.claim.helper_id
+                && request.observation.operation_id == expected_operation
+                && equal(
+                    &request.observation.observation.inspection,
+                    &arm.arm.inspection,
+                )?,
+        )?;
+        Ok(())
+    }
+
+    fn validate_import_observations(&self) -> JournalResult<()> {
+        ensure(self.import_observations.len() <= 2)?;
+        for saved in &self.import_observations {
+            ensure(saved.version == 1)?;
+            self.validate_import_observation_request(&saved.request)?;
+            if let Some(receipt) = saved.receipt() {
+                checked(saved.request.validate_receipt(receipt))?;
+            }
+        }
+        match self.import_observations.as_slice() {
+            [] => Ok(()),
+            [one] => match one.request.phase {
+                LegacyNamedImportObservationPhaseV1::Started
+                | LegacyNamedImportObservationPhaseV1::Terminal => Ok(()),
+            },
+            [started, terminal] => {
+                ensure(
+                    started.request.phase == LegacyNamedImportObservationPhaseV1::Started
+                        && terminal.request.phase == LegacyNamedImportObservationPhaseV1::Terminal,
+                )?;
+                let started_fact = &started.request.observation.observation;
+                let terminal_fact = &terminal.request.observation.observation;
+                ensure(started_fact.started_at == terminal_fact.started_at)?;
+                let started_seen = chrono::DateTime::parse_from_rfc3339(&started_fact.observed_at)
+                    .map_err(|_| JournalError::Conflict)?;
+                let terminal_seen =
+                    chrono::DateTime::parse_from_rfc3339(&terminal_fact.observed_at)
+                        .map_err(|_| JournalError::Conflict)?;
+                ensure(started_seen <= terminal_seen)?;
+                if let (Some(started_receipt), Some(terminal_receipt)) =
+                    (started.receipt(), terminal.receipt())
+                {
+                    ensure(terminal_receipt.audit_seq > started_receipt.audit_seq)?;
+                }
+                Ok(())
+            }
+            _ => Err(JournalError::Conflict),
+        }
+    }
+
     pub(super) fn validate_transition(&self, previous: Option<&Self>) -> JournalResult<()> {
         match previous {
             None => ensure(
@@ -680,6 +837,26 @@ impl LegacyNamedAdmissionCheckpoint {
                             && (old.receipt().is_none() || equal(&old.receipt, &new.receipt)?),
                     )?,
                     (Some(_), None) => return Err(JournalError::Conflict),
+                }
+                ensure(self.import_observations.len() >= old.import_observations.len())?;
+                ensure(self.import_observations.len() <= old.import_observations.len() + 1)?;
+                if self.import_observations.len() > old.import_observations.len() {
+                    ensure(
+                        self.import_observations
+                            .last()
+                            .is_some_and(|new| new.receipt().is_none()),
+                    )?;
+                }
+                for (previous, current) in old
+                    .import_observations
+                    .iter()
+                    .zip(&self.import_observations)
+                {
+                    ensure(equal(previous.request(), current.request())?)?;
+                    if let Some(receipt) = previous.receipt() {
+                        let current_receipt = current.receipt().ok_or(JournalError::Conflict)?;
+                        ensure(equal(receipt, current_receipt)?)?;
+                    }
                 }
                 match (old.import_arm(), self.import_arm()) {
                     (None, None) => Ok(()),

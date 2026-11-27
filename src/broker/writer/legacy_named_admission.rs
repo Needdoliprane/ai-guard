@@ -19,7 +19,8 @@ use crate::{
         SupervisionProtocolV1,
         session_control::{
             LegacyConfirmedPlanV1, LegacyNamedAdmissionReceiptV1, LegacyNamedImportArmRequestV1,
-            LegacyNamedImportClaimRequestV1, LegacyNamedInitialDecisionV1,
+            LegacyNamedImportClaimRequestV1, LegacyNamedImportObservationPhaseV1,
+            LegacyNamedImportObservationRequestV1, LegacyNamedInitialDecisionV1,
             LegacyNamedSupervisedAdmissionV1,
         },
     },
@@ -70,6 +71,23 @@ impl RecordedLegacyNamedImportArm {
 
     pub(in crate::broker) fn birth(&self) -> &RevisionRefV1 {
         &self.birth
+    }
+}
+
+/// Persisted input and optional exact Store ACK for one imported-helper phase.
+/// Absence of an ACK means the same request must be reconciled, not rebuilt.
+pub(in crate::broker) struct RecordedLegacyNamedImportObservation {
+    request: LegacyNamedImportObservationRequestV1,
+    receipt: Option<MutationReceiptV1>,
+}
+
+impl RecordedLegacyNamedImportObservation {
+    pub(in crate::broker) fn request(&self) -> &LegacyNamedImportObservationRequestV1 {
+        &self.request
+    }
+
+    pub(in crate::broker) fn receipt(&self) -> Option<&MutationReceiptV1> {
+        self.receipt.as_ref()
     }
 }
 
@@ -493,6 +511,110 @@ impl WriterClient {
             }
             let current = super::lifecycle(&job)?;
             let next = with_admission(&current, acknowledged)?;
+            match self
+                .advance_lifecycle_with_publication(operation, job.head().clone(), next)
+                .await
+            {
+                Ok(_) => return Ok(()),
+                Err(LifecycleWriteFailure::BeforePublication(JournalError::Conflict)) => continue,
+                Err(failure) => return Err(failure.journal_error()),
+            }
+        }
+        Err(JournalError::Conflict)
+    }
+
+    /// Journal one exact Started or Terminal observation before the caller
+    /// submits it to Store. This is evidence only and never authorizes start.
+    /// Replaying the same body returns its retained ACK, if already present.
+    pub(in crate::broker) async fn record_legacy_named_import_observation(
+        &self,
+        plan: &LegacyConfirmedPlanV1,
+        request: LegacyNamedImportObservationRequestV1,
+    ) -> JournalResult<RecordedLegacyNamedImportObservation> {
+        request.validate().map_err(|_| JournalError::InvalidInput)?;
+        for _ in 0..ACK_CAS_ATTEMPTS {
+            let job = self.load_named_job(plan).await?;
+            let retained = retained_admission(&job)?;
+            if let Some((saved, receipt)) = retained.import_observation(request.phase) {
+                if canonical(saved)? != canonical(&request)? {
+                    return Err(JournalError::Conflict);
+                }
+                return Ok(RecordedLegacyNamedImportObservation {
+                    request,
+                    receipt: receipt.cloned(),
+                });
+            }
+            let updated = retained.clone().with_import_observation(request.clone())?;
+            let current = super::lifecycle(&job)?;
+            let next = with_admission(&current, updated)?;
+            match self
+                .advance_lifecycle_with_publication(plan.operation_id, job.head().clone(), next)
+                .await
+            {
+                Ok(_) => {
+                    return Ok(RecordedLegacyNamedImportObservation {
+                        request,
+                        receipt: None,
+                    });
+                }
+                Err(LifecycleWriteFailure::BeforePublication(JournalError::Conflict)) => continue,
+                Err(failure) => return Err(failure.journal_error()),
+            }
+        }
+        Err(JournalError::Conflict)
+    }
+
+    /// Load only an existing phase identity for restart reconciliation. No
+    /// absent request can be synthesized from a checkpoint read.
+    pub(in crate::broker) async fn load_legacy_named_import_observation(
+        &self,
+        operation: Uuid,
+        phase: LegacyNamedImportObservationPhaseV1,
+    ) -> JournalResult<Option<RecordedLegacyNamedImportObservation>> {
+        let job = self
+            .load(operation)
+            .await?
+            .ok_or(JournalError::InvalidInput)?;
+        let retained = retained_admission(&job)?;
+        Ok(retained
+            .import_observation(phase)
+            .map(|(request, receipt)| RecordedLegacyNamedImportObservation {
+                request: request.clone(),
+                receipt: receipt.cloned(),
+            }))
+    }
+
+    /// Save the exact Store receipt for the previously journaled request.
+    /// Reload/retry after CAS contention preserves a concurrent STOP prefix.
+    pub(in crate::broker) async fn acknowledge_legacy_named_import_observation(
+        &self,
+        operation: Uuid,
+        request: &LegacyNamedImportObservationRequestV1,
+        receipt: MutationReceiptV1,
+    ) -> JournalResult<()> {
+        request
+            .validate_receipt(&receipt)
+            .map_err(|_| JournalError::Conflict)?;
+        for _ in 0..ACK_CAS_ATTEMPTS {
+            let job = self
+                .load(operation)
+                .await?
+                .ok_or(JournalError::InvalidInput)?;
+            let retained = retained_admission(&job)?;
+            let (saved, previous_receipt) = retained
+                .import_observation(request.phase)
+                .ok_or(JournalError::Conflict)?;
+            if canonical(saved)? != canonical(request)? {
+                return Err(JournalError::Conflict);
+            }
+            let updated = retained
+                .clone()
+                .acknowledge_import_observation(request, receipt.clone())?;
+            if previous_receipt.is_some() {
+                return Ok(());
+            }
+            let current = super::lifecycle(&job)?;
+            let next = with_admission(&current, updated)?;
             match self
                 .advance_lifecycle_with_publication(operation, job.head().clone(), next)
                 .await
