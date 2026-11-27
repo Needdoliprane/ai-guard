@@ -5,21 +5,27 @@ use crate::{
     audit::legacy_session_prepare::LegacyNamedCancelReservationV1,
     broker::{
         checkpoint::LegacyNamedAdmissionCheckpoint,
+        clock::{HostClock, NativeHostClock},
         enforcer::{
             EnforcerClient, EnforcerError, ExecutionEnforcerV1, LegacyNamedProspectiveFailure,
-            NamedImportArmBirthV1, ProspectiveArmExchange, ProspectiveRegistrationV1,
+            NamedImportArmBirthV1, ProspectiveArmExchange, ProspectiveRegistrationV1, RegistrationV1,
         },
         journal::{CancelStopProjectionV1, JournalError, JournalScopeV1, RevisionRefV1, canonical},
         lifecycle::LocalCommandRequestV1,
         presence::http::{Client, Limits},
         writer::{NamedImportArmWriteFailure, RecordedLegacyNamedImportArm as ImportArmWrite},
     },
-    control::{AdmissionRefusalV1, MutationResultV1, RuntimeKindV1, WorkerV1, session_control::*},
+    control::{
+        AdmissionRefusalV1, ClaimDispositionV1, HelperClaimResultV1, MutationReceiptV1,
+        MutationResultV1, RuntimeKindV1, WorkerV1, session_control::*,
+    },
 };
 use reqwest::{Method, StatusCode};
 use sha2::{Digest, Sha256};
 
 const RESPONSE_BYTES: u64 = 128 * 1024;
+const IMPORT_CLAIM_RESPONSE_BYTES: u64 = 4096;
+const IMPORT_CLAIM_RECEIPT_NOT_FOUND: &str = "legacy_named_import_claim_receipt_not_found";
 
 pub(crate) enum Outcome {
     Accepted(LegacyNamedAdmissionReceiptV1),
@@ -608,6 +614,221 @@ async fn send_import_arm(
     Ok(Some(result))
 }
 
+enum ImportClaimDispatch<'a> {
+    #[allow(
+        dead_code,
+        reason = "the live Service ticket consumer is composed separately"
+    )]
+    Submit {
+        registration: &'a RegistrationV1,
+        generation: (&'a CancelGeneration, u64),
+    },
+    Reconcile,
+}
+
+/// Kept inside Presence for the live Service ticket. The caller must retain
+/// the exact Writer receipt before handing off a fresh disposition.
+#[allow(
+    dead_code,
+    reason = "the live Service ticket consumer is composed separately"
+)]
+pub(super) async fn submit_import_claim(
+    presence: &PresenceAuthority,
+    request: &LegacyNamedImportClaimRequestV1,
+    registration: &RegistrationV1,
+    generation: (&CancelGeneration, u64),
+) -> Result<HelperClaimResultV1> {
+    exchange_import_claim(
+        presence,
+        request,
+        ImportClaimDispatch::Submit {
+            registration,
+            generation,
+        },
+    )
+    .await?
+    .ok_or(PresenceError::AdmissionOutcomeUnknown)
+}
+
+pub(super) async fn reconcile_import_claim(
+    presence: &PresenceAuthority,
+    writer: &WriterClient,
+    operation: Uuid,
+) -> Result<Option<MutationReceiptV1>> {
+    validate_scope(presence, writer.scope())?;
+    let retained = writer
+        .load_legacy_named_admission(operation)
+        .await
+        .map_err(import_arm_journal_error)?;
+    let request = retained
+        .import_claim()
+        .ok_or(PresenceError::Conflict)?
+        .request();
+    validate_plan_scope(
+        &presence.scope.control_namespace_uuid.to_string(),
+        writer.scope().profile_id(),
+        request.binding_ref,
+        retained.plan(),
+    )?;
+    let Some(result) =
+        exchange_import_claim(presence, request, ImportClaimDispatch::Reconcile).await?
+    else {
+        return Ok(None);
+    };
+    writer
+        .acknowledge_legacy_named_import_claim(operation, request, result.receipt.clone())
+        .await
+        .map_err(|_| PresenceError::AdmissionOutcomeUnknown)?;
+    Ok(Some(result.receipt))
+}
+
+async fn exchange_import_claim(
+    presence: &PresenceAuthority,
+    request: &LegacyNamedImportClaimRequestV1,
+    dispatch: ImportClaimDispatch<'_>,
+) -> Result<Option<HelperClaimResultV1>> {
+    request.validate().map_err(|_| PresenceError::Protocol)?;
+    let namespace = presence.scope.control_namespace_uuid.to_string();
+    if request.namespace != namespace {
+        return Err(PresenceError::Forbidden);
+    }
+    if let ImportClaimDispatch::Submit {
+        registration,
+        generation: (cancel, expected),
+    } = &dispatch
+    {
+        require_arm_generation(cancel, *expected)?;
+        if registration.tenant_id() != presence.scope.expected_tenant_id
+            || registration.control_origin_hash()
+                != hex::encode(Sha256::digest(presence.scope.gateway.as_bytes()))
+        {
+            return Err(PresenceError::Forbidden);
+        }
+        let arm = registration.arm();
+        let attempt = canonical_uuid(&arm.attempt_id).map_err(|_| PresenceError::Conflict)?;
+        if arm.operation_id
+            != LegacyNamedImportArmRequestV1::operation_id(request.binding_ref, attempt)
+        {
+            return Err(PresenceError::Conflict);
+        }
+        request
+            .validate_for_arm(request.binding_ref, &namespace, arm, registration.receipt())
+            .map_err(|_| PresenceError::Conflict)?;
+    }
+    let value = serde_json::to_value(request).map_err(|_| PresenceError::Protocol)?;
+    presence.screen(&value)?;
+    let body = serde_json::to_vec(request).map_err(|_| PresenceError::Protocol)?;
+    if body.len() > LEGACY_NAMED_ADMISSION_REQUEST_BYTES {
+        return Err(PresenceError::Protocol);
+    }
+    let reconcile = matches!(&dispatch, ImportClaimDispatch::Reconcile);
+    let suffix = if reconcile { "/reconcile" } else { "" };
+    let path = format!(
+        "/api/v1/control/session-confirmations/{}/admission/import-claim{suffix}",
+        request.binding_ref
+    );
+    presence.revalidate()?;
+    let client = Client::new(presence)?;
+    let before = checked_identity(&client, presence).await?;
+    presence.revalidate()?;
+    let send = async {
+        client
+            .send_session_bounded(
+                Method::POST,
+                &path,
+                Some(body),
+                Limits {
+                    request: LEGACY_NAMED_ADMISSION_REQUEST_BYTES as u64,
+                    success: IMPORT_CLAIM_RESPONSE_BYTES,
+                    error: IMPORT_CLAIM_RESPONSE_BYTES,
+                },
+            )
+            .await
+            .map_err(|_| PresenceError::AdmissionOutcomeUnknown)
+    };
+    let (status, bytes) = match dispatch {
+        ImportClaimDispatch::Submit {
+            registration,
+            generation: (cancel, expected),
+        } => {
+            let clock = NativeHostClock::new().map_err(|_| PresenceError::Clock)?;
+            let recorded_ns = request
+                .claim
+                .clock_check
+                .continuous_ns()
+                .map_err(|_| PresenceError::Clock)?;
+            dispatch_before_stop(cancel, expected, async {
+                // The generation guard covers this fresh host reading and
+                // the transport's first poll. The Writer's claim bytes stay exact.
+                let now = clock.sample().map_err(|_| PresenceError::Clock)?;
+                if now.continuous_ns().map_err(|_| PresenceError::Clock)? < recorded_ns {
+                    return Err(PresenceError::Clock);
+                }
+                registration
+                    .arm()
+                    .validate_clock_check(&now)
+                    .map_err(|_| PresenceError::Clock)?;
+                send.await
+            })
+            .await?
+        }
+        ImportClaimDispatch::Reconcile => send.await?,
+    };
+    let value = crate::json::decode_unique(&bytes, 64)
+        .map_err(|_| PresenceError::AdmissionOutcomeUnknown)?;
+    presence
+        .screen(&value)
+        .map_err(|_| PresenceError::AdmissionOutcomeUnknown)?;
+    let result = decode_import_claim(request, reconcile, status, value)?;
+    let after = checked_identity(&client, presence)
+        .await
+        .map_err(|_| PresenceError::AdmissionOutcomeUnknown)?;
+    if before != after {
+        return Err(PresenceError::AdmissionOutcomeUnknown);
+    }
+    presence
+        .revalidate()
+        .map_err(|_| PresenceError::AdmissionOutcomeUnknown)?;
+    Ok(result)
+}
+
+fn decode_import_claim(
+    request: &LegacyNamedImportClaimRequestV1,
+    reconcile: bool,
+    status: StatusCode,
+    value: Value,
+) -> Result<Option<HelperClaimResultV1>> {
+    if reconcile
+        && status == StatusCode::NOT_FOUND
+        && value["error"]["code"] == IMPORT_CLAIM_RECEIPT_NOT_FOUND
+    {
+        // This read observed no receipt. A previously dispatched claim may
+        // still commit, so the retained request stays pending.
+        return Ok(None);
+    }
+    let result: HelperClaimResultV1 =
+        serde_json::from_value(value).map_err(|_| PresenceError::AdmissionOutcomeUnknown)?;
+    let disposition_matches = match result.disposition {
+        ClaimDispositionV1::EmitOnce => !reconcile && status == StatusCode::CREATED,
+        ClaimDispositionV1::AlreadyConsumed => status == StatusCode::OK,
+    };
+    let receipt = &result.receipt;
+    if !disposition_matches
+        || receipt.operation_id != request.claim.operation_id
+        || receipt.input_hash
+            != request
+                .input_hash()
+                .map_err(|_| PresenceError::AdmissionOutcomeUnknown)?
+        || receipt.worker_id.as_deref() != Some(request.claim.arm_receipt.worker_id.as_str())
+        || receipt.revision.is_some()
+        || receipt.audit_seq <= request.claim.arm_receipt.audit_seq
+        || crate::control::hash(&receipt.audit_hash).is_err()
+    {
+        return Err(PresenceError::AdmissionOutcomeUnknown);
+    }
+    Ok(Some(result))
+}
+
 pub(super) async fn cancel_reserved(
     presence: &Arc<PresenceAuthority>,
     stop: &Arc<CancelStopProjectionV1>,
@@ -1027,6 +1248,120 @@ fn response_status(admission: &crate::control::AdmissionResultV1) -> StatusCode 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn import_claim_fixture()
+    -> anyhow::Result<(LegacyNamedImportClaimRequestV1, HelperClaimResultV1)> {
+        use crate::control::{
+            ArmReceiptV1, HelperStartClaimV1, HostClockMethodV1, HostClockSampleV1,
+        };
+
+        let binding_ref = Uuid::new_v4();
+        let namespace = Uuid::new_v4().to_string();
+        let arm_id = Uuid::new_v4();
+        let worker_id = Uuid::new_v4().to_string();
+        let request = LegacyNamedImportClaimRequestV1 {
+            version: 1,
+            binding_ref,
+            namespace: namespace.clone(),
+            claim: HelperStartClaimV1 {
+                version: 1,
+                operation_id: LegacyNamedImportClaimRequestV1::operation_id(binding_ref, arm_id),
+                helper_id: Uuid::new_v4().to_string(),
+                emitter_id: Uuid::new_v4().to_string(),
+                arm_receipt: ArmReceiptV1 {
+                    version: 1,
+                    arm_id: arm_id.to_string(),
+                    worker_id: worker_id.clone(),
+                    attempt_id: Uuid::new_v4().to_string(),
+                    input_hash: "a".repeat(64),
+                    control_namespace_uuid: namespace,
+                    audit_seq: 11,
+                    audit_hash: "b".repeat(64),
+                },
+                clock_check: HostClockSampleV1 {
+                    version: 1,
+                    method: HostClockMethodV1::LinuxBoottimeV1,
+                    boot_id: Uuid::new_v4().to_string(),
+                    continuous_ns_decimal: "100000000000".into(),
+                    observed_utc: None,
+                },
+            },
+        };
+        let response = HelperClaimResultV1 {
+            disposition: ClaimDispositionV1::EmitOnce,
+            receipt: MutationReceiptV1 {
+                operation_id: request.claim.operation_id.clone(),
+                worker_id: Some(worker_id),
+                revision: None,
+                input_hash: request.input_hash()?,
+                audit_seq: 12,
+                audit_hash: "c".repeat(64),
+            },
+        };
+        Ok((request, response))
+    }
+
+    #[test]
+    fn import_claim_requires_fresh_201_or_exact_consumed_200() -> anyhow::Result<()> {
+        let (request, mut response) = import_claim_fixture()?;
+        let fresh = serde_json::to_value(&response)?;
+        assert!(matches!(
+            decode_import_claim(&request, false, StatusCode::CREATED, fresh.clone())?,
+            Some(result) if result.disposition == ClaimDispositionV1::EmitOnce
+                && result.receipt == response.receipt
+        ));
+        assert!(decode_import_claim(&request, true, StatusCode::CREATED, fresh.clone()).is_err());
+        assert!(decode_import_claim(&request, false, StatusCode::OK, fresh).is_err());
+
+        response.disposition = ClaimDispositionV1::AlreadyConsumed;
+        let consumed = serde_json::to_value(&response)?;
+        assert!(
+            decode_import_claim(&request, false, StatusCode::CREATED, consumed.clone()).is_err()
+        );
+        for reconcile in [false, true] {
+            assert!(matches!(
+                decode_import_claim(&request, reconcile, StatusCode::OK, consumed.clone())?,
+                Some(result) if result.disposition == ClaimDispositionV1::AlreadyConsumed
+                    && result.receipt == response.receipt
+            ));
+        }
+        response.receipt.input_hash = request.claim.input_hash()?;
+        assert!(matches!(
+            decode_import_claim(
+                &request,
+                true,
+                StatusCode::OK,
+                serde_json::to_value(response)?
+            ),
+            Err(PresenceError::AdmissionOutcomeUnknown)
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn import_claim_absence_is_only_the_reconcile_receipt_not_found() -> anyhow::Result<()> {
+        let (request, _) = import_claim_fixture()?;
+        let absent = serde_json::json!({
+            "error": { "code": IMPORT_CLAIM_RECEIPT_NOT_FOUND }
+        });
+        assert!(
+            decode_import_claim(&request, true, StatusCode::NOT_FOUND, absent.clone())?.is_none()
+        );
+        assert!(matches!(
+            decode_import_claim(&request, false, StatusCode::NOT_FOUND, absent),
+            Err(PresenceError::AdmissionOutcomeUnknown)
+        ));
+        assert!(matches!(
+            decode_import_claim(
+                &request,
+                true,
+                StatusCode::NOT_FOUND,
+                serde_json::json!({"error": {"code": "not_found"}}),
+            ),
+            Err(PresenceError::AdmissionOutcomeUnknown)
+        ));
+        Ok(())
+    }
 
     #[tokio::test]
     async fn stopped_generation_never_dispatches_the_named_admission_post() {

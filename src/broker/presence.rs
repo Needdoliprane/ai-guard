@@ -4,7 +4,7 @@ use crate::{
     broker::{enforcer::CancelGeneration, journal::CancelStopProjectionV1, writer::WriterClient},
     broker_registry::{BrokerAuthorityV1, BrokerRuntimeKindV1},
     control::{
-        ArmResultV1,
+        ArmResultV1, MutationReceiptV1,
         session_control::{
             LegacyConfirmedLaunchSpecV1, LegacyConfirmedPlanV1, LegacyNamedInitialDecisionV1,
         },
@@ -516,6 +516,20 @@ impl LegacyNamedControl {
     ) -> Result<Option<ArmResultV1>> {
         self.0.revalidate()?;
         legacy_named_admission::reconcile_import_arm(&self.0, writer, operation).await
+    }
+
+    /// Reconcile the exact retained claim and retain its receipt even after STOP.
+    #[allow(
+        dead_code,
+        reason = "the named claim recovery caller is composed separately"
+    )]
+    pub(crate) async fn reconcile_legacy_named_import_claim(
+        &self,
+        writer: &WriterClient,
+        operation: Uuid,
+    ) -> Result<Option<MutationReceiptV1>> {
+        self.0.revalidate()?;
+        legacy_named_admission::reconcile_import_claim(&self.0, writer, operation).await
     }
 
     /// Reconcile a reservation already frozen by a confirmed broker STOP.
