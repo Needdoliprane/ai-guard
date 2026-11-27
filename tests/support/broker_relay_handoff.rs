@@ -732,66 +732,10 @@ impl Fixture {
         if self.engine_task.is_finished() {
             return None;
         }
-        let inspection = worker.attempt.created_inspection.as_ref()?;
-        let id = inspection.container_id.as_str();
-        let name = worker.attempt.stable_name.as_str();
-        if worker.attempt.container_id.as_deref() != Some(id) || inspection.stable_name != name {
-            return None;
-        }
-        let engine = self.engine.try_lock().ok()?;
-        let container = engine.containers.get(id)?;
-        let facts = &container.facts;
-        let labels = &facts["Config"]["Labels"];
-        if facts["Id"].as_str() != Some(id)
-            || facts["Name"]
-                .as_str()
-                .and_then(|name| name.strip_prefix('/'))
-                != Some(name)
-            || labels["agentsandbox.purpose"] != "run"
-            || labels["agentsandbox.session"].as_str() != Some(worker.launch.session_id.as_str())
-            || labels["agentsandbox.operation"].as_str()
-                != Some(worker.admission_operation_id.as_str())
-        {
-            return None;
-        }
-        let mut stop_received = if engine.errors.is_empty() {
-            "false"
-        } else {
-            "Unknown"
-        };
-        for call in &engine.calls {
-            let target = call.last().map(String::as_str);
-            if target != Some(id) && target != Some(name) {
-                continue;
-            }
-            let command = match call.as_slice() {
-                [option, _, command, ..] if option == "--host" => Some(command.as_str()),
-                [command, ..] => Some(command.as_str()),
-                [] => None,
-            };
-            if matches!(command, Some("kill" | "stop")) && target == Some(id) {
-                stop_received = "true";
-                break;
-            }
-            if call
-                .iter()
-                .any(|arg| matches!(arg.as_str(), "kill" | "stop"))
-            {
-                stop_received = "Unknown";
-            }
-        }
-        let state = &facts["State"];
-        let terminal = match (
-            state["Status"].as_str(),
-            state["Running"].as_bool(),
-            *container.done.borrow(),
-            facts["RestartCount"].as_u64(),
-        ) {
-            (Some("exited"), Some(false), true, Some(0)) => "true",
-            (Some("running"), Some(true), false, Some(0)) => "false",
-            _ => "Unknown",
-        };
-        Some((stop_received, terminal))
+        self.engine
+            .try_lock()
+            .ok()?
+            .terminal_runtime_witness(worker)
     }
     fn terminal_batch_failure(&self, worker: &WorkerV1) -> Result<Option<BatchFailureWitness>> {
         use rusqlite::OptionalExtension;

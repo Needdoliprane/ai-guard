@@ -283,7 +283,10 @@ async fn refused_assignment(fixture: &mut Fixture, original: Role, selected: Rol
     // Return to the original genuine guardian for independent STOP.
     fixture.shutdown_jobs(&[job], original).await?;
     report_negative_assignment_progress("terminal", "stop_acknowledged");
-    worker_terminal(&fixture.a, &endpoint).await?;
+    if let Err(error) = worker_terminal(&fixture.a, &endpoint).await {
+        fixture.report_negative_terminal_wait(job, &endpoint, &before);
+        return Err(error);
+    }
     report_negative_assignment_progress("final_no_effects", "terminal_confirmed");
     fixture.assert_no_relay_effects().await?;
     report_negative_assignment_progress("done", "exercise_confirmed");

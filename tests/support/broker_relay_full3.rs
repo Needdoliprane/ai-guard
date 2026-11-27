@@ -7,7 +7,7 @@ use agentsandbox::{
         local_ipc::EndpointRecordV1,
         service::{self, RequestedExecutionV1, SubmitV1, encode_submit, protocol::*},
     },
-    control::WorkerStateV1,
+    control::{WorkerStateV1, WorkerV1},
     control_fs::{Directory, PrivateFile},
     operations::initialize_config,
     policy::Policy,
@@ -2106,6 +2106,7 @@ impl Fixture {
             arm,
             binding,
             endpoint,
+            worker,
             claim: (*claims[0]).clone(),
             owned: operation["owned"].clone(),
             starts,
@@ -2113,6 +2114,88 @@ impl Fixture {
         history.require_live()?;
         Ok(history)
     }
+
+    pub fn report_negative_terminal_wait(
+        &self,
+        job: Uuid,
+        endpoint: &RelayEndpointV1,
+        before: &History,
+    ) {
+        use std::io::Write as _;
+
+        let worker = &before.worker;
+        let claim = &before.claim["request"];
+        let original = (endpoint == &before.endpoint
+            && worker.admission_operation_id == job.to_string()
+            && worker.worker_id == endpoint.worker_id
+            && worker.attempt.attempt_id == endpoint.attempt_id
+            && worker.attempt.created_inspection.as_ref() == Some(&before.arm.inspection)
+            && claim["worker_id"].as_str() == Some(worker.worker_id.as_str())
+            && claim["attempt_id"].as_str() == Some(worker.attempt.attempt_id.as_str())
+            && claim["arm_receipt"]["arm_id"].as_str() == Some(before.arm.operation_id.as_str())
+            && worker
+                .attempt
+                .start_operation_id
+                .as_deref()
+                .is_some_and(|id| claim["operation_id"].as_str() == Some(id))
+            && worker
+                .attempt
+                .start_emitter_id
+                .as_deref()
+                .is_some_and(|id| claim["emitter_id"].as_str() == Some(id)))
+        .then_some(worker);
+        // Sample the witness first, then the Store. Both are descriptive and
+        // preserve the original timeout verdict even if the reads race.
+        let (stop_received, terminal) = original
+            .filter(|_| !self.engine_task.is_finished())
+            .and_then(|worker| {
+                self.engine
+                    .try_lock()
+                    .ok()?
+                    .terminal_runtime_witness(worker)
+            })
+            .unwrap_or(("Unknown", "Unknown"));
+        let core = match original
+            .and_then(|worker| self.read_worker_after_terminal_wait(worker))
+            .map(|worker| {
+                (
+                    worker.state,
+                    worker.quota_held,
+                    worker.allocation_inconsistent,
+                )
+            }) {
+            Some((WorkerStateV1::Running, true, false)) => "running_quota_held",
+            Some((WorkerStateV1::Stopping, true, false)) => "stopping_quota_held",
+            Some((WorkerStateV1::Terminal, false, false)) => "terminal_quota_released",
+            Some(_) => "other",
+            None => "Unknown",
+        };
+        let _ = writeln!(
+            io::stderr().lock(),
+            "\nfull3_negative_terminal stop_received={stop_received} terminal={terminal} core={core}"
+        );
+    }
+
+    fn read_worker_after_terminal_wait(&self, original: &WorkerV1) -> Option<WorkerV1> {
+        let db = self.readonly_a().ok()?;
+        db.busy_timeout(Duration::ZERO).ok()?;
+        let payload: String = db
+            .query_row(
+                "SELECT snapshot_json FROM workers WHERE worker_id=?1",
+                [original.worker_id.as_str()],
+                |row| row.get(0),
+            )
+            .ok()?;
+        let worker: WorkerV1 = serde_json::from_str(&payload).ok()?;
+        (worker.worker_id == original.worker_id
+            && worker.admission_operation_id == original.admission_operation_id
+            && worker.launch.session_id == original.launch.session_id
+            && worker.spec_hash == original.spec_hash
+            && worker.attempt == original.attempt
+            && worker.revision >= original.revision)
+            .then_some(worker)
+    }
+
     async fn worker_start_count(&self, cid: &str) -> usize {
         self.engine
             .lock()
@@ -2616,6 +2699,7 @@ pub struct History {
     revision: u64,
     arm: ArmV1,
     binding: Option<Value>,
+    worker: WorkerV1,
     claim: Value,
     owned: Value,
     starts: usize,
