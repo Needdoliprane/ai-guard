@@ -928,7 +928,7 @@ impl Store {
         self.commit_checked(tx)?;
         Ok(admission_result(&stored, &record))
     }
-    fn build_admission_record(
+    pub(super) fn build_admission_record(
         &self,
         tx: &Transaction<'_>,
         admission: &AdmissionV1,

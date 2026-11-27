@@ -944,9 +944,10 @@ impl Store {
         state.validate()?;
         Ok(state)
     }
-    fn persist_supervision_record(
+    /// Writes the supervision event and its projections in the caller's transaction.
+    pub(in crate::audit) fn persist_supervision_record(
         &self,
-        tx: &Transaction<'_>,
+        tx: &CheckedTransaction<'_>,
         record: &Record,
     ) -> anyhow::Result<StoredEvent> {
         let mut overlay = Replay::current(tx)?;
@@ -1012,11 +1013,17 @@ impl Store {
                 execute_row(tx, sql, row.clone())?;
             }
         }
+        Ok(stored)
+    }
+    pub(in crate::audit) fn validate_supervision_write(
+        &self,
+        tx: &CheckedTransaction<'_>,
+    ) -> anyhow::Result<()> {
         if let Err(error) = validate(tx) {
             self.unhealthy.store(true, Ordering::Release);
             return Err(error);
         }
-        Ok(stored)
+        Ok(())
     }
     fn persist_supervision_input(
         &self,
@@ -1068,6 +1075,7 @@ impl Store {
         let worker_record = build(&tx)?;
         let record = Record::new(input, worker_record);
         let stored = self.persist_supervision_record(&tx, &record)?;
+        self.validate_supervision_write(&tx)?;
         self.commit_checked(tx)?;
         Ok(Persisted {
             stored,
@@ -1165,7 +1173,15 @@ impl Store {
         request: &ArmV1,
     ) -> anyhow::Result<ArmResultV1> {
         let saved =
-            self.persist_supervision_input(access, Input::Arm(Box::new(request.clone())), |_| {
+            self.persist_supervision_input(access, Input::Arm(Box::new(request.clone())), |tx| {
+                // Once the named claim exists it will own the corresponding arm path.
+                let worker =
+                    load_worker(tx, &request.worker_id)?.ok_or(ControlFailure::NotFound)?;
+                super::legacy_session_prepare::protect_manual(
+                    tx,
+                    &worker.admission_operation_id,
+                    &worker.launch.session_id,
+                )?;
                 Ok(None)
             })?;
         let Input::Arm(arm) = &saved.record.input else {

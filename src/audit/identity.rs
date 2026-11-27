@@ -273,6 +273,16 @@ fn recorded(db: &Connection, id: &str) -> anyhow::Result<Option<(StoredEvent, Re
         })
         .transpose()
 }
+
+pub(super) fn require_recorded_mutation(
+    db: &Connection,
+    mutation: &IdentityMutationV1,
+    expected: &IdentityReceiptV1,
+) -> anyhow::Result<()> {
+    let (stored, record) =
+        recorded(db, &mutation.operation_id)?.ok_or(IdentityFailureV1::Conflict)?;
+    conflict(record.mutation == *mutation && receipt(&stored, &record) == *expected)
+}
 fn receipt(stored: &StoredEvent, record: &Record) -> IdentityReceiptV1 {
     IdentityReceiptV1 {
         version: 1,

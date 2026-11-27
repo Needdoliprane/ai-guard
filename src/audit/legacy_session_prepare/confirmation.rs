@@ -13,13 +13,15 @@ use crate::{
 };
 use chrono::{DateTime, Utc};
 
+mod admission;
 #[cfg(test)]
 mod tests;
 
 const PREPARED: &str = "control.legacy_session_prepare.prepared";
 const CONFIRMED: &str = "control.legacy_session_prepare.confirmed";
 const FENCED: &str = "control.legacy_session_prepare.fenced";
-pub(in crate::audit) const REFERENCE_KINDS: [&str; 3] = [PREPARED, CONFIRMED, FENCED];
+pub(in crate::audit) const REFERENCE_KINDS: [&str; 4] =
+    [PREPARED, CONFIRMED, FENCED, admission::ADMITTED];
 
 /// Borrowed proof from the authenticated local gateway context. The digest
 /// is used solely to re-read the credential inside the write transaction.
@@ -86,6 +88,36 @@ struct Confirmed {
 struct ConfirmationAuthority {
     expires_at: DateTime<Utc>,
     authorization_revision: u64,
+}
+
+struct ResolvedLegacyConfirmedPlan {
+    plan: LegacyConfirmedPlanV1,
+    confirmed: StoredEvent,
+    initiator: Initiator,
+}
+
+fn confirmed_plan(
+    binding_ref: Uuid,
+    record: &Confirmed,
+    prepared: &Prepared,
+    target: TargetRecord,
+    expires_at: DateTime<Utc>,
+) -> anyhow::Result<LegacyConfirmedPlanV1> {
+    let target = target.command.target;
+    let mut launch = target.launch;
+    launch.session_id = record.session_id.to_string();
+    Ok(LegacyConfirmedPlanV1 {
+        version: 1,
+        binding_ref,
+        control_namespace_uuid: prepared.namespace.clone(),
+        operation_id: record.request.operation_id,
+        session_id: record.session_id,
+        launch_target_id: target.catalogue.launch_target_id,
+        target_revision: target.catalogue.revision,
+        broker_profile_id: target.broker_profile_id,
+        launch_spec_hash: launch.spec_hash()?,
+        expires_at,
+    })
 }
 
 #[derive(Clone, Copy, Serialize, Deserialize)]
@@ -404,6 +436,7 @@ pub(in crate::audit) fn validate_reference_event(
                     "invalid confirmation fence"
                 );
             }
+            admission::require_link_when_admitted(tx, stored, &record)?;
         }
         FENCED => {
             let fence: Fence = decoded(stored, FENCED)?;
@@ -417,6 +450,7 @@ pub(in crate::audit) fn validate_reference_event(
                 "invalid Legacy confirmation fence"
             );
         }
+        admission::ADMITTED => admission::validate_fact(tx, stored)?,
         _ => anyhow::bail!("unknown Legacy reference event"),
     }
     Ok(())
@@ -439,7 +473,9 @@ impl Store {
             ControlFailure::MigrationRequired
         );
         let clock = workload::capture_control_time(&tx)?;
-        let plan = self.resolve_legacy_confirmed_plan(&tx, broker, binding_ref, &clock)?;
+        let plan = self
+            .resolve_legacy_confirmed_plan(&tx, broker, binding_ref, &clock)?
+            .plan;
         self.commit_authorized(tx, &clock)?;
         anyhow::ensure!(plan.expires_at > Utc::now(), ControlFailure::NotFound);
         Ok(plan)
@@ -451,7 +487,7 @@ impl Store {
         broker: &BrokerIdentityV1,
         binding_ref: Uuid,
         clock: &workload::AuthorizedControlTimeV1,
-    ) -> anyhow::Result<LegacyConfirmedPlanV1> {
+    ) -> anyhow::Result<ResolvedLegacyConfirmedPlan> {
         workload::revalidate_broker_identity_checked(tx, broker, clock.at())?;
         let confirmed = event_by_id(tx, &binding_ref.to_string())?
             .filter(|stored| stored.event.kind == CONFIRMED)
@@ -468,11 +504,10 @@ impl Store {
         let (target_event, target) =
             require_current_target(tx, record.request.selection()?, &prepared.initiator, clock)
                 .map_err(plan_lookup_failure)?;
-        let target = target.command.target;
         anyhow::ensure!(
-            target.catalogue.tenant_id == broker.tenant_id()
-                && target.broker_id.to_string() == broker.broker_id()
-                && target.broker_grant_revision == broker.grant_revision(),
+            target.command.target.catalogue.tenant_id == broker.tenant_id()
+                && target.command.target.broker_id.to_string() == broker.broker_id()
+                && target.command.target.broker_grant_revision == broker.grant_revision(),
             ControlFailure::NotFound
         );
         matching_prepare(&prepared, &record.request)?;
@@ -480,7 +515,7 @@ impl Store {
             preparation.hash == record.preparation_audit_hash
                 && target_event.hash == prepared.target_audit_hash
                 && prepared.namespace == supervision::namespace(tx)?
-                && target.launch.spec_hash()? == prepared.launch_template_hash
+                && target.command.target.launch.spec_hash()? == prepared.launch_template_hash
                 && record.session_id == session_id(record.request.operation_id)?,
             ControlFailure::Conflict
         );
@@ -522,19 +557,11 @@ impl Store {
                 && expires_at > clock.at(),
             ControlFailure::NotFound
         );
-        let mut launch = target.launch;
-        launch.session_id = record.session_id.to_string();
-        Ok(LegacyConfirmedPlanV1 {
-            version: 1,
-            binding_ref,
-            control_namespace_uuid: prepared.namespace,
-            operation_id: record.request.operation_id,
-            session_id: record.session_id,
-            launch_target_id: target.catalogue.launch_target_id,
-            target_revision: target.catalogue.revision,
-            broker_profile_id: target.broker_profile_id,
-            launch_spec_hash: launch.spec_hash()?,
-            expires_at,
+        let plan = confirmed_plan(binding_ref, &record, &prepared, target, expires_at)?;
+        Ok(ResolvedLegacyConfirmedPlan {
+            plan,
+            confirmed,
+            initiator: prepared.initiator,
         })
     }
 
