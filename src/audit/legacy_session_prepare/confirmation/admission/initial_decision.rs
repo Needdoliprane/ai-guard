@@ -104,6 +104,16 @@ fn lookup_named_decision(
     Ok(Some(decision))
 }
 
+fn receipt_source(db: &Connection, receipt: &DecisionReceiptV1) -> anyhow::Result<StoredEvent> {
+    db.query_row(
+        "SELECT seq,received_at,prev_hash,hash,payload FROM events WHERE seq=?1",
+        [receipt.audit_seq],
+        row_event,
+    )
+    .optional()?
+    .ok_or(ControlFailure::InvalidRequest.into())
+}
+
 /// Older callers can still present their existing retained policy decision.
 /// The named policy uses its own deterministic event lookup and scope.
 pub(super) fn require_admission_decision(
@@ -114,9 +124,8 @@ pub(super) fn require_admission_decision(
 ) -> anyhow::Result<()> {
     let request = &admission.decision_request;
     let hash = &admission.receipt.request_hash;
-    let stored = if request.request_id
-        == LegacyNamedInitialDecisionV1::request_id(resolved.plan.binding_ref)
-    {
+    let source = receipt_source(tx, &admission.receipt)?;
+    let stored = if source.event.data.get(LEGACY_NAMED_ORIGIN).is_some() {
         let expected = request_for(&resolved.plan, &resolved.launch)?;
         conflict(hash == &policy::request_hash(&expected))?;
         let stored = lookup_named_decision(tx, resolved.plan.binding_ref, &expected, hash)?
@@ -137,9 +146,8 @@ pub(super) fn validate_historical_admission(
     fact: &AdmissionFact,
     admission: &AdmissionV1,
 ) -> anyhow::Result<()> {
-    if admission.decision_request.request_id
-        != LegacyNamedInitialDecisionV1::request_id(plan.binding_ref)
-    {
+    let source = receipt_source(db, &admission.receipt)?;
+    if source.event.data.get(LEGACY_NAMED_ORIGIN).is_none() {
         return Ok(());
     }
     let expected = request_for(plan, &admission.launch)?;

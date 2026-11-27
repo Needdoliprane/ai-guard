@@ -1295,7 +1295,7 @@ fn legacy_named_import_arm_preserves_its_prefix_and_closes_manual_claims() {
 async fn legacy_named_admission_route_replays_the_committed_receipt_after_reopen() {
     use crate::{
         api::{GatewayState, TenantGateway, gateway_router},
-        control::session_control::LegacyNamedAdmissionReceiptV1,
+        control::session_control::{LegacyNamedAdmissionReceiptV1, LegacyNamedInitialDecisionV1},
     };
     use axum::{
         body::{Body, to_bytes},
@@ -1331,7 +1331,28 @@ async fn legacy_named_admission_route_replays_the_committed_receipt_after_reopen
     };
     let f = Fixture::new();
     let (store, _) = f.provision(f.create().unwrap()).unwrap();
-    let (request, _) = f.confirmed_request(&store);
+    let (mut request, _) = f.confirmed_request(&store);
+    let historical = &mut request.admission.admission;
+    let policy_request = &mut historical.decision_request;
+    policy_request.request_id = LegacyNamedInitialDecisionV1::request_id(request.binding_ref);
+    let manual_decision = store
+        .decision(
+            policy_request,
+            Some((
+                policy::evaluate(&Policy::default(), policy_request),
+                Value::Null,
+            )),
+        )
+        .unwrap()
+        .unwrap();
+    historical.receipt = DecisionReceiptV1 {
+        version: 1,
+        request_id: policy_request.request_id.clone(),
+        request_hash: policy::request_hash(policy_request),
+        phase: DecisionPhaseV1::Initial,
+        audit_seq: manual_decision.seq,
+        audit_hash: manual_decision.hash,
+    };
     let broker_id = Uuid::new_v4().to_string();
     let incarnation_id = Uuid::new_v4().to_string();
     let credential_id = Uuid::new_v4().to_string();

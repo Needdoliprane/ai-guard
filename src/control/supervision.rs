@@ -411,7 +411,7 @@ impl SupervisedAdmissionV1 {
 
 impl LaunchSpecV1 {
     /// Additional launch constraints shared by supervised admission and its preparation.
-    pub(super) fn validate_supervised(&self) -> anyhow::Result<()> {
+    pub(crate) fn validate_supervised(&self) -> anyhow::Result<()> {
         uuid(&self.authority_id)?;
         invalid(self.security_preset.requires_no_engine_logs())
     }
