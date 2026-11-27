@@ -553,3 +553,40 @@ fn motif_wire_is_closed_and_historical_decoders_reject_unknown_frames() {
         HistoricalResponse::Error { .. } => panic!("historical reservation frame must decode"),
     }
 }
+
+#[test]
+fn named_reservation_wire_does_not_decode_as_a_historical_reservation() {
+    let root = tempfile::tempdir().unwrap();
+    let prospective = registration(root.path()).prospective().unwrap();
+    let historical = serde_json::to_value(Request::ReserveProspective {
+        prospective: Box::new(prospective.clone()),
+        generation: 4,
+        replay_only: false,
+    })
+    .unwrap();
+    assert_eq!(
+        historical,
+        json!({
+            "kind": "reserve_prospective",
+            "prospective": serde_json::to_value(&prospective).unwrap(),
+            "generation": 4,
+            "replay_only": false,
+        })
+    );
+    assert!(serde_json::from_value::<HistoricalRequest>(historical).is_ok());
+
+    let custody_nonce = Uuid::new_v4();
+    let named = serde_json::to_value(Request::ReserveNamedProspective {
+        prospective: Box::new(prospective),
+        generation: 4,
+        custody_nonce,
+    })
+    .unwrap();
+    assert_eq!(named["kind"], "reserve_named_prospective");
+    assert!(serde_json::from_value::<HistoricalRequest>(named.clone()).is_err());
+    assert!(matches!(
+        serde_json::from_value::<Request>(named).unwrap(),
+        Request::ReserveNamedProspective { custody_nonce: value, generation: 4, .. }
+            if value == custody_nonce
+    ));
+}
