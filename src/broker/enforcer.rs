@@ -39,7 +39,9 @@ pub(crate) use client::{EnforcerFullClientV3, FreshEnforcerOwner, ProspectiveArm
     unused_imports,
     reason = "the named Legacy service caller is composed separately"
 )]
-pub(crate) use client::{LegacyNamedProspectiveBind, LegacyNamedProspectiveFailure};
+pub(crate) use client::{
+    LegacyNamedProspectiveBind, LegacyNamedProspectiveBindAck, LegacyNamedProspectiveFailure,
+};
 pub(crate) use diagnostics::EnforcerStageFailure;
 pub(crate) use execution::ExecutionEnforcerV1;
 pub use recovery::{

@@ -3,6 +3,9 @@ use super::super::profile::LegacyNamedSource;
 use super::*;
 use crate::{
     broker::clock::HostClock,
+    broker::enforcer::{
+        ExecutionEnforcerV1, LegacyNamedProspectiveBind, LegacyNamedProspectiveBindAck,
+    },
     broker::presence::LegacyNamedAdmissionOutcome,
     control::{
         ArmSubjectV1, ArmV1, HelperPermissionV1, HelperPurposeV1, MutationReceiptV1,
@@ -111,6 +114,14 @@ pub(super) struct CreatedLegacyNamedImport {
     /// available only after the matching Created observation was durably
     /// acknowledged below; it never grants a runtime or enforcer capability.
     writer_creation_prefix: crate::broker::checkpoint::LegacyNamedAdmissionCheckpoint,
+}
+
+/// Retains the live admission and the exact native acknowledgement for a
+/// separate, durable start claim.
+#[allow(dead_code, reason = "the named start claim is composed separately")]
+pub(super) struct BoundLegacyNamedImport {
+    pub(super) created: CreatedLegacyNamedImport,
+    pub(super) acknowledgement: Box<LegacyNamedProspectiveBindAck>,
 }
 
 impl Service {
@@ -709,6 +720,73 @@ impl Service {
         .map_err(|_| BrokerErrorCodeV1::NeedsReconciliation)?;
         require_generation(&admitted.job.cancel, generation)?;
         Ok(target)
+    }
+
+    /// Persist Arm and retain its exact native acknowledgement under the
+    /// original job ownership. Only the separate claim stage can allow start.
+    #[allow(dead_code, reason = "the named start claim is composed separately")]
+    pub(super) async fn bind_created_legacy_named_import(
+        &self,
+        created: CreatedLegacyNamedImport,
+    ) -> Result<BoundLegacyNamedImport, BrokerErrorCodeV1> {
+        let admitted = &created.admission;
+        let job = Arc::clone(&admitted.job);
+        let generation = admitted.running.generation();
+        let result = async {
+            self.require_starts().await?;
+            self.validate_control().await?;
+            require_generation(&job.cancel, generation)?;
+            let enforcer = self.full_enforcer()?;
+            let ExecutionEnforcerV1::Legacy(client) = enforcer else {
+                return Err(BrokerErrorCodeV1::IncompatibleControl);
+            };
+            let control = admitted
+                .request
+                .jobs
+                .named_control
+                .get()
+                .ok_or(BrokerErrorCodeV1::IncompatibleControl)?;
+            let writer = &admitted.request.writer;
+            let target = self.prospective_legacy_named_import_target(&created)?;
+            let recorded = control
+                .record_legacy_named_import_arm(
+                    enforcer,
+                    writer,
+                    &admitted.material.plan,
+                    &admitted.archive_digest,
+                    target,
+                    (&job.cancel, generation),
+                )
+                .await
+                .map_err(named_effect_error)?;
+            let (arm, exchange) = control
+                .arm_legacy_named_import(recorded)
+                .await
+                .map_err(named_effect_error)?;
+            let retained = writer
+                .load(admitted.accepted.operation_id())
+                .await
+                .map_err(jobs::journal_error)?
+                .ok_or(BrokerErrorCodeV1::NeedsReconciliation)?;
+            self.require_starts().await?;
+            self.validate_control().await?;
+            require_generation(&job.cancel, generation)?;
+            let bound = client
+                .legacy_bind_named_prospective(&retained, &arm, exchange)
+                .await
+                .map_err(|_| BrokerErrorCodeV1::NeedsReconciliation)?;
+            require_generation(&job.cancel, generation)?;
+            let LegacyNamedProspectiveBind::Bound(acknowledgement) = bound else {
+                return Err(BrokerErrorCodeV1::NeedsReconciliation);
+            };
+            Ok(BoundLegacyNamedImport {
+                created,
+                acknowledgement,
+            })
+        }
+        .await;
+        job.result(result.as_ref().err().copied());
+        result
     }
 
     /// Settle a lost creation result from the original Writer intent. The

@@ -41,7 +41,9 @@ const MAX_LEGACY_RETAINED_STOPS: usize = 16_384;
 #[path = "client_legacy.rs"]
 mod legacy;
 use legacy::LegacyTransport;
-pub(crate) use legacy::{LegacyNamedProspectiveBind, LegacyNamedProspectiveFailure};
+pub(crate) use legacy::{
+    LegacyNamedProspectiveBind, LegacyNamedProspectiveBindAck, LegacyNamedProspectiveFailure,
+};
 
 #[derive(Clone)]
 pub struct EnforcerClient(Arc<Client>);
