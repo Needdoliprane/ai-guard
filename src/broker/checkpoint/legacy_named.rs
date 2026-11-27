@@ -281,10 +281,10 @@ mod tests {
             expires_at: chrono::DateTime::from_timestamp(4_102_444_800, 0).unwrap(),
         };
         let material = LegacyConfirmedLaunchSpecV1 {
-            version: 1,
+            version: 2,
             plan: plan.clone(),
             launch: launch.clone(),
-            source_identity_hash: None,
+            source_identity_hash: Some("a".repeat(64)),
         };
         let gateway = "http://127.0.0.1:8787";
         let options: RunOptions = serde_json::from_value(json!({
@@ -389,6 +389,22 @@ mod tests {
         let prepared = checkpoint(pending.clone())?;
         prepared.validate_transition(Some(&before))?;
         prepared.validate_context(&intent, &scope, &binding)?;
+        let mut historical_material = material.clone();
+        historical_material.version = 1;
+        historical_material.source_identity_hash = None;
+        let unattested =
+            ExecutionIntentV1::from_legacy_named_launch(options.clone(), &historical_material)?;
+        let mut unattested_request = request.clone();
+        unattested_request.admission.intent_hash = unattested.intent_hash()?;
+        let unattested_pending = LegacyNamedAdmissionCheckpoint::pending_with_archive(
+            plan.clone(),
+            unattested_request,
+            digest.clone(),
+        )?;
+        assert!(matches!(
+            checkpoint(unattested_pending)?.validate_context(&unattested, &scope, &binding),
+            Err(JournalError::Conflict)
+        ));
         let mut archive_free = serde_json::to_value(&prepared)?;
         archive_free["supervision"]["legacy_named_admission"]
             .as_object_mut()
@@ -495,7 +511,7 @@ mod tests {
                 ));
                 assert!(matches!(
                     writer
-                        .record_legacy_named_admission(&plan, request.clone(), digest.clone())
+                        .record_legacy_named_admission(&plan, digest.clone())
                         .await,
                     Err(JournalError::Interrupted)
                 ));
@@ -503,8 +519,8 @@ mod tests {
             }
             let before = writer.load(operation).await?.unwrap();
             let (one, two) = tokio::join!(
-                writer.record_legacy_named_admission(&plan, request.clone(), digest.clone()),
-                writer.record_legacy_named_admission(&plan, request.clone(), digest.clone()),
+                writer.record_legacy_named_admission(&plan, digest.clone()),
+                writer.record_legacy_named_admission(&plan, digest.clone()),
             );
             let recorded = match (one, two) {
                 (Ok(recorded), Err(JournalError::Conflict))

@@ -21,6 +21,11 @@ use std::{fmt, path::Path};
 use uuid::Uuid;
 
 pub(crate) use super::managed::LegacyNamedWorkspaceArchiveV1;
+#[allow(
+    unused_imports,
+    reason = "the private named recovery caller is a separate G04 integration"
+)]
+pub(crate) use super::managed::reopen_legacy_named_archive;
 
 mod executor;
 pub(crate) use executor::{BatchExecutor, BatchOutcome, deliver_cancellation};

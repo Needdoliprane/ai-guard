@@ -1,6 +1,6 @@
 use super::*;
 use crate::{
-    broker::service::protocol::BrokerErrorCodeV1,
+    broker::{journal::AcceptedJobV1, service::protocol::BrokerErrorCodeV1},
     control::{session_control::LegacyConfirmedLaunchSpecV1, *},
     runtime::{
         ContainerHandle, ContainerObservation, InvocationBindingV1, ManagedRuntime,
@@ -888,10 +888,142 @@ mod tests {
     use super::*;
 
     #[cfg(unix)]
+    fn confirm_named_archive_checkpoint(
+        journal: &crate::broker::journal::Journal,
+        config: &crate::control_fs::Directory,
+        source: &Path,
+        material: &LegacyConfirmedLaunchSpecV1,
+        digest: &str,
+    ) -> Result<()> {
+        use crate::{
+            broker::{
+                checkpoint::{
+                    BrokerCheckpointV2, DecisionAnswerV1, LegacyNamedAdmissionCheckpoint,
+                    SupervisionCheckpointV1, SupervisionOperationV1,
+                },
+                intent::ExecutionIntentV1,
+                journal::{BindingInputs, ReservationMode, ReserveResult},
+                lifecycle::BrokerCheckpointV3,
+            },
+            control::session_control::LegacyNamedSupervisedAdmissionV1,
+        };
+
+        let plan = &material.plan;
+        let operation = plan.operation_id;
+        let launch = &material.launch;
+        let options = serde_json::from_value(json!({
+            "project": source,
+            "config_dir": config.path(),
+            "gateway": "http://127.0.0.1:8787",
+            "runtime": "docker",
+            "image": launch.image_ref,
+            "profile": launch.profile,
+            "network": "none",
+            "allow_rootful_runtime": false,
+            "timeout": launch.timeout_seconds,
+            "provider": launch.provider,
+            "capture_output": false,
+            "argv": launch.command.argv,
+        }))?;
+        let intent = ExecutionIntentV1::from_legacy_named_launch(options, material)?;
+        let ReserveResult::New(ticket) = journal.reserve_with_mode(
+            operation,
+            &[],
+            ReservationMode::AllowLegacyNamed(plan.binding_ref),
+        )?
+        else {
+            panic!("the archive checkpoint requires a fresh job");
+        };
+        let runner = CheckpointPayloadV1::initial(&intent)?;
+        let initial = journal.accept(ticket, &intent, BindingInputs::None, &runner)?;
+        assert_eq!(
+            super::super::broker::reopen_legacy_named_archive(config, &initial)
+                .unwrap_err()
+                .downcast_ref::<BrokerErrorCodeV1>(),
+            Some(&BrokerErrorCodeV1::NeedsReconciliation)
+        );
+
+        let decision = intent.request_data().clone();
+        let receipt = DecisionReceiptV1 {
+            version: 1,
+            request_id: decision.request_id.clone(),
+            request_hash: crate::policy::request_hash(&decision),
+            phase: DecisionPhaseV1::Initial,
+            audit_seq: 1,
+            audit_hash: "d".repeat(64),
+        };
+        let answer = DecisionAnswerV1::new(
+            crate::model::Decision::new(crate::model::Outcome::Allow, "fixture", "Fixed command"),
+            receipt.clone(),
+        )?;
+        let admission = LegacyNamedSupervisedAdmissionV1 {
+            version: 1,
+            binding_ref: plan.binding_ref,
+            broker_profile_id: plan.broker_profile_id.clone(),
+            admission: SupervisedAdmissionV1 {
+                version: 1,
+                protocol: SupervisionProtocolV1::BrokerSupervisionV1,
+                intent_hash: intent.intent_hash()?,
+                admission: AdmissionV1 {
+                    version: 1,
+                    operation_id: operation.to_string(),
+                    decision_request: decision.clone(),
+                    receipt,
+                    launch: launch.clone(),
+                },
+            },
+        };
+        let pending = LegacyNamedAdmissionCheckpoint::pending_with_archive(
+            plan.clone(),
+            admission,
+            digest.into(),
+        )?;
+        let namespace = Uuid::parse_str(&plan.control_namespace_uuid)?;
+        let checkpoint = |response, pending| -> Result<_> {
+            let supervision = SupervisionCheckpointV1::new(
+                namespace,
+                vec![],
+                vec![SupervisionOperationV1::Decision {
+                    request: decision.clone(),
+                    response,
+                }],
+            )?;
+            let supervision = match pending {
+                Some(pending) => supervision.with_legacy_named_admission(pending)?,
+                None => supervision,
+            };
+            let broker = BrokerCheckpointV2::new(runner.clone(), supervision)?;
+            Ok(BrokerCheckpointV3::new(broker, vec![])?)
+        };
+        let requested = journal.advance_lifecycle(
+            operation,
+            initial.head().clone(),
+            &checkpoint(None, None)?,
+        )?;
+        let decided = journal.advance_lifecycle(
+            operation,
+            requested.head().clone(),
+            &checkpoint(Some(answer.clone()), None)?,
+        )?;
+        journal.advance_lifecycle(
+            operation,
+            decided.head().clone(),
+            &checkpoint(Some(answer), Some(pending))?,
+        )?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
     #[test]
     fn named_workspace_archive_survives_reopen_and_preserves_an_orphan() -> Result<()> {
-        use crate::control::session_control::LegacyConfirmedPlanV1;
-        use std::os::unix::fs::PermissionsExt;
+        use super::super::broker::reopen_legacy_named_archive;
+        use crate::{
+            broker::journal::{
+                ControlSecrets, FsExclusions, Journal, JournalLimitsV1, JournalScopeV1,
+            },
+            control::session_control::LegacyConfirmedPlanV1,
+        };
+        use std::{io::Write, os::unix::fs::PermissionsExt};
 
         let temporary = tempfile::Builder::new()
             .permissions(fs::Permissions::from_mode(0o700))
@@ -901,6 +1033,7 @@ mod tests {
         fs::create_dir(&source)?;
         let original = source.join("tracked.txt");
         fs::write(&original, b"confirmed contents")?;
+        fs::set_permissions(&original, fs::Permissions::from_mode(0o755))?;
         let authorized = workspace::AuthorizedSource::open(&source, std::slice::from_ref(&path))?;
         let identity = authorized.identity_hash()?;
         let workspace = authorized
@@ -983,19 +1116,82 @@ mod tests {
             error.downcast_ref::<crate::broker::service::protocol::BrokerErrorCodeV1>(),
             Some(&crate::broker::service::protocol::BrokerErrorCodeV1::NeedsReconciliation)
         );
+        drop(retained);
 
-        let bytes = serde_json::to_vec(&retained)?;
+        let scope = JournalScopeV1::new(
+            Uuid::new_v4(),
+            "fixture",
+            "http://127.0.0.1:8787",
+            Uuid::parse_str(&material.plan.control_namespace_uuid)?,
+            &material.plan.broker_profile_id,
+        )?;
+        let open_journal = |name: &str| -> Result<Journal> {
+            let directory = crate::control_fs::Directory::open_or_create(&path.join(name))?;
+            Ok(Journal::open(
+                &directory,
+                scope.clone(),
+                &FsExclusions::new(),
+                JournalLimitsV1::default(),
+                ControlSecrets::new(vec![])?,
+            )?)
+        };
+        confirm_named_archive_checkpoint(
+            &open_journal("journal")?,
+            &config,
+            &source,
+            &material,
+            &digest,
+        )?;
         drop(config);
+        drop(authorized);
         let reopened = crate::control_fs::Directory::open_existing(&path.join("config"))?;
-        let proof: LegacyNamedWorkspaceArchiveV1 = serde_json::from_slice(&bytes)?;
-        let archive = proof.reopen(&reopened, operation, &material)?;
+        let journal = open_journal("journal")?;
+        let job = journal.load(operation)?.unwrap();
+        let archive = reopen_legacy_named_archive(&reopened, &job)?;
         assert_eq!(
             workspace::scan_workspace_archive(archive, Limits::default())?,
             manifest
         );
         let empty = crate::control_fs::Directory::open_or_create(&path.join("other-config"))?;
-        assert!(proof.reopen(&empty, operation, &material).is_err());
+        assert!(reopen_legacy_named_archive(&empty, &job).is_err());
         assert!(!empty.path().join("sessions").exists());
+
+        let mut wrong_manifest = manifest.clone();
+        wrong_manifest.get_mut("tracked.txt").unwrap().mode = Some(0o644);
+        let mut wrong_material = material;
+        wrong_material.launch.workspace_manifest_digest =
+            content_hash("ai-guard:workspace-manifest:v1", &wrong_manifest)?;
+        wrong_material.plan.launch_spec_hash = wrong_material.launch.spec_hash()?;
+        confirm_named_archive_checkpoint(
+            &open_journal("other-journal")?,
+            &reopened,
+            &source,
+            &wrong_material,
+            &digest,
+        )?;
+        let wrong_job = open_journal("other-journal")?.load(operation)?.unwrap();
+        assert_eq!(
+            reopen_legacy_named_archive(&reopened, &wrong_job)
+                .unwrap_err()
+                .downcast_ref::<BrokerErrorCodeV1>(),
+            Some(&BrokerErrorCodeV1::NeedsReconciliation)
+        );
+
+        let archive_path = reopened
+            .path()
+            .join("sessions")
+            .join(format!("{operation}.tar"));
+        fs::OpenOptions::new()
+            .append(true)
+            .open(&archive_path)?
+            .write_all(b"changed bytes")?;
+        assert_eq!(
+            reopen_legacy_named_archive(&reopened, &job)
+                .unwrap_err()
+                .downcast_ref::<BrokerErrorCodeV1>(),
+            Some(&BrokerErrorCodeV1::NeedsReconciliation)
+        );
+        assert!(fs::read(&archive_path)?.ends_with(b"changed bytes"));
         Ok(())
     }
 
@@ -1784,8 +1980,6 @@ fn require_new_archive_sessions(
 }
 
 /// Private evidence for the exact archive retained before named admission.
-#[cfg_attr(test, derive(Serialize, Deserialize))]
-#[cfg_attr(test, serde(deny_unknown_fields))]
 pub(crate) struct LegacyNamedWorkspaceArchiveV1 {
     version: u32,
     archive_name: String,
@@ -1825,11 +2019,51 @@ impl LegacyNamedWorkspaceArchiveV1 {
             &sessions,
             &self.archive_name,
             digest,
-            &self.manifest,
+            Some(&self.manifest),
             &material.launch.workspace_manifest_digest,
         )
         .map_err(|_| BrokerErrorCodeV1::NeedsReconciliation.into())
     }
+}
+
+/// Reopen the archive pinned by the exact journal revision. This read grants
+/// no permission to create a runtime instance or to consume a claim.
+#[allow(
+    dead_code,
+    reason = "the private named recovery caller is a separate G04 integration"
+)]
+pub(crate) fn reopen_legacy_named_archive(
+    config: &crate::control_fs::Directory,
+    job: &AcceptedJobV1,
+) -> Result<fs::File> {
+    let needs_reconciliation = BrokerErrorCodeV1::NeedsReconciliation;
+    let operation = job.operation_id();
+    let intent = job.intent();
+    let material = intent.legacy_named_launch().ok_or(needs_reconciliation)?;
+    if material.plan.operation_id != operation
+        || material.source_identity_hash.is_none()
+        || intent.initial_options().run_options().config_dir != config.path()
+    {
+        return Err(needs_reconciliation.into());
+    }
+    let digest = job
+        .broker_checkpoint_v2()
+        .and_then(|checkpoint| checkpoint.supervision().legacy_named_admission())
+        .filter(|named| named.plan() == &material.plan)
+        .and_then(|named| named.archive_digest())
+        .ok_or(needs_reconciliation)?;
+    let sessions = config
+        .open_existing_child("sessions")
+        .and_then(Directory::from_control)
+        .map_err(|_| needs_reconciliation)?;
+    open_verified_workspace_archive(
+        &sessions,
+        &format!("{operation}.tar"),
+        digest,
+        None,
+        &material.launch.workspace_manifest_digest,
+    )
+    .map_err(|_| needs_reconciliation.into())
 }
 
 /// Persist the supplied collection once; any interrupted publication requires
@@ -1986,7 +2220,7 @@ pub(super) fn broker_archive(checkpoint: &ManagedCheckpoint) -> Result<fs::File>
         &sessions,
         &checkpoint.archive_name,
         &checkpoint.archive_digest,
-        &checkpoint.before,
+        Some(&checkpoint.before),
         &checkpoint.admission.launch.workspace_manifest_digest,
     )
 }
@@ -1995,18 +2229,26 @@ fn open_verified_workspace_archive(
     sessions: &Directory,
     archive_name: &str,
     archive_digest: &str,
-    expected_manifest: &Manifest,
+    recorded_manifest: Option<&Manifest>,
     expected_manifest_digest: &str,
 ) -> Result<fs::File> {
     let mut archive = sessions.archive(archive_name, archive_digest)?;
-    let manifest = workspace::scan_workspace_archive(&mut archive, Limits::default())?;
-    // Old checkpoints did not observe modes. Preserve exactly their recorded
-    // coverage while still checking all paths, content and known modes.
-    let manifest = workspace::manifest_at_recorded_coverage(expected_manifest, &manifest);
+    let mut manifest = workspace::scan_workspace_archive(&mut archive, Limits::default())?;
+    if let Some(expected) = recorded_manifest {
+        // Old checkpoints did not observe modes. Preserve their recorded coverage.
+        manifest = workspace::manifest_at_recorded_coverage(expected, &manifest);
+        anyhow::ensure!(
+            &manifest == expected,
+            "immutable archive manifest differs from the admitted workspace"
+        );
+    } else {
+        anyhow::ensure!(
+            manifest.values().all(|file| file.mode.is_some()),
+            "immutable archive has incomplete mode coverage"
+        );
+    }
     anyhow::ensure!(
-        &manifest == expected_manifest
-            && content_hash("ai-guard:workspace-manifest:v1", &manifest)?
-                == expected_manifest_digest,
+        content_hash("ai-guard:workspace-manifest:v1", &manifest)? == expected_manifest_digest,
         "immutable archive manifest differs from the admitted workspace"
     );
     use std::io::{Seek, SeekFrom};

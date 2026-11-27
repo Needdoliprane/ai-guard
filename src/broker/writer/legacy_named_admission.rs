@@ -3,6 +3,7 @@
 
 use super::{BrokerCheckpointV2, BrokerCheckpointV3, JournalError, JournalResult, WriterClient};
 use crate::{
+    audit::legacy_session_prepare::LegacyNamedCancelReservationV1,
     broker::{
         checkpoint::{
             DecisionAnswerV1, LegacyNamedAdmissionCheckpoint, SupervisionCheckpointV1,
@@ -11,9 +12,13 @@ use crate::{
         journal::{AcceptedJobV1, canonical},
         lifecycle::LocalCommandRequestV1,
     },
-    control::session_control::{
-        LegacyConfirmedPlanV1, LegacyNamedAdmissionReceiptV1, LegacyNamedInitialDecisionV1,
-        LegacyNamedSupervisedAdmissionV1,
+    control::{
+        AdmissionV1, SupervisedAdmissionV1, SupervisionProtocolV1, WorkerMutationV1, WorkerStateV1,
+        WorkerTransitionV1, WorkerV1,
+        session_control::{
+            LegacyConfirmedPlanV1, LegacyNamedAdmissionReceiptV1, LegacyNamedInitialDecisionV1,
+            LegacyNamedSupervisedAdmissionV1,
+        },
     },
 };
 use uuid::Uuid;
@@ -86,7 +91,6 @@ impl WriterClient {
     pub(in crate::broker) async fn record_legacy_named_admission(
         &self,
         plan: &LegacyConfirmedPlanV1,
-        request: LegacyNamedSupervisedAdmissionV1,
         archive_digest: String,
     ) -> JournalResult<RecordedLegacyNamedAdmission> {
         let job = self.load_named_job(plan).await?;
@@ -100,6 +104,7 @@ impl WriterClient {
         {
             return Err(JournalError::Conflict);
         }
+        let request = request_from_initial_decision(&job, &current)?;
         let pending = LegacyNamedAdmissionCheckpoint::pending_with_archive(
             plan.clone(),
             request,
@@ -158,6 +163,55 @@ impl WriterClient {
         Ok(())
     }
 
+    /// The first confirmed STOP and the original reservation determine the
+    /// same cancellation even after a lost reply or a later STOP command.
+    pub(in crate::broker) async fn retained_legacy_named_cancellation(
+        &self,
+        operation: Uuid,
+    ) -> JournalResult<(LegacyNamedCancelReservationV1, WorkerV1)> {
+        let job = self
+            .load(operation)
+            .await?
+            .ok_or(JournalError::InvalidInput)?;
+        let current = super::lifecycle(&job)?;
+        let stop = current
+            .commands()
+            .iter()
+            .find(|command| matches!(command.request(), LocalCommandRequestV1::CancelRequested))
+            .ok_or(JournalError::Conflict)?;
+        // A job that passed a runtime preparation boundary uses the
+        // runtime-backed reconciliation path, never a reserved cancellation.
+        if job.checkpoint().broker_context().managed {
+            return Err(JournalError::Conflict);
+        }
+        let retained = retained_admission(&job)?;
+        let admission = retained.receipt().ok_or(JournalError::Interrupted)?;
+        let reserved = admission
+            .admission
+            .worker
+            .as_ref()
+            .ok_or(JournalError::Conflict)?;
+        if reserved.state != WorkerStateV1::Reserved || !reserved.quota_held {
+            return Err(JournalError::Conflict);
+        }
+        let request = LegacyNamedCancelReservationV1 {
+            version: 1,
+            binding_ref: retained.plan().binding_ref,
+            namespace: job.scope().control_namespace_uuid().to_string(),
+            admission: admission.admission.receipt.clone(),
+            mutation: WorkerMutationV1 {
+                version: 1,
+                operation_id: cancellation_operation_id(job.operation_id(), stop.command_id()),
+                worker_id: reserved.worker_id.clone(),
+                attempt_id: reserved.attempt.attempt_id.clone(),
+                expected_revision: reserved.revision,
+                transition: WorkerTransitionV1::CancelReserved,
+            },
+        };
+        request.input_hash().map_err(|_| JournalError::Conflict)?;
+        Ok((request, reserved.clone()))
+    }
+
     async fn load_named_job(&self, plan: &LegacyConfirmedPlanV1) -> JournalResult<AcceptedJobV1> {
         let job = self
             .load(plan.operation_id)
@@ -168,6 +222,11 @@ impl WriterClient {
         }
         Ok(job)
     }
+}
+
+fn cancellation_operation_id(operation: Uuid, stop: Uuid) -> String {
+    let domain = format!("ai-guard:legacy-named-cancel-reservation-operation:v1:{operation}");
+    crate::model::bound_event_id(domain.as_bytes(), stop)
 }
 
 fn require_open(current: &BrokerCheckpointV3) -> JournalResult<()> {
@@ -191,6 +250,45 @@ fn retained_admission(job: &AcceptedJobV1) -> JournalResult<&LegacyNamedAdmissio
         return Err(JournalError::Conflict);
     }
     Ok(retained)
+}
+
+fn request_from_initial_decision(
+    job: &AcceptedJobV1,
+    current: &BrokerCheckpointV3,
+) -> JournalResult<LegacyNamedSupervisedAdmissionV1> {
+    let material = job
+        .intent()
+        .legacy_named_launch()
+        .ok_or(JournalError::Conflict)?;
+    let [
+        SupervisionOperationV1::Decision {
+            request,
+            response: Some(answer),
+        },
+    ] = current.broker().supervision().operations()
+    else {
+        return Err(JournalError::Conflict);
+    };
+    if answer.decision().outcome != crate::model::Outcome::Allow {
+        return Err(JournalError::Conflict);
+    }
+    Ok(LegacyNamedSupervisedAdmissionV1 {
+        version: 1,
+        binding_ref: material.plan.binding_ref,
+        broker_profile_id: job.scope().profile_id().to_owned(),
+        admission: SupervisedAdmissionV1 {
+            version: 1,
+            protocol: SupervisionProtocolV1::BrokerSupervisionV1,
+            intent_hash: job.intent_hash().to_owned(),
+            admission: AdmissionV1 {
+                version: 1,
+                operation_id: job.operation_id().to_string(),
+                decision_request: request.clone(),
+                receipt: answer.receipt().clone(),
+                launch: material.launch.clone(),
+            },
+        },
+    })
 }
 
 fn with_admission(
@@ -218,4 +316,23 @@ fn with_initial_decision(
     )?;
     let broker = BrokerCheckpointV2::new(current.broker().runner().clone(), supervision)?;
     BrokerCheckpointV3::new(broker, current.commands().to_vec())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn named_cancellation_replays_within_its_job_and_separates_jobs() {
+        let stop = Uuid::from_u128(1);
+        let original = Uuid::from_u128(2);
+        let other_job = Uuid::from_u128(3);
+        let retained = cancellation_operation_id(original, stop);
+        assert_eq!(retained, cancellation_operation_id(original, stop));
+        assert_ne!(retained, cancellation_operation_id(other_job, stop));
+        assert_ne!(
+            retained,
+            cancellation_operation_id(original, Uuid::from_u128(4))
+        );
+    }
 }
