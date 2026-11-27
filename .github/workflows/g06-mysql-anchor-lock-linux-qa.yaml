@@ -1,0 +1,167 @@
+name: G06 MySQL publication target Linux QA
+
+on:
+  push:
+    branches: [codex/g06-mysql-anchor-lock-linux-qa-20261127]
+    paths: [.github/workflows/g06-mysql-anchor-lock-linux-qa.yaml]
+
+permissions:
+  contents: read
+
+jobs:
+  lock:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      SOURCE_SHA: 37a6d41e2bbfe6f8ee700720e4c1da6146609f4c
+      SOURCE_TREE: 88494b236b6152a73dda94cb191f80e4a7f46d69
+      CARGO_BUILD_JOBS: '1'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      CARGO_TERM_COLOR: never
+      RUST_MIN_STACK: '8388608'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          persist-credentials: false
+
+      - name: Build one library harness and verify the exact G06 publication target
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          selectors=(
+            mysql_storage::owned_origin::fresh_anchor::contract_tests::fresh_anchor_requires_its_locked_physical_target
+          )
+
+          report_not_run() {
+            local selector
+            for selector in "${selectors[@]}"; do
+              printf 'test=%s status=NOT_RUN\n' "$selector"
+            done
+          }
+
+          if [[ "$(git rev-parse HEAD 2>/dev/null)" != "$SOURCE_SHA" ||
+                "$(git rev-parse 'HEAD^{tree}' 2>/dev/null)" != "$SOURCE_TREE" ]]; then
+            printf 'source=FAIL\n'
+            report_not_run
+            exit 1
+          fi
+          printf 'source=PASS\nsource_sha=%s\nsource_tree=%s\n' "$SOURCE_SHA" "$SOURCE_TREE"
+          export AI_GUARD_BUILD_REVISION="$SOURCE_SHA"
+
+          # Keep all raw build and test output private.
+          scratch=$(mktemp -d /tmp/aig-g06.XXXXXX)
+          trap 'rm -rf -- "$scratch"' EXIT
+          export TMPDIR="$scratch"
+          export CARGO_TARGET_DIR="$scratch/target"
+          build_json="$scratch/build.jsonl"
+
+          if ! cargo fetch --locked --target host-tuple >"$scratch/fetch.log" 2>&1; then
+            printf 'fetch=FAIL\nbuild=NOT_RUN\n'
+            report_not_run
+            exit 1
+          fi
+          printf 'fetch=PASS\n'
+
+          build_timer=()
+          if [[ -x /usr/bin/time ]]; then
+            build_timer=(/usr/bin/time -o "$scratch/build.rss" -f '%M')
+          fi
+          if "${build_timer[@]}" \
+              cargo test --locked --offline --features mysql-storage --lib --no-run \
+              --message-format=json >"$build_json" 2>"$scratch/build.stderr"; then
+            printf 'build=PASS\n'
+          else
+            build_rc=$?
+            printf 'build=FAIL\nbuild_exit=%s\n' "$build_rc"
+            if [[ -f "$scratch/build.rss" ]]; then
+              awk '/^[0-9]+$/{printf "build_peak_rss_kib=%s\n", $0}' "$scratch/build.rss"
+            fi
+            df -k "$scratch" | awk 'NR == 2 && $4 ~ /^[0-9]+$/{printf "build_free_disk_kib=%s\n", $4}'
+            jq -Rr 'fromjson? | objects
+              | select(.reason == "compiler-message" and .message.level == "error")
+              | .message as $message
+              | ($message.code.code // empty) as $code
+              | select($code | test("\\AE[0-9]{4}\\z"))
+              | ([$message.spans[]? | select(.is_primary)
+                  | recurse(.expansion.span // empty)
+                  | select(.file_name | test("\\A(src|tests)/[A-Za-z0-9_./-]+[.]rs\\z"))] | .[0]) as $span
+              | if $span then "compiler_error=\($code) file=\($span.file_name) line=\($span.line_start)"
+                else "compiler_error=\($code) scope=outside_product_sources" end' "$build_json" 2>/dev/null | sort -u || true
+            jq -Rr 'fromjson? | objects
+              | select(.reason == "compiler-message" and .message.level == "error")
+              | .message as $message
+              | select(($message.code.code // "") == "")
+              | ($message.message | ascii_downcase) as $heading
+              | (if $heading | test("recursion limit|reached the type-length limit") then "compiler_limit"
+                elif $heading | test("overflow evaluating|stack overflow") then "compiler_overflow"
+                elif $heading | test("linking with|linker") then "linker_error"
+                elif $heading | test("cycle detected") then "compiler_cycle"
+                elif $heading | test("internal compiler error|llvm error") then "compiler_internal"
+                else "untyped_compiler_error" end) as $class
+              | ($message.spans | map(select(.is_primary
+                and (.file_name | test("\\A(src|tests)/[A-Za-z0-9_./-]+[.]rs\\z")))) | .[0]) as $span
+              | if $span then "compiler_class=\($class) file=\($span.file_name) line=\($span.line_start)"
+                else "compiler_class=\($class)" end' "$build_json" 2>/dev/null | sort -u | head -30 || true
+            if rg -q 'No space left on device|Disk quota exceeded' "$scratch/build.stderr"; then
+              printf 'build_failure_class=disk_space\n'
+            elif rg -q 'signal: 9, SIGKILL|Killed process' "$scratch/build.stderr"; then
+              printf 'build_failure_class=compiler_killed\n'
+            elif rg -q 'signal: 11, SIGSEGV|rustc interrupted by SIGSEGV' "$scratch/build.stderr"; then
+              printf 'build_failure_class=compiler_crash\n'
+            elif rg -q 'cannot execute linker|linker .* not found' "$scratch/build.stderr"; then
+              printf 'build_failure_class=missing_linker\n'
+            elif rg -q 'internal compiler error|LLVM ERROR' "$scratch/build.stderr"; then
+              printf 'build_failure_class=compiler_internal\n'
+            fi
+            report_not_run
+            exit 1
+          fi
+
+          if ! libtest=$(jq -ers '[.[] | select(.reason == "compiler-artifact"
+              and .target.name == "agentsandbox" and .target.kind == ["lib"]
+              and .profile.test == true and (.executable | type) == "string") | .executable]
+              | unique | select(length == 1) | .[0]' "$build_json" 2>/dev/null) ||
+              [[ "$libtest" != "$CARGO_TARGET_DIR"/debug/deps/agentsandbox-* ||
+                 ! -f "$libtest" || ! -x "$libtest" || -L "$libtest" ]]; then
+            printf 'libtest=FAIL\n'
+            report_not_run
+            exit 1
+          fi
+          if ! checksum=$(sha256sum -- "$libtest" 2>/dev/null) ||
+              [[ ! ${checksum%% *} =~ ^[0-9a-f]{64}$ ]]; then
+            printf 'libtest=FAIL\n'
+            report_not_run
+            exit 1
+          fi
+          printf 'libtest=PASS\nlibtest_sha256=%s\n' "${checksum%% *}"
+
+          check_selector() {
+            local selector=$1
+            local log="$scratch/test.log"
+            if ! "$libtest" --exact "$selector" --test-threads=1 --color never >"$log" 2>&1; then
+              printf 'FAIL'
+            elif grep -Fqx 'running 0 tests' "$log"; then
+              printf 'NO_TEST'
+            elif grep -Fqx 'running 1 test' "$log" &&
+                grep -Fqx "test $selector ... ok" "$log" &&
+                grep -Eq '^test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; [0-9]+ filtered out;' "$log"; then
+              printf 'PASS'
+            else
+              printf 'FAIL'
+            fi
+          }
+
+          failed=0
+          for selector in "${selectors[@]}"; do
+            status=$(check_selector "$selector")
+            printf 'test=%s status=%s\n' "$selector" "$status"
+            if [[ "$status" != PASS ]]; then
+              failed=1
+              grep -Eo 'panicked at src/[A-Za-z0-9_./-]+[.]rs:[0-9]+:[0-9]+' "$scratch/test.log" || true
+            fi
+          done
+          exit "$failed"
