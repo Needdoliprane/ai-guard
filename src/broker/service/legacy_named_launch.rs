@@ -4,15 +4,16 @@ use super::*;
 use crate::{
     broker::clock::HostClock,
     broker::enforcer::{
-        ExecutionEnforcerV1, LegacyNamedProspectiveBind, LegacyNamedProspectiveBindAck,
+        ExecutionEnforcerV1, LegacyNamedProspectiveBind, LegacyNamedProspectiveBindAck, SlotPhaseV1,
     },
     broker::presence::LegacyNamedAdmissionOutcome,
     control::{
-        ArmSubjectV1, ArmV1, HelperPermissionV1, HelperPurposeV1, MutationReceiptV1,
-        WorkerMutationV1, WorkerStateV1, WorkerTransitionV1, WorkerV1,
+        ArmSubjectV1, ArmV1, HelperPermissionV1, HelperPurposeV1, HelperStartClaimV1,
+        MutationReceiptV1, WorkerMutationV1, WorkerStateV1, WorkerTransitionV1, WorkerV1,
         session_control::{
             LegacyConfirmedLaunchSpecV1, LegacyConfirmedPlanV1, LegacyNamedAdmissionReceiptV1,
-            LegacyNamedImportArmRequestV1, LegacyNamedInitialDecisionV1,
+            LegacyNamedImportArmRequestV1, LegacyNamedImportClaimRequestV1,
+            LegacyNamedInitialDecisionV1,
         },
     },
     model::Outcome,
@@ -120,8 +121,17 @@ pub(super) struct CreatedLegacyNamedImport {
 /// separate, durable start claim.
 #[allow(dead_code, reason = "the named start claim is composed separately")]
 pub(super) struct BoundLegacyNamedImport {
-    pub(super) created: CreatedLegacyNamedImport,
-    pub(super) acknowledgement: Box<LegacyNamedProspectiveBindAck>,
+    created: CreatedLegacyNamedImport,
+    // Bind obtained this acknowledgement using the same job arbiter held by
+    // created.admission. Only this module can put the two into custody.
+    acknowledgement: Box<LegacyNamedProspectiveBindAck>,
+}
+
+/// The original live owner and the exact Writer-confirmed claim request.
+#[allow(dead_code, reason = "the named claim dispatch is composed separately")]
+pub(super) struct PendingLegacyNamedImportClaim {
+    bound: BoundLegacyNamedImport,
+    request: LegacyNamedImportClaimRequestV1,
 }
 
 impl Service {
@@ -788,6 +798,125 @@ impl Service {
             created,
             acknowledgement: result?,
         })
+    }
+
+    /// Record the next claim under live custody before any dispatch to Core.
+    #[allow(dead_code, reason = "the named claim dispatch is composed separately")]
+    pub(super) async fn record_bound_legacy_named_import_claim(
+        &self,
+        bound: BoundLegacyNamedImport,
+    ) -> Result<PendingLegacyNamedImportClaim, BrokerErrorCodeV1> {
+        let job = Arc::clone(&bound.created.admission.job);
+        let generation = bound.created.admission.running.generation();
+        let result = async {
+            let admitted = &bound.created.admission;
+            require_generation(&job.cancel, generation)?;
+            if self.recovery_only()
+                || self.stopping.load(Ordering::SeqCst)
+                || self.fenced.load(Ordering::SeqCst)
+            {
+                return Err(BrokerErrorCodeV1::NeedsReconciliation);
+            }
+            self.validate_control().await?;
+
+            let (ack_guard, ack_generation) = bound.acknowledgement.generation();
+            let status = bound.acknowledgement.status();
+            let registration = bound.acknowledgement.registration();
+            if ack_generation != generation
+                || status.phase() != SlotPhaseV1::Ready
+                || status.prepared_once()
+                || status.arm_id() != registration.arm_id()
+            {
+                return Err(BrokerErrorCodeV1::NeedsReconciliation);
+            }
+            let cancel = ack_guard.clone();
+            let plan = &admitted.material.plan;
+            let writer = &admitted.request.writer;
+            let scope = &admitted.request.verified.scope;
+            let profile_jobs = self.profile_jobs(scope.profile_id())?;
+            let expected_scope = canonical(scope).map_err(jobs::journal_error)?;
+            let arm = registration.arm();
+            let receipt = registration.receipt();
+            require_named_intent(&admitted.accepted, plan, &arm.intent_hash)?;
+            if !Arc::ptr_eq(&profile_jobs, &admitted.request.jobs)
+                || canonical(admitted.accepted.scope()).map_err(jobs::journal_error)?
+                    != expected_scope
+                || canonical(writer.scope()).map_err(jobs::journal_error)? != expected_scope
+                || plan.operation_id != admitted.accepted.operation_id()
+                || plan.broker_profile_id != scope.profile_id()
+                || plan.control_namespace_uuid != scope.control_namespace_uuid().to_string()
+                || registration.tenant_id() != scope.tenant_id()
+                || registration.control_origin_hash()
+                    != hex::encode(Sha256::digest(scope.gateway_origin().as_bytes()))
+                || arm.worker_id != admitted.worker.worker_id
+                || arm.attempt_id != admitted.worker.attempt.attempt_id
+                || !registration
+                    .matches_spawn_target(bound.created.runtime.binding(), &bound.created.owned)
+            {
+                return Err(BrokerErrorCodeV1::Conflict);
+            }
+            let ArmSubjectV1::Helper {
+                purpose: HelperPurposeV1::Import,
+                helper_id,
+                permission,
+                ..
+            } = &arm.subject
+            else {
+                return Err(BrokerErrorCodeV1::Conflict);
+            };
+            if !matches!(permission.as_ref(), HelperPermissionV1::Admission { receipt }
+                if receipt == &admitted.reservation)
+            {
+                return Err(BrokerErrorCodeV1::Conflict);
+            }
+
+            let arm_id =
+                Uuid::parse_str(&receipt.arm_id).map_err(|_| BrokerErrorCodeV1::Conflict)?;
+            let clock = crate::broker::clock::NativeHostClock::new()
+                .map_err(|_| BrokerErrorCodeV1::Unavailable)?;
+            let request = LegacyNamedImportClaimRequestV1 {
+                version: 1,
+                binding_ref: plan.binding_ref,
+                namespace: plan.control_namespace_uuid.clone(),
+                claim: HelperStartClaimV1 {
+                    version: 1,
+                    operation_id: LegacyNamedImportClaimRequestV1::operation_id(
+                        plan.binding_ref,
+                        arm_id,
+                    ),
+                    helper_id: helper_id.clone(),
+                    emitter_id: Uuid::new_v4().to_string(),
+                    arm_receipt: receipt.clone(),
+                    clock_check: clock.sample().map_err(|_| BrokerErrorCodeV1::Unavailable)?,
+                },
+            };
+            request
+                .validate_for_arm(plan.binding_ref, &plan.control_namespace_uuid, arm, receipt)
+                .map_err(|_| BrokerErrorCodeV1::NeedsReconciliation)?;
+            require_generation(&cancel, generation)?;
+            writer
+                .record_legacy_named_import_claim(plan, request.clone())
+                .await
+                .map_err(|_| BrokerErrorCodeV1::NeedsReconciliation)?;
+
+            // A stopped or expired owner leaves its durable pending behind.
+            // The generation gate only hands off the in-memory capability.
+            require_generation(&cancel, generation)?;
+            let check = clock.sample().map_err(|_| BrokerErrorCodeV1::Unavailable)?;
+            arm.validate_clock_check(&check)
+                .map_err(|_| BrokerErrorCodeV1::NeedsReconciliation)?;
+            cancel
+                .with_current_generation(generation, || {
+                    if self.stopping.load(Ordering::SeqCst) || self.fenced.load(Ordering::SeqCst) {
+                        return Err(BrokerErrorCodeV1::NeedsReconciliation);
+                    }
+                    Ok(PendingLegacyNamedImportClaim { bound, request })
+                })
+                .map_err(|_| BrokerErrorCodeV1::Interrupted)?
+        }
+        .await;
+        job.result(result.as_ref().err().copied());
+        result
     }
 
     /// Settle a lost creation result from the original Writer intent. The
