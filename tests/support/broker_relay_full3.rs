@@ -1976,8 +1976,50 @@ impl Fixture {
     pub async fn history(&self, job: Uuid, original_role: Role) -> Result<History> {
         let status = self.job_status(job).await?;
         let revision = status.head_revision.context("confirmed real revision")?;
+        self.history_at(job, original_role, revision, status.head_hash.as_deref())
+            .await
+    }
+
+    pub async fn recovered_history(&self, job: Uuid, original_role: Role) -> Result<History> {
+        let reply = service::request(
+            &self.broker_root,
+            "a",
+            A_RUNNER,
+            BrokerCommandV1::RecoveryStatus { operation_id: job },
+        )
+        .await
+        .context("phase=full3_refused_history category=recovery_transport")?;
+        let BrokerReplyV1::RecoveryStatus { status } = reply else {
+            bail!("phase=full3_refused_history category=recovery_status_refused");
+        };
+        ensure!(
+            status.version == 1
+                && status.operation_id == job
+                && status.tenant_id == "tenant-a"
+                && status.journal_mode == JournalModeV1::StopOnly
+                && status.source == RecoveryDataSourceV1::ConfirmedJournal
+                && status.runtime_evidence == RecoveryRuntimeEvidenceV1::NotQueried
+                && !status.incomplete,
+            "phase=full3_refused_history category=unconfirmed_stop_only_head"
+        );
+        self.history_at(
+            job,
+            original_role,
+            status.head_revision,
+            Some(&status.head_hash),
+        )
+        .await
+    }
+
+    async fn history_at(
+        &self,
+        job: Uuid,
+        original_role: Role,
+        revision: u64,
+        hash: Option<&str>,
+    ) -> Result<History> {
         // The IPC reply names an immutable revision even if the writer advances.
-        let value = self.confirmed_job_revision(job, revision, status.head_hash.as_deref())?;
+        let value = self.confirmed_job_revision(job, revision, hash)?;
         let mut arms = Vec::new();
         collect_operations(&value, "arm", &mut arms);
         let arms: Vec<_> = arms

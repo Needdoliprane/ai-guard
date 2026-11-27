@@ -270,7 +270,7 @@ async fn refused_assignment(fixture: &mut Fixture, original: Role, selected: Rol
     fixture.restart(selected).await?;
     before.require_live()?;
     fixture.assert_assignment_refused(job).await?;
-    before.unchanged(&fixture.history(job, original).await?)?;
+    before.unchanged(&fixture.recovered_history(job, original).await?)?;
     // Return to the original genuine guardian for independent STOP.
     fixture.shutdown_jobs(&[job], original).await?;
     worker_terminal(&fixture.a, &endpoint).await?;
