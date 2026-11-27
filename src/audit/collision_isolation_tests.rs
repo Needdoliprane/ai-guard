@@ -416,9 +416,11 @@ async fn postcommit_descriptor_fault_recovery_and_replay_preserve_known_collisio
         sha256_digest: hex::encode(Sha256::digest("b".repeat(48).as_bytes())),
         expires_at: (chrono::Utc::now() + chrono::Duration::minutes(5)).to_rfc3339(),
     };
+    // Darwin may supply a temporary directory under the /var symlink.
+    let observer_path = a_path.canonicalize().unwrap();
     let observer = Mutex::new(
         Connection::open_with_flags(
-            &a_path,
+            &observer_path,
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
         )
         .unwrap(),
