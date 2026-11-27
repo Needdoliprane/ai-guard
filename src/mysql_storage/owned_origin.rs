@@ -1,6 +1,6 @@
 use super::{audit::decode_row, driver_error, supervision::server_uuid};
 use anyhow::{Context, Result, bail, ensure};
-use mysql_async::{Conn, Row, Transaction, prelude::Queryable};
+use mysql_async::{Conn, Row, prelude::Queryable};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
@@ -63,23 +63,9 @@ impl OwnedAuditLock {
         }
     }
 
+    /// Recheck the lock holder and physical target on the caller's exact connection.
     pub(super) async fn verify(&self, connection: &mut impl Queryable) -> Result<()> {
-        let ownership = connection
-            .exec_first::<Row, _, _>("SELECT CONNECTION_ID(), IS_USED_LOCK(?)", (&self.name,))
-            .await
-            .map_err(driver_error)?
-            .map(decode_row::<(u64, Option<u64>)>)
-            .transpose()?;
-        ensure!(
-            ownership == Some((self.session, Some(self.session))),
-            "MySQL owned audit session does not hold the lock"
-        );
-        Ok(())
-    }
-
-    /// Recheck the physical target in the transaction that inspects preparation state.
-    async fn verify_preparation_target(&self, tx: &mut Transaction<'_>) -> Result<()> {
-        let row = tx
+        let row = connection
             .exec_first::<Row, _, _>(
                 "SELECT CONNECTION_ID(), IS_USED_LOCK(?), @@GLOBAL.server_uuid, \
                  (SELECT SCHEMA_NAME FROM information_schema.SCHEMATA \
@@ -88,15 +74,15 @@ impl OwnedAuditLock {
             )
             .await
             .map_err(driver_error)?
-            .context("MySQL owned preparation origin is unavailable")?;
+            .context("MySQL owned audit origin is unavailable")?;
         let (session, holder, server, schema): (u64, Option<u64>, String, Option<String>) =
             decode_row(row)?;
         ensure!(
-            preparation_target_matches(
+            locked_target_matches(
                 (self.session, &self.server.to_string(), &self.schema),
                 (session, holder, &server, schema.as_deref()),
             ),
-            "MySQL owned preparation transaction differs from the locked target"
+            "MySQL owned audit session differs from the locked target"
         );
         Ok(())
     }
@@ -121,7 +107,7 @@ impl OwnedAuditLock {
     }
 }
 
-fn preparation_target_matches(
+fn locked_target_matches(
     expected: (u64, &str, &str),
     observed: (u64, Option<u64>, &str, Option<&str>),
 ) -> bool {
@@ -135,30 +121,30 @@ fn preparation_target_matches(
 
 #[cfg(test)]
 mod tests {
-    use super::preparation_target_matches;
+    use super::locked_target_matches;
 
     #[test]
     fn owned_preparation_requires_the_locked_physical_target() {
         let server = "abcde000-0000-0000-0000-000000000001";
         let schema = "tenant_a";
         let expected = (12, server, schema);
-        assert!(preparation_target_matches(
+        assert!(locked_target_matches(
             expected,
             (12, Some(12), server, Some(schema))
         ));
-        assert!(!preparation_target_matches(
+        assert!(!locked_target_matches(
             expected,
             (12, Some(12), server, Some("tenant_b"))
         ));
-        assert!(!preparation_target_matches(
+        assert!(!locked_target_matches(
             expected,
             (12, Some(12), server, Some("TENANT_A"))
         ));
-        assert!(!preparation_target_matches(
+        assert!(!locked_target_matches(
             expected,
             (12, Some(12), server, None)
         ));
-        assert!(!preparation_target_matches(
+        assert!(!locked_target_matches(
             expected,
             (
                 12,
@@ -167,15 +153,15 @@ mod tests {
                 Some(schema)
             )
         ));
-        assert!(!preparation_target_matches(
+        assert!(!locked_target_matches(
             expected,
             (13, Some(12), server, Some(schema))
         ));
-        assert!(!preparation_target_matches(
+        assert!(!locked_target_matches(
             expected,
             (12, Some(13), server, Some(schema))
         ));
-        assert!(!preparation_target_matches(
+        assert!(!locked_target_matches(
             expected,
             (12, None, server, Some(schema))
         ));

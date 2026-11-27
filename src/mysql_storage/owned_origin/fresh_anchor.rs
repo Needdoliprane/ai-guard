@@ -179,11 +179,11 @@ impl FreshAnchorDraft<'_> {
             .await
             .map_err(driver_error)?;
         let replay = async {
-            lock.verify_preparation_target(&mut tx).await?;
+            lock.verify(&mut tx).await?;
             if let Some((row, predecessor)) = self.recorded_row(&mut tx).await? {
                 self.verify_recorded(row, predecessor.as_deref())?;
             }
-            lock.verify_preparation_target(&mut tx).await
+            lock.verify(&mut tx).await
         }
         .await;
         tx.rollback().await.map_err(driver_error)?;

@@ -628,7 +628,7 @@ pub(super) async fn verify_empty_in_transaction(
         matches!(version, 14 | 15),
         "invalid MySQL owned audit format"
     );
-    lock.verify_preparation_target(tx).await?;
+    lock.verify(tx).await?;
     require_catalog_visibility(tx).await?;
     require_constraints_enabled(tx).await?;
     let inventory = metadata_rows(
@@ -665,7 +665,7 @@ pub(super) async fn verify_empty_in_transaction(
     ensure!(empty == [1], "MySQL unpublished audit tables contain rows");
     require_empty_projections(tx, version).await?;
     verify_physical_structure(tx, version).await?;
-    lock.verify_preparation_target(tx).await
+    lock.verify(tx).await
 }
 
 /// The fresh publication writes only the audit chain and the singleton.
@@ -723,7 +723,7 @@ pub(super) async fn verify_structure(
         matches!(version, 14 | 15),
         "invalid MySQL owned audit format"
     );
-    lock.verify_preparation_target(tx).await?;
+    lock.verify(tx).await?;
     require_catalog_visibility(tx).await?;
     require_constraints_enabled(tx).await?;
     let inventory = metadata_rows(
@@ -749,7 +749,7 @@ pub(super) async fn verify_structure(
         "unexpected MySQL owned preparation objects"
     );
     verify_physical_structure(tx, version).await?;
-    lock.verify_preparation_target(tx).await
+    lock.verify(tx).await
 }
 
 /// Compare the column, index, constraint and foreign-key manifests. The caller

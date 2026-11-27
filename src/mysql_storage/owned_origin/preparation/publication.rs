@@ -136,7 +136,7 @@ pub(super) async fn verify_published(
         let head = read_published_binding(&mut tx, version, &request.tenant_id, &namespace).await?;
         replay_published_prefix(&mut tx, &head, draft).await?;
         audit_manifest::require_empty_projections(&mut tx, version).await?;
-        lock.verify_preparation_target(&mut tx).await?;
+        lock.verify(&mut tx).await?;
         Ok::<_, anyhow::Error>(head)
     }
     .await;
