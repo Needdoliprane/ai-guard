@@ -239,7 +239,7 @@ pub fn control_route(method: &Method, path: &str) -> Option<ControlRouteIdentity
                 "session-confirmations",
                 id,
                 "admission",
-                "reconcile" | "cancel-reserved" | "import-arm",
+                "reconcile" | "cancel-reserved" | "import-arm" | "import-claim",
             ],
         )
         | (
@@ -249,7 +249,7 @@ pub fn control_route(method: &Method, path: &str) -> Option<ControlRouteIdentity
                 "session-confirmations",
                 id,
                 "admission",
-                "import-arm",
+                "import-arm" | "import-claim",
                 "reconcile",
             ],
         ) if v1 && canonical_uuid(id) => Some(BrokerSession),
@@ -279,6 +279,36 @@ pub fn control_route(method: &Method, path: &str) -> Option<ControlRouteIdentity
 #[cfg(test)]
 mod reconciliation_tests {
     use super::*;
+
+    #[test]
+    fn named_import_claim_routes_require_broker_session_and_exact_scope_path() {
+        let binding = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+        let base =
+            format!("/api/v1/control/session-confirmations/{binding}/admission/import-claim");
+        for path in [base.clone(), format!("{base}/reconcile")] {
+            assert_eq!(
+                control_route(&Method::POST, &path),
+                Some(ControlRouteIdentity::BrokerSession)
+            );
+            assert_eq!(control_route(&Method::GET, &path), None);
+            assert_eq!(
+                control_query(&Method::POST, &path, None),
+                Ok(ControlQuery::None)
+            );
+            assert_eq!(
+                control_query(&Method::POST, &path, Some("tenant=tenant-a")),
+                Err(InvalidControlQuery)
+            );
+            for bad in [
+                path.replacen("/api/v1/", "/api/v2/", 1),
+                path.replace(binding, "00000000-0000-0000-0000-000000000000"),
+                path.replace(binding, &binding.to_uppercase()),
+                format!("{path}/extra"),
+            ] {
+                assert_eq!(control_route(&Method::POST, &bad), None);
+            }
+        }
+    }
 
     #[test]
     fn reconciliation_route_accepts_only_exact_runner_v1_without_query() {
