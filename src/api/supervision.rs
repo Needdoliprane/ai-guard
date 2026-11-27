@@ -4,15 +4,16 @@ use crate::audit::legacy_session_prepare::{
     LegacyNamedCancelReservationV1, LegacyNamedInitialDecision,
 };
 use crate::control::{
-    AdmissionResultV1, ArmResultV1, ArmV1, ArmedStartClaimV1, ControlCapabilitiesV1,
-    ControlProtocolV1, ExportRequestV1, HelperClaimResultV1, HelperCleanupV1, HelperObservationV1,
-    HelperStartClaimV1, MutationReceiptV1, MutationResultV1, SupervisedAdmissionV1,
+    AdmissionResultV1, ArmResultV1, ArmV1, ArmedStartClaimV1, ClaimDispositionV1,
+    ControlCapabilitiesV1, ControlProtocolV1, ExportRequestV1, HelperClaimResultV1,
+    HelperCleanupV1, HelperObservationV1, HelperStartClaimV1, MutationReceiptV1, MutationResultV1,
+    SupervisedAdmissionV1,
     session_control::{
         LEGACY_CONFIRMED_LAUNCH_SPEC_RESPONSE_BYTES, LEGACY_NAMED_ADMISSION_RECEIPT_NOT_FOUND,
         LEGACY_NAMED_ADMISSION_REQUEST_BYTES, LEGACY_NAMED_IMPORT_ARM_RECEIPT_NOT_FOUND,
         LEGACY_NAMED_IMPORT_ARM_RESPONSE_BYTES, LegacyConfirmedPlanV1,
         LegacyNamedAdmissionReceiptV1, LegacyNamedImportArmRequestV1,
-        LegacyNamedSupervisedAdmissionV1, canonical_uuid,
+        LegacyNamedImportClaimRequestV1, LegacyNamedSupervisedAdmissionV1, canonical_uuid,
     },
 };
 use crate::tenant_store::StoreHealth;
@@ -21,6 +22,10 @@ use axum::{
     extract::{DefaultBodyLimit, FromRequestParts},
     http::request::Parts,
 };
+
+const LEGACY_NAMED_IMPORT_CLAIM_RESPONSE_BYTES: usize = 4096;
+const LEGACY_NAMED_IMPORT_CLAIM_RECEIPT_NOT_FOUND: &str =
+    "legacy_named_import_claim_receipt_not_found";
 
 // Deliberately merged only into /api/v1, preserving historical /api aliases.
 pub(super) fn routes() -> Router<GatewayState> {
@@ -60,6 +65,16 @@ pub(super) fn routes() -> Router<GatewayState> {
         .route(
             "/control/session-confirmations/{binding_ref}/admission/import-arm/reconcile",
             post(reconcile_named_import_arm)
+                .layer(DefaultBodyLimit::max(LEGACY_NAMED_ADMISSION_REQUEST_BYTES)),
+        )
+        .route(
+            "/control/session-confirmations/{binding_ref}/admission/import-claim",
+            post(claim_named_import)
+                .layer(DefaultBodyLimit::max(LEGACY_NAMED_ADMISSION_REQUEST_BYTES)),
+        )
+        .route(
+            "/control/session-confirmations/{binding_ref}/admission/import-claim/reconcile",
+            post(reconcile_named_import_claim)
                 .layer(DefaultBodyLimit::max(LEGACY_NAMED_ADMISSION_REQUEST_BYTES)),
         )
         .route("/workers/supervised-reservations", post(reserve))
@@ -544,6 +559,96 @@ async fn reconcile_named_import_arm(
                     .map_err(|error| named_admission_error(&tenant.store, error))?
                     .ok_or_else(named_import_arm_absent)?;
                 named_import_arm_response(result, &store.redactor_union(&redactor))
+            },
+        )
+        .await
+}
+
+fn named_import_claim_request(
+    binding_ref: &str,
+    body: Result<Json<LegacyNamedImportClaimRequestV1>, JsonRejection>,
+) -> ApiResult<LegacyNamedImportClaimRequestV1> {
+    let binding_ref = canonical_uuid(binding_ref).map_err(control_error)?;
+    let request = parse_json(body)?;
+    if request.binding_ref != binding_ref {
+        return Err(control_error(ControlFailure::InvalidRequest.into()));
+    }
+    request.validate().map_err(control_error)?;
+    Ok(request)
+}
+
+fn named_import_claim_response(
+    result: HelperClaimResultV1,
+    redactor: &Redactor,
+) -> ApiResult<Response> {
+    let status = match result.disposition {
+        ClaimDispositionV1::EmitOnce => StatusCode::CREATED,
+        ClaimDispositionV1::AlreadyConsumed => StatusCode::OK,
+    };
+    let value = serde_json::to_value(result).map_err(|error| control_error(error.into()))?;
+    if redactor.value_unclipped(&value) != value {
+        return Err(control_error(anyhow::anyhow!(
+            "named import claim receipt requires redaction"
+        )));
+    }
+    let bytes = serde_json::to_vec(&value).map_err(|error| control_error(error.into()))?;
+    if bytes.len() > LEGACY_NAMED_IMPORT_CLAIM_RESPONSE_BYTES {
+        return Err(control_error(anyhow::anyhow!(
+            "named import claim receipt exceeds its response bound"
+        )));
+    }
+    Ok((status, [(header::CONTENT_TYPE, "application/json")], bytes).into_response())
+}
+
+async fn claim_named_import(
+    _private: PrivateControlTransport,
+    broker: workload::VerifiedBroker,
+    Path(binding_ref): Path<String>,
+    body: Result<Json<LegacyNamedImportClaimRequestV1>, JsonRejection>,
+) -> ApiResult<Response> {
+    let request = named_import_claim_request(&binding_ref, body)?;
+    broker
+        .blocking_on(
+            store_io::Lane::Control,
+            move |tenant, identity, redactor| {
+                let store = named_admission_store(&tenant, &redactor)?;
+                let result = store
+                    .claim_legacy_named_import(&identity, &request)
+                    .map_err(|error| named_admission_error(&tenant.store, error))?;
+                named_import_claim_response(result, &store.redactor_union(&redactor))
+            },
+        )
+        .await
+}
+
+async fn reconcile_named_import_claim(
+    _private: PrivateControlTransport,
+    broker: workload::VerifiedBroker,
+    Path(binding_ref): Path<String>,
+    body: Result<Json<LegacyNamedImportClaimRequestV1>, JsonRejection>,
+) -> ApiResult<Response> {
+    let request = named_import_claim_request(&binding_ref, body)?;
+    broker
+        .blocking_on(
+            store_io::Lane::Control,
+            move |tenant, identity, redactor| {
+                let store = named_admission_store(&tenant, &redactor)?;
+                let result = store
+                    .read_legacy_named_import_claim(&identity, &request)
+                    .map_err(|error| named_admission_error(&tenant.store, error))?
+                    .ok_or_else(|| {
+                        workload::response(
+                            StatusCode::NOT_FOUND,
+                            LEGACY_NAMED_IMPORT_CLAIM_RECEIPT_NOT_FOUND,
+                            "Reçu de claim de l’import introuvable.",
+                        )
+                    })?;
+                if result.disposition != ClaimDispositionV1::AlreadyConsumed {
+                    return Err(control_error(anyhow::anyhow!(
+                        "named import claim reconciliation returned an emitting disposition"
+                    )));
+                }
+                named_import_claim_response(result, &store.redactor_union(&redactor))
             },
         )
         .await
