@@ -15,8 +15,12 @@ fn require(value: bool) -> anyhow::Result<()> {
     }
 }
 
-fn verify_store_contents(db: &Connection, tenant: &str) -> anyhow::Result<()> {
-    validate_schema(db, false)?;
+fn verify_store_contents(db: &Connection, tenant: &str, in_place: bool) -> anyhow::Result<()> {
+    if in_place {
+        validate_in_place_identity_schema(db)?;
+    } else {
+        validate_schema(db, false)?;
+    }
     Store::validate_metadata(db, tenant)?;
     control::validate(db)?;
     require(Store::check_integrity(db)?.valid)
@@ -90,13 +94,17 @@ impl OpeningAuthority<'_> {
                     && u32::try_from(format).ok() == Some(source.descriptor().required_format)
             }
         })?;
-        verify_store_contents(db, tenant)?;
+        let in_place_anchor = match self {
+            Self::Maintenance(token) => token.in_place_anchor()?,
+            Self::Startup(_) => None,
+        };
+        verify_store_contents(db, tenant, in_place_anchor.is_some())?;
         let namespace = authority::namespace(db)?;
         match self {
             Self::Maintenance(token) => {
                 let d = token.descriptor();
                 require(namespace == d.durable_namespace_id)?;
-                if let Some(expected) = token.in_place_anchor()? {
+                if let Some(expected) = in_place_anchor {
                     // In-place maintenance of an adopted source: the plan
                     // keeps every source, format and the active closure, so
                     // its own migration id is not the anchor's. Bind it to
@@ -979,7 +987,7 @@ impl Store {
             tx.pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))?
                 == descriptor.required_format,
         )?;
-        verify_store_contents(&tx, tenant)?;
+        verify_store_contents(&tx, tenant, false)?;
         let snapshot = authority::replay(&tx)?;
         require(
             authority::namespace(&tx)? == descriptor.durable_namespace_id

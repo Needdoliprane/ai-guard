@@ -186,6 +186,16 @@ maintenance directory outside the preparation and source directories. The
 command checks the actual directory identities, including alternate names
 resolved by the filesystem.
 
+The same maintenance can extend an owned Store14 or Store15 with the original
+three-table or four-table `session_prepare_v1` catalog. The gateway requires the
+complete catalog to start. Maintenance checks the exact historical catalog and
+its audit chain, verifies a backup, and extends the source in one transaction.
+The receipt `session_prepare_catalog_upgrade_v1` records the existing genesis
+and prefix. Retained launches keep their original receipts and gain a prepared
+conversation projection linked to the original launch event. A mixed catalog or
+an audit chain that depends on missing projections requires investigation before
+maintenance can succeed.
+
 ```sh
 agentsandbox human-sources human-rights install \
   --human-sources-activation /absolute/control/human-preparation/activation.json \

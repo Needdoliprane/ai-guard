@@ -6,6 +6,7 @@
 //! and validation; this list grants no permission, context, read or mutation.
 use super::egress::{SourceBackupStepV1, VerifiedSourceBackup, physical_for};
 use super::review_authority::{self as authority, AuthorityReceiptV1};
+use super::session_prepare::catalog::{self, HistoricalCatalog};
 use super::*;
 use crate::human_authority::maintenance::HumanMaintenanceSourceToken;
 use sha2::{Digest, Sha256};
@@ -19,16 +20,23 @@ pub(crate) enum InPlaceIdentityMarkerV1 {
     HumanRightsV2,
     #[serde(rename = "session_prepare_v1")]
     SessionPrepareV1,
+    #[serde(rename = "session_prepare_catalog_upgrade_v1")]
+    SessionPrepareCatalogUpgradeV1,
 }
 
 impl InPlaceIdentityMarkerV1 {
     /// Installation order. A marker may require every earlier one.
-    pub(crate) const ORDERED: [Self; 2] = [Self::HumanRightsV2, Self::SessionPrepareV1];
+    pub(crate) const ORDERED: [Self; 3] = [
+        Self::HumanRightsV2,
+        Self::SessionPrepareV1,
+        Self::SessionPrepareCatalogUpgradeV1,
+    ];
 
     pub(crate) fn name(self) -> &'static str {
         match self {
             Self::HumanRightsV2 => "human_rights_v2",
             Self::SessionPrepareV1 => "session_prepare_v1",
+            Self::SessionPrepareCatalogUpgradeV1 => "session_prepare_catalog_upgrade_v1",
         }
     }
 
@@ -36,6 +44,7 @@ impl InPlaceIdentityMarkerV1 {
         match self {
             Self::HumanRightsV2 => super::human_rights::GENESIS_KIND,
             Self::SessionPrepareV1 => super::session_prepare::GENESIS_KIND,
+            Self::SessionPrepareCatalogUpgradeV1 => catalog::UPGRADED_KIND,
         }
     }
 
@@ -44,15 +53,7 @@ impl InPlaceIdentityMarkerV1 {
         match self {
             Self::HumanRightsV2 => super::human_rights::installed(db),
             Self::SessionPrepareV1 => super::session_prepare::installed(db),
-        }
-    }
-
-    /// Create the marker's own schema objects inside the held transaction,
-    /// before its genesis event is appended. The rights marker has none.
-    fn install_schema(self, tx: &Transaction<'_>) -> anyhow::Result<()> {
-        match self {
-            Self::HumanRightsV2 => Ok(()),
-            Self::SessionPrepareV1 => super::session_prepare::install_schema(tx),
+            Self::SessionPrepareCatalogUpgradeV1 => Ok(catalog::upgraded_from(db)?.is_some()),
         }
     }
 
@@ -66,10 +67,14 @@ impl InPlaceIdentityMarkerV1 {
     ) -> anyhow::Result<AuthorityReceiptV1> {
         let mut event = match self {
             Self::HumanRightsV2 => super::human_rights::marker_event(tx)?,
-            Self::SessionPrepareV1 => super::session_prepare::marker_event(tx)?,
+            Self::SessionPrepareV1 => {
+                let event = super::session_prepare::marker_event(tx)?;
+                super::session_prepare::install_schema(tx)?;
+                event
+            }
+            Self::SessionPrepareCatalogUpgradeV1 => catalog::upgrade(tx)?,
         };
         anyhow::ensure!(event.kind == self.kind(), "identity marker kind differs");
-        self.install_schema(tx)?;
         let clock = workload::capture_control_time(tx)?;
         event.id = self.event_id(migration_id);
         event.timestamp = crate::broker_registry::format_time(clock.at());
@@ -189,7 +194,9 @@ fn committed(
         let stored = marker.stored(db)?;
         if stored.event.id == marker.event_id(migration_id) {
             bound.push((marker, stored));
-        } else {
+        } else if marker != InPlaceIdentityMarkerV1::SessionPrepareCatalogUpgradeV1 {
+            // A later catalog extension does not invalidate the receipts of
+            // the maintenance that originally installed session_prepare_v1.
             foreign.push(stored.seq);
         }
     }
@@ -233,9 +240,14 @@ pub(super) fn maintenance_prefix(
             (prefix, receipts.iter().map(|r| r.marker).collect())
         }
         None => {
+            let historical = validate_in_place_identity_schema(tx)?;
             let mut pending = Vec::new();
             for marker in InPlaceIdentityMarkerV1::ORDERED {
-                if !marker.installed(tx)? {
+                let required = match marker {
+                    InPlaceIdentityMarkerV1::SessionPrepareCatalogUpgradeV1 => historical.is_some(),
+                    _ => !marker.installed(tx)?,
+                };
+                if required {
                     pending.push(marker);
                 }
             }
@@ -264,6 +276,7 @@ fn read_committed(
     tx: &Transaction<'_>,
     token: &HumanMaintenanceSourceToken,
     backup: &VerifiedSourceBackup<'_>,
+    backup_catalog: Option<HistoricalCatalog>,
     markers: &[InPlaceIdentityMarkerV1],
 ) -> anyhow::Result<Vec<IdentityMarkerReceiptV1>> {
     let (prefix, receipts) =
@@ -276,6 +289,11 @@ fn read_committed(
                 .map(|r| r.marker)
                 .eq(markers.iter().copied()),
     )?;
+    if markers.contains(&InPlaceIdentityMarkerV1::SessionPrepareCatalogUpgradeV1) {
+        require(backup_catalog.is_some() && catalog::upgraded_from(tx)? == backup_catalog)?;
+    } else {
+        require(backup_catalog.is_none())?;
+    }
     Ok(receipts)
 }
 
@@ -289,9 +307,9 @@ pub(super) fn install_in_place(
     backup: &VerifiedSourceBackup<'_>,
     markers: &[InPlaceIdentityMarkerV1],
 ) -> anyhow::Result<Vec<IdentityMarkerReceiptV1>> {
-    super::egress::verify_in_place_backup(store, tx, token, backup)?;
+    let backup_catalog = super::egress::verify_in_place_backup(store, tx, token, backup)?;
     if committed(tx, token.migration_id())?.is_some() {
-        let receipts = read_committed(tx, token, backup, markers)?;
+        let receipts = read_committed(tx, token, backup, backup_catalog, markers)?;
         source(store, tx, token)?;
         return Ok(receipts);
     }
@@ -299,7 +317,8 @@ pub(super) fn install_in_place(
     require(
         (prefix.seq, prefix.hash.as_str())
             == (backup.source_head().0, backup.source_head().1.as_str())
-            && pending == markers,
+            && pending == markers
+            && validate_in_place_identity_schema(tx)? == backup_catalog,
     )?;
     let mut receipts = Vec::new();
     for marker in markers {
@@ -314,7 +333,7 @@ pub(super) fn install_in_place(
     control::validate(tx)?;
     Store::validate_metadata(tx, store.tenant_id())?;
     require(Store::check_integrity(tx)?.valid)?;
-    require(read_committed(tx, token, backup, markers)? == receipts)?;
+    require(read_committed(tx, token, backup, backup_catalog, markers)? == receipts)?;
     source(store, tx, token)?;
     Ok(receipts)
 }
@@ -327,8 +346,8 @@ pub(super) fn confirm_in_place(
     backup: &VerifiedSourceBackup<'_>,
     markers: &[InPlaceIdentityMarkerV1],
 ) -> anyhow::Result<Vec<IdentityMarkerReceiptV1>> {
-    super::egress::verify_in_place_backup(store, tx, token, backup)?;
-    let receipts = read_committed(tx, token, backup, markers)?;
+    let backup_catalog = super::egress::verify_in_place_backup(store, tx, token, backup)?;
+    let receipts = read_committed(tx, token, backup, backup_catalog, markers)?;
     source(store, tx, token)?;
     Ok(receipts)
 }

@@ -197,6 +197,16 @@ répertoire de préparation et des répertoires des sources. La commande vérifi
 l'identité réelle des répertoires, y compris les autres noms que le système de
 fichiers résout vers ces mêmes répertoires.
 
+La même maintenance peut étendre un Store14 ou Store15 possédé qui porte le
+catalogue `session_prepare_v1` original à trois ou quatre tables. Le gateway
+exige le catalogue complet pour démarrer. La maintenance vérifie le catalogue
+historique exact et sa chaîne d’audit, puis sauvegarde la source avant de
+l’étendre dans une transaction. Le reçu `session_prepare_catalog_upgrade_v1`
+lie la genèse et le préfixe existants. Les lancements conservés gardent leur reçu
+d’origine et retrouvent une projection de conversation préparée liée à leur
+événement de lancement. Un catalogue mixte ou un audit qui dépend de projections
+absentes exige un examen avant de poursuivre.
+
 ```sh
 agentsandbox human-sources human-rights install \
   --human-sources-activation /absolute/control/human-preparation/activation.json \

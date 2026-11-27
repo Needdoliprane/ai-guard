@@ -372,7 +372,7 @@ An earlier release cannot use a store that carries the marker: plan an upgrade, 
 
 ### Already adopted owned stores (formats 14 and 15)
 
-`migrate-human-rights` refuses an owned store. For a tenant already adopted through the [human sources workflow](../human-sources-maintenance/README.md), stop the gateway, dashboard, ingress and every broker, then install every pending in-place identity marker (today only `human_rights_v2`) with the published activation:
+`migrate-human-rights` refuses an owned store. For a tenant already adopted through the [human sources workflow](../human-sources-maintenance/README.md), stop the gateway, dashboard, ingress and every broker, then install every pending in-place identity marker with the published activation:
 
 ```sh
 agentsandbox human-sources human-rights install \

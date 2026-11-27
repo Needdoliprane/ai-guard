@@ -24,6 +24,8 @@ use crate::identity::{
 };
 use uuid::Uuid;
 
+pub(super) mod catalog;
+
 pub(crate) const GENESIS_KIND: &str = "control.session_prepare.genesis";
 pub(crate) const PREPARED_KIND: &str = "control.session_prepare.prepared";
 pub(crate) const LAUNCHED_KIND: &str = "control.session_prepare.launched";
@@ -140,19 +142,30 @@ pub(crate) fn installed(db: &Connection) -> anyhow::Result<bool> {
 /// Schema validation: the tables exist exactly when the validated marker does,
 /// and only on an owned format. A table without its marker, or a marker without
 /// its tables, fails closed.
-pub(crate) fn validate_capability(db: &Connection, version: i64) -> anyhow::Result<()> {
+pub(super) fn validate_capability(
+    db: &Connection,
+    version: i64,
+    historical: Option<catalog::HistoricalCatalog>,
+) -> anyhow::Result<()> {
     let present = capability_present(db)?;
     let tables = table_present(db, TARGETS_TABLE)?
         && table_present(db, TARGET_OPERATIONS_TABLE)?
-        && table_present(db, PREPARATIONS_TABLE)?
-        && table_present(db, LAUNCHES_TABLE)?;
+        && table_present(db, PREPARATIONS_TABLE)?;
+    let launches = table_present(db, LAUNCHES_TABLE)?;
     let message_tables = super::session_message::tables_present(db)?;
-    if present || tables || message_tables {
+    if present || tables || launches || message_tables {
         anyhow::ensure!(
-            format_admits(version) && present && tables && message_tables,
+            format_admits(version)
+                && present
+                && tables
+                && launches == catalog::includes_prepare_table(historical, LAUNCHES_TABLE)
+                && message_tables == historical.is_none(),
             "session prepare capability requires its marker and tables on Store14/15"
         );
         genesis(db)?;
+        if let Some(historical) = historical {
+            catalog::validate_historical_audit(db, historical, None)?;
+        }
     }
     Ok(())
 }
@@ -242,6 +255,12 @@ pub(crate) fn validate_replay_event(db: &Connection, stored: &StoredEvent) -> an
     match stored.event.kind.as_str() {
         GENESIS_KIND => {
             anyhow::ensure!(genesis(db)?.is_some(), "invalid session prepare marker");
+        }
+        catalog::UPGRADED_KIND => {
+            anyhow::ensure!(
+                catalog::upgraded_from(db)?.is_some(),
+                "invalid session catalog upgrade"
+            );
         }
         PREPARED_KIND => {
             let record: Prepared = serde_json::from_value(stored.event.data.clone())?;

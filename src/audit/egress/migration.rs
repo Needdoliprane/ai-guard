@@ -2,6 +2,7 @@
 //! The same verified source backup also serves the in-place maintenance of an
 //! adopted source (identity markers), which never changes its format.
 use super::*;
+use crate::audit::session_prepare::catalog::HistoricalCatalog;
 use crate::human_authority::{
     HumanSourceKindV1, SourceStorageBindingV1, maintenance::HumanMaintenanceSourceToken,
 };
@@ -58,21 +59,28 @@ pub(in crate::audit) fn physical_for(
     token.check().map_err(Into::into)
 }
 fn verify14(store: &Store, db: &Connection, prefix: &(i64, String)) -> anyhow::Result<u64> {
-    verify_format(store, db, prefix, 14)
+    verify_format(store, db, prefix, 14, SourceBackupStepV1::Egress15).map(|(count, _)| count)
 }
 fn verify_format(
     store: &Store,
     db: &Connection,
     prefix: &(i64, String),
     format: i64,
-) -> anyhow::Result<u64> {
+    step: SourceBackupStepV1,
+) -> anyhow::Result<(u64, Option<HistoricalCatalog>)> {
     ensure(db.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))? == format)?;
-    validate_schema(db, false)?;
+    let historical = match step {
+        SourceBackupStepV1::InPlace => validate_in_place_identity_schema(db)?,
+        SourceBackupStepV1::Egress15 => {
+            validate_schema(db, false)?;
+            None
+        }
+    };
     Store::validate_metadata(db, store.tenant_id())?;
     control::validate(db)?;
     let integrity = Store::check_integrity(db)?;
     ensure(integrity.valid && audit_head(db)? == *prefix)?;
-    Ok(integrity.event_count)
+    Ok((integrity.event_count, historical))
 }
 
 fn backup_path(
@@ -143,7 +151,7 @@ impl VerifiedEgressSourceBackup<'_> {
         ))
     }
 
-    fn verify(&self, store: &Store) -> anyhow::Result<()> {
+    fn verify(&self, store: &Store) -> anyhow::Result<Option<HistoricalCatalog>> {
         self.token.check()?;
         ensure(self.source_binding == store.backing.identity_key())?;
         let db = Connection::open_with_flags(
@@ -152,20 +160,21 @@ impl VerifiedEgressSourceBackup<'_> {
         )?;
         db.busy_timeout(std::time::Duration::ZERO)?;
         storage::verify_connection_main(&self.backing, &db)?;
-        ensure(
-            verify_format(
-                store,
-                &db,
-                &self.source_head,
-                step_format(self.token, self.step),
-            )? == self.event_count,
+        let (count, historical) = verify_format(
+            store,
+            &db,
+            &self.source_head,
+            step_format(self.token, self.step),
+            self.step,
         )?;
+        ensure(count == self.event_count)?;
         let quick: String = db.query_row("PRAGMA quick_check", [], |r| r.get(0))?;
         ensure(quick == "ok")?;
         storage::verify_connection_main(&self.backing, &db)?;
         db.close().map_err(|(_, e)| e)?;
         self.backing.verify_names()?;
-        self.token.check().map_err(Into::into)
+        self.token.check()?;
+        Ok(historical)
     }
 }
 
@@ -189,7 +198,7 @@ pub(in crate::audit) fn prepare_backup_for<'a>(
     physical_for(store, tx, token, step)?;
     let format = step_format(token, step);
     let prefix = audit_head(tx)?;
-    let count = verify_format(store, tx, &prefix, format)?;
+    let verified = verify_format(store, tx, &prefix, format, step)?;
     let path = backup_path(token, path, step)?;
     let (backing, initialization) = StoreStorage::create_new(&path)?;
     let mut destination = Connection::open_with_flags(
@@ -207,7 +216,7 @@ pub(in crate::audit) fn prepare_backup_for<'a>(
     )?;
     reader.busy_timeout(std::time::Duration::ZERO)?;
     storage::verify_connection_main(&store.backing, &reader)?;
-    ensure(verify_format(store, &reader, &prefix, format)? == count)?;
+    ensure(verify_format(store, &reader, &prefix, format, step)? == verified)?;
     {
         let backup = rusqlite::backup::Backup::new(&reader, &mut destination)?;
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
@@ -221,10 +230,10 @@ pub(in crate::audit) fn prepare_backup_for<'a>(
             }
         }
     }
-    ensure(verify_format(store, &reader, &prefix, format)? == count)?;
+    ensure(verify_format(store, &reader, &prefix, format, step)? == verified)?;
     storage::verify_connection_main(&store.backing, &reader)?;
     reader.close().map_err(|(_, e)| e)?;
-    ensure(verify_format(store, &destination, &prefix, format)? == count)?;
+    ensure(verify_format(store, &destination, &prefix, format, step)? == verified)?;
     storage::verify_connection_main(&backing, &destination)?;
     let quick: String = destination.query_row("PRAGMA quick_check", [], |r| r.get(0))?;
     ensure(quick == "ok")?;
@@ -235,10 +244,10 @@ pub(in crate::audit) fn prepare_backup_for<'a>(
         step,
         source_binding: store.backing.identity_key(),
         source_head: prefix,
-        event_count: count,
+        event_count: verified.0,
         backing,
     };
-    proof.verify(store)?;
+    ensure(proof.verify(store)? == verified.1)?;
     physical_for(store, tx, token, step)?;
     Ok(proof)
 }
@@ -323,7 +332,7 @@ pub(in crate::audit) fn verify_in_place_backup(
     tx: &Transaction<'_>,
     token: &HumanMaintenanceSourceToken,
     backup: &VerifiedEgressSourceBackup<'_>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Option<HistoricalCatalog>> {
     physical_for(store, tx, token, SourceBackupStepV1::InPlace)?;
     ensure(
         backup.step == SourceBackupStepV1::InPlace && token.same_guard_and_source(backup.token),

@@ -1050,6 +1050,312 @@ const PREPARED_KIND: &str = "control.session_prepare.prepared";
 const FUTURE_DEADLINE: &str = "2126-01-01T00:00:00Z";
 const PAST_DEADLINE: &str = "2000-01-01T00:00:00Z";
 
+// e3c9f82f added this table to the three in 9ba8b9b6 without changing
+// session_prepare_v1. Keep the historical DDL independent of later installers.
+const HISTORICAL_LAUNCHES: &str = "CREATE TABLE session_launches(operation_id TEXT PRIMARY KEY,input_hash TEXT NOT NULL,session_id TEXT NOT NULL,preparation_operation_id TEXT NOT NULL,event_seq INTEGER NOT NULL REFERENCES events(seq),event_hash TEXT NOT NULL,receipt_json TEXT NOT NULL)";
+
+fn seed_session_prepare(adopted: &Adopted) {
+    let (plan, _guard) = adopted.in_place(0);
+    let store = &adopted.base.stores[0];
+    let mut db = store.db.lock().unwrap();
+    let tx = db
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .unwrap();
+    InPlaceIdentityMarkerV1::HumanRightsV2
+        .install(store, &tx, plan.migration_id)
+        .unwrap();
+    InPlaceIdentityMarkerV1::SessionPrepareV1
+        .install(store, &tx, plan.migration_id)
+        .unwrap();
+    tx.commit().unwrap();
+}
+
+fn leave_historical_session_catalog(store: &Store, with_launches: bool) {
+    let mut db = store.db.lock().unwrap();
+    let tx = db
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .unwrap();
+    tx.execute_batch("DROP TABLE session_messages; DROP TABLE session_conversations;")
+        .unwrap();
+    if !with_launches {
+        assert_eq!(
+            tx.query_row("SELECT COUNT(*) FROM session_launches", [], |row| row
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        tx.execute_batch("DROP TABLE session_launches;").unwrap();
+    }
+    tx.commit().unwrap();
+}
+
+#[test]
+fn historical_session_prepare_catalogs_enter_owned_maintenance() {
+    let [(_, _, conversations), (_, _, messages)] = crate::audit::session_message::SCHEMA;
+    let mut refused_history = Vec::new();
+    for format in [14, 15] {
+        let adopted = adopted(format);
+        seed_session_prepare(&adopted);
+        let store = &adopted.base.stores[0];
+        leave_historical_session_catalog(store, false);
+        let (_, guard) = adopted.in_place(0);
+        let token = guard.target_source(adopted.source_id(0)).unwrap();
+        let source = token.descriptor();
+        let path = source.storage_binding.path();
+
+        let wrong_launch_definition =
+            HISTORICAL_LAUNCHES.replace("event_hash TEXT NOT NULL", "event_hash TEXT");
+        let historical_launch_definition =
+            format!("DROP TABLE session_launches; {HISTORICAL_LAUNCHES}");
+        let messages_without_launch = format!("{messages}; DROP TABLE session_launches;");
+        for (catalog, ddl, must_open) in [
+            ("9ba8b9b6", "", true),
+            (
+                "wrong launch definition",
+                wrong_launch_definition.as_str(),
+                false,
+            ),
+            ("e3c9f82f", historical_launch_definition.as_str(), true),
+            ("partial message family", conversations, false),
+            (
+                "message family without launch",
+                messages_without_launch.as_str(),
+                false,
+            ),
+        ] {
+            store.db.lock().unwrap().execute_batch(ddl).unwrap();
+            let before = maintenance_source_state(&adopted.base);
+            let result = Store::open_review_maintenance_for_tenant(
+                &path,
+                source.tenant_id.as_deref().unwrap(),
+                Redactor::new(vec![]),
+                10_000,
+                &token,
+            )
+            .map(drop);
+            assert_eq!(maintenance_source_state(&adopted.base), before);
+            match (must_open, result) {
+                (true, Err(error)) => {
+                    refused_history.push(format!("Store{format} {catalog}: {error:#}"));
+                }
+                (false, Ok(())) => panic!("Store{format} admitted {catalog}"),
+                _ => {}
+            }
+        }
+    }
+    assert!(refused_history.is_empty(), "{}", refused_history.join("\n"));
+}
+
+fn historical_session_work(
+    retained: &Retained,
+    with_launches: bool,
+) -> (
+    crate::control::session_control::SessionPrepareReceiptV1,
+    Option<crate::control::session_control::SessionLaunchReceiptV1>,
+) {
+    use crate::identity::{ContextModeV1, HumanCapabilityV1};
+    let (principal, membership) = provision_membership(
+        retained,
+        &[
+            HumanCapabilityV1::LaunchSession,
+            HumanCapabilityV1::ReadTenantMetadata,
+        ],
+    )
+    .unwrap();
+    let scope = personal_scope(retained, &principal, &membership, ContextModeV1::Personal);
+    let target = Uuid::new_v4();
+    let epoch = retained.owner.try_write_epoch().unwrap();
+    retained
+        .store
+        .provision_session_launch_target_scoped(
+            &epoch,
+            &retained.source,
+            &target_command(Uuid::new_v4(), target, 1, 0, &principal),
+        )
+        .unwrap();
+    drop(epoch);
+    let preparation = prepare(
+        retained,
+        &scope,
+        &prepare_request(Uuid::new_v4(), target, 1, FUTURE_DEADLINE),
+    )
+    .unwrap();
+    let launch = with_launches.then(|| {
+        launch(
+            retained,
+            &scope,
+            &launch_request(Uuid::new_v4(), target, 1, &preparation),
+        )
+        .unwrap()
+    });
+    (preparation, launch)
+}
+
+fn historical_session_rows(
+    db: &rusqlite::Connection,
+    preparation: Uuid,
+    launch: Option<Uuid>,
+) -> (String, Option<String>) {
+    let preparation = db
+        .query_row(
+            "SELECT json_array(operation_id,input_hash,principal_key,membership_id,organization_scope,
+                               launch_target_id,target_revision,expires_at,event_seq,event_hash)
+             FROM session_preparations WHERE operation_id=?1",
+            [preparation.to_string()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let launch = launch.map(|launch| {
+        db.query_row(
+            "SELECT json_array(operation_id,input_hash,session_id,preparation_operation_id,
+                               event_seq,event_hash,receipt_json)
+             FROM session_launches WHERE operation_id=?1",
+            [launch.to_string()],
+            |row| row.get(0),
+        )
+        .unwrap()
+    });
+    (preparation, launch)
+}
+
+#[test]
+fn historical_session_prepare_catalogs_upgrade_through_owned_operator() {
+    let mut refused_history = Vec::new();
+    for format in [14, 15] {
+        for (catalog, with_launches) in [("9ba8b9b6", false), ("e3c9f82f", true)] {
+            let adopted = adopted(format);
+            seed_session_prepare(&adopted);
+            let store = &adopted.base.stores[0];
+            // Both generations used these Prepare/Launch producers and audit
+            // payloads. Only the projection tables introduced later are lost
+            // from this private fixture, before any conversation effect.
+            let retained = adopted.retained(0, "before-historical-fixture.json", format);
+            let (preparation, launch) = historical_session_work(&retained, with_launches);
+            drop(retained);
+            let launch_id = launch.as_ref().map(|launch| launch.operation_id);
+            let original = historical_session_rows(
+                &store.db.lock().unwrap(),
+                preparation.operation_id,
+                launch_id,
+            );
+            leave_historical_session_catalog(store, with_launches);
+            let before = maintenance_source_state(&adopted.base);
+            let open_owned = |manifest| {
+                let owner = adopted.base.owner(&adopted.anchors, manifest, format);
+                let source = owner.source_token(adopted.source_id(0)).unwrap();
+                Store::open_review_startup_for_tenant(
+                    &source.descriptor().storage_binding.path(),
+                    "A",
+                    Redactor::new(vec![]),
+                    10_000,
+                    &source,
+                )
+                .map(drop)
+            };
+            assert!(open_owned("before-historical-maintenance.json").is_err());
+            assert_eq!(maintenance_source_state(&adopted.base), before);
+
+            let run = |resume| {
+                install_owned_identity_markers(OwnedIdentityMarkersRequest {
+                    manifest: adopted.manifest(),
+                    configuration: adopted.closure.configuration.clone(),
+                    files: adopted.base.configuration_files.clone(),
+                    tenant_id: "A".into(),
+                    redactor: Redactor::new(vec![]),
+                    max_events: 10_000,
+                    maintenance_directory: adopted.base.root.path().join("historical-upgrade"),
+                    excluded_directories: vec![adopted.configuration_dir().path().to_owned()],
+                    resume,
+                })
+            };
+            let installed = match run(false) {
+                Ok(report) => report,
+                Err(error) => {
+                    assert_eq!(maintenance_source_state(&adopted.base), before);
+                    refused_history.push(format!("Store{format} {catalog}: {error:#}"));
+                    continue;
+                }
+            };
+            assert_eq!(installed.state, "installed");
+            assert_eq!(installed.store_format, format);
+            assert_eq!(installed.source_id, adopted.source_id(0));
+            let [extension] = installed.markers.as_slice() else {
+                panic!("historical upgrade should append exactly one marker");
+            };
+            assert_eq!(extension.marker, "session_prepare_catalog_upgrade_v1");
+            assert_eq!(extension.seq, before.head.0 + 1);
+
+            let backup = rusqlite::Connection::open_with_flags(
+                &installed.backup_path,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+            )
+            .unwrap();
+            assert_eq!(audit_head(&backup).unwrap(), before.head);
+            assert!(Store::check_integrity(&backup).unwrap().valid);
+            assert_eq!(
+                historical_session_rows(&backup, preparation.operation_id, launch_id),
+                original
+            );
+            {
+                let db = store.db.lock().unwrap();
+                let previous_hash: String = db
+                    .query_row(
+                        "SELECT prev_hash FROM events WHERE seq=?1",
+                        [extension.seq],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                assert_eq!(previous_hash, before.head.1);
+                assert_eq!(
+                    historical_session_rows(&db, preparation.operation_id, launch_id),
+                    original
+                );
+                if let Some(launch) = &launch {
+                    let (binding, seq, hash): (String, i64, String) = db
+                        .query_row(
+                            "SELECT binding_json,event_seq,event_hash FROM session_conversations WHERE session_id=?1",
+                            [&launch.session_id],
+                            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                        )
+                        .unwrap();
+                    assert_eq!(
+                        binding,
+                        serde_json::to_string(&launch.conversation).unwrap()
+                    );
+                    assert_eq!(seq, launch.audit_seq);
+                    assert_eq!(hash, launch.audit_hash);
+                }
+            }
+
+            open_owned("after-historical-maintenance.json").unwrap();
+            let upgraded = maintenance_source_state(&adopted.base);
+            assert_eq!(upgraded.head, (extension.seq, extension.hash.clone()));
+            assert_eq!(upgraded.format, before.format);
+            assert_eq!(
+                table_count(store, "session_conversations"),
+                i64::from(with_launches)
+            );
+            assert_eq!(table_count(store, "session_messages"), 0);
+
+            let confirmed = run(true).unwrap();
+            assert_eq!(confirmed.state, "confirmed");
+            assert_eq!(confirmed.backup_path, installed.backup_path);
+            assert_eq!(confirmed.markers, installed.markers);
+            assert_eq!(maintenance_source_state(&adopted.base), upgraded);
+
+            if with_launches {
+                // The audit extension now proves that these tables existed.
+                // Their later loss must refuse even with the old SQL shape.
+                leave_historical_session_catalog(store, true);
+                let damaged = maintenance_source_state(&adopted.base);
+                assert!(run(true).is_err());
+                assert_eq!(maintenance_source_state(&adopted.base), damaged);
+            }
+        }
+    }
+    assert!(refused_history.is_empty(), "{}", refused_history.join("\n"));
+}
+
 /// Trusted offline provisioning of one human membership carrying `capability`.
 /// Returns the principal and the committed membership for scope construction.
 fn provision_membership(

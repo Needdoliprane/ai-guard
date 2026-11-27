@@ -379,7 +379,7 @@ Une version antérieure ne peut pas utiliser une base qui porte le marqueur : pr
 
 ### Bases possédées déjà adoptées (formats 14 et 15)
 
-`migrate-human-rights` refuse une base possédée. Pour un tenant déjà adopté par le [parcours des sources humaines](../human-sources-maintenance/README.fr.md), arrêtez le gateway, le dashboard, l’ingress et tous les brokers, puis installez chaque marqueur d’identité en attente (aujourd’hui uniquement `human_rights_v2`) à partir de l’activation publiée :
+`migrate-human-rights` refuse une base possédée. Pour un tenant déjà adopté par le [parcours des sources humaines](../human-sources-maintenance/README.fr.md), arrêtez le gateway, le dashboard, l’ingress et tous les brokers, puis installez chaque marqueur d’identité en attente à partir de l’activation publiée :
 
 ```sh
 agentsandbox human-sources human-rights install \

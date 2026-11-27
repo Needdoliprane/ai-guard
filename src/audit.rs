@@ -474,6 +474,7 @@ fn schema_objects(
     version: i64,
     retention: bool,
     prepare: bool,
+    historical_prepare: Option<session_prepare::catalog::HistoricalCatalog>,
     legacy_prepare: bool,
 ) -> impl Iterator<Item = &'static (&'static str, &'static str, &'static str)> {
     // Format14 inherits the complete, closed13 profile. Its extensions are
@@ -489,9 +490,15 @@ fn schema_objects(
         // The retention ledger exists exactly when its chain marker does.
         .chain(retention::ledger::SCHEMA.iter().filter(move |_| retention))
         // The preparation tables exist exactly when their chain marker does.
-        .chain(session_prepare::SCHEMA.iter().filter(move |_| prepare))
+        .chain(session_prepare::SCHEMA.iter().filter(move |(_, name, _)| {
+            prepare && session_prepare::catalog::includes_prepare_table(historical_prepare, name)
+        }))
         // The conversation/message tables share the same capability marker.
-        .chain(session_message::SCHEMA.iter().filter(move |_| prepare))
+        .chain(
+            session_message::SCHEMA
+                .iter()
+                .filter(move |_| prepare && historical_prepare.is_none()),
+        )
         .chain(
             legacy_session_prepare::SCHEMA
                 .iter()
@@ -571,6 +578,22 @@ fn normalized_schema(sql: &str) -> String {
 /// zero may omit tenant_binding; a versioned database must never be repaired by
 /// CREATE IF NOT EXISTS after a table or index has disappeared.
 fn validate_schema(db: &Connection, allow_legacy: bool) -> anyhow::Result<bool> {
+    validate_schema_for(db, allow_legacy, false).map(|(empty, _)| empty)
+}
+
+/// The in-place identity writer and its backup can inspect a known historical
+/// catalog. Normal service startup and other migrations use the current one.
+fn validate_in_place_identity_schema(
+    db: &Connection,
+) -> anyhow::Result<Option<session_prepare::catalog::HistoricalCatalog>> {
+    validate_schema_for(db, false, true).map(|(_, historical)| historical)
+}
+
+fn validate_schema_for(
+    db: &Connection,
+    allow_legacy: bool,
+    allow_historical_prepare: bool,
+) -> anyhow::Result<(bool, Option<session_prepare::catalog::HistoricalCatalog>)> {
     let version: i64 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
     anyhow::ensure!(
         [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15].contains(&version)
@@ -593,7 +616,7 @@ fn validate_schema(db: &Connection, allow_legacy: bool) -> anyhow::Result<bool> 
             allow_legacy && version == 0,
             "versioned audit schema is missing"
         );
-        return Ok(true);
+        return Ok((true, None));
     }
     let retention = objects
         .iter()
@@ -611,6 +634,15 @@ fn validate_schema(db: &Connection, allow_legacy: bool) -> anyhow::Result<bool> 
         !prepare || session_prepare::format_admits(version),
         "session prepare capability requires Store14 or Store15"
     );
+    let historical_prepare = if prepare && allow_historical_prepare {
+        session_prepare::catalog::historical_shape(|table| {
+            objects
+                .iter()
+                .any(|(kind, name, _, _)| kind == "table" && name == table)
+        })
+    } else {
+        None
+    };
     let legacy_prepare = objects
         .iter()
         .any(|(kind, name, _, _)| kind == "table" && name == "events")
@@ -690,12 +722,18 @@ fn validate_schema(db: &Connection, allow_legacy: bool) -> anyhow::Result<bool> 
         .chain(
             session_prepare::AUTO_INDEX_COUNTS
                 .iter()
-                .filter(move |_| prepare),
+                .filter(move |(table, _)| {
+                    prepare
+                        && session_prepare::catalog::includes_prepare_table(
+                            historical_prepare,
+                            table,
+                        )
+                }),
         )
         .chain(
             session_message::AUTO_INDEX_COUNTS
                 .iter()
-                .filter(move |_| prepare),
+                .filter(move |_| prepare && historical_prepare.is_none()),
         )
         .chain(effect_indexes.iter())
         .filter(|(table, _)| {
@@ -726,11 +764,15 @@ fn validate_schema(db: &Connection, allow_legacy: bool) -> anyhow::Result<bool> 
             );
             continue;
         }
-        let expected = schema_objects(version, retention, prepare, legacy_prepare)
-            .chain(effect_capability.iter())
-            .find(|(expected_kind, expected_name, _)| {
-                kind == expected_kind && name == expected_name
-            });
+        let expected = schema_objects(
+            version,
+            retention,
+            prepare,
+            historical_prepare,
+            legacy_prepare,
+        )
+        .chain(effect_capability.iter())
+        .find(|(expected_kind, expected_name, _)| kind == expected_kind && name == expected_name);
         anyhow::ensure!(
             expected.is_some_and(|(_, _, expected_sql)| sql
                 .as_ref()
@@ -779,8 +821,14 @@ fn validate_schema(db: &Connection, allow_legacy: bool) -> anyhow::Result<bool> 
             "unexpected audit schema object"
         );
     }
-    for &(kind, name, _) in
-        schema_objects(version, retention, prepare, legacy_prepare).chain(effect_capability.iter())
+    for &(kind, name, _) in schema_objects(
+        version,
+        retention,
+        prepare,
+        historical_prepare,
+        legacy_prepare,
+    )
+    .chain(effect_capability.iter())
     {
         if allow_legacy && version == 0 && name == "tenant_binding" {
             continue;
@@ -809,7 +857,7 @@ fn validate_schema(db: &Connection, allow_legacy: bool) -> anyhow::Result<bool> 
     human_brokers::validate_capability(db, version)?;
     human_workers::validate_capability(db, version)?;
     human_rights::validate_capability(db, version)?;
-    session_prepare::validate_capability(db, version)?;
+    session_prepare::validate_capability(db, version, historical_prepare)?;
     if legacy_prepare {
         legacy_session_prepare::validate_capability(db, version)?;
     }
@@ -818,7 +866,7 @@ fn validate_schema(db: &Connection, allow_legacy: bool) -> anyhow::Result<bool> 
     if version != 15 {
         egress::validate(db)?;
     }
-    Ok(false)
+    Ok((false, historical_prepare))
 }
 
 fn row_event(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredEvent> {
