@@ -717,14 +717,25 @@ impl Actor {
 
     fn snapshot_for_slots(&self) -> EnforcerResult<EnforcerSlotStatusV1> {
         let mut status = self.snapshot()?;
-        if matches!(self.rail, LegacyProspectiveRailV1::Named(_))
-            && status.phase == SlotPhaseV1::Ready
-            && self.stop.load(Ordering::SeqCst)
-        {
-            // Publish the latch ahead of the driver's next runtime observation.
-            status.phase = SlotPhaseV1::Stopping;
-        }
+        status.phase = slot_phase_for_slots(self.rail, status.phase, &self.stop);
         Ok(status)
+    }
+}
+
+fn slot_phase_for_slots(
+    rail: LegacyProspectiveRailV1,
+    phase: SlotPhaseV1,
+    stop: &AtomicBool,
+) -> SlotPhaseV1 {
+    if matches!(rail, LegacyProspectiveRailV1::Named(_))
+        && matches!(phase, SlotPhaseV1::Ready | SlotPhaseV1::Quarantined)
+        && stop.load(Ordering::SeqCst)
+    {
+        // Readers can observe the latch both before the runtime stop attempt
+        // and after it has quarantined the slot.
+        SlotPhaseV1::Stopping
+    } else {
+        phase
     }
 }
 
@@ -1026,6 +1037,9 @@ fn run_actor(
             }
             Err(_) => false,
         };
+        if !live && matches!(actor.rail, LegacyProspectiveRailV1::Named(_)) {
+            actor.stop.store(true, Ordering::SeqCst);
+        }
         stopping |= !live || actor.stop.load(Ordering::SeqCst);
         if let Ok(mut value) = actor.state.lock() {
             if let Ok(sample) = sample {
@@ -1090,6 +1104,28 @@ mod tests {
     use super::super::recovery::{RecoveryState, serve_connection as serve_recovery_connection};
     use super::*;
     use serde_json::{Value, json};
+
+    #[test]
+    fn named_slots_keep_latched_stop_visible_after_quarantine() {
+        let named = LegacyProspectiveRailV1::Named(Uuid::from_u128(1));
+        let latched = AtomicBool::new(true);
+        let unlatched = AtomicBool::new(false);
+        for phase in [SlotPhaseV1::Ready, SlotPhaseV1::Quarantined] {
+            assert_eq!(
+                slot_phase_for_slots(named, phase, &latched),
+                SlotPhaseV1::Stopping
+            );
+            assert_eq!(slot_phase_for_slots(named, phase, &unlatched), phase);
+            assert_eq!(
+                slot_phase_for_slots(LegacyProspectiveRailV1::Historical, phase, &latched),
+                phase
+            );
+        }
+        assert_eq!(
+            slot_phase_for_slots(named, SlotPhaseV1::Initializing, &latched),
+            SlotPhaseV1::Initializing
+        );
+    }
 
     #[test]
     fn named_import_slots_preserve_prepare_clock_after_delayed_tick() {

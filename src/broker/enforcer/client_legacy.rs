@@ -270,7 +270,7 @@ impl LegacyNamedImportPrepared {
             .ok_or(EnforcerError::Conflict)?
             .continuous_ns()
             .map_err(|_| EnforcerError::Conflict)?;
-        let status = self.read_start_slot(HEALTH_WINDOW).await?;
+        let status = self.bound.owner.read_start_slot(HEALTH_WINDOW).await?;
         let received = Instant::now();
         let now = clock.sample().map_err(|_| EnforcerError::Unhealthy)?;
         let NamedImportSlot::Ready(observed_ns) = classify_named_import_slot(
@@ -315,21 +315,20 @@ impl LegacyNamedImportPrepared {
         )
         .with_generation_fence(&generation, expected))
     }
+}
 
+impl LegacyNamedProspectiveReservation {
     async fn read_start_slot(&self, budget: Duration) -> EnforcerResult<EnforcerSlotStatusV1> {
-        let (generation, expected) = self.bound.generation();
-        if generation.current() != expected {
-            return Err(EnforcerError::NotReady);
-        }
-        // The request authenticates the original endpoint and epoch. A
-        // reconnect through EnforcerClient::active could swap custody.
-        let client = &self.bound.owner.client.0;
+        // Spawn checks the local generation. This read can outlive its
+        // invalidation while the durable STOP is still being delivered.
+        // Use the original endpoint and epoch even during reconciliation.
+        let client = &self.client.0;
         client.check_health()?;
         let response = tokio::time::timeout(
             budget,
             client.request(
                 Request::Slots {
-                    arm_ids: vec![self.bound.registration.arm_id().into()],
+                    arm_ids: vec![self.retained.target.arm_id().into()],
                 },
                 budget,
             ),
@@ -366,7 +365,7 @@ impl NamedImportStartWatch {
                 let budget = HEALTH_WINDOW
                     .checked_sub(received.elapsed())
                     .ok_or(EnforcerError::NotReady)?;
-                self.prepared.read_start_slot(budget).await
+                self.prepared.bound.owner.read_start_slot(budget).await
             };
             let status = tokio::select! {
                 biased;
@@ -396,7 +395,7 @@ impl NamedImportStartWatch {
                     return;
                 }
                 // Dropping the sender tells the operation it must reconcile.
-                // Only a correlated native STOP observation signals true.
+                // Only a correlated native STOP latch signals true.
                 Err(_) => return,
             }
         }
@@ -1925,6 +1924,47 @@ async fn named_reservation_retains_stale_ack_without_issuing_stop() -> anyhow::R
         ))
     );
     assert!(original_native_exchange);
+    Ok(())
+}
+
+#[cfg(test)]
+#[tokio::test]
+async fn named_slot_read_survives_local_invalidation() -> anyhow::Result<()> {
+    use super::super::server::test_support::{LegacyIpcFixture, named_import_registration};
+
+    let fixture = LegacyIpcFixture::start(1, 0).await;
+    let replies = async {
+        let client = connect_named_legacy_fixture(&fixture).await?;
+        let (registration, birth) = named_import_registration(fixture.root().path());
+        let generation = CancelGeneration::new();
+        let expected = generation.current();
+        let reserved = client
+            .legacy_reserve_named_prospective(
+                registration.prospective()?,
+                &birth,
+                &generation,
+                expected,
+            )
+            .await
+            .map_err(LegacyNamedProspectiveFailure::code)?;
+
+        let before = reserved.read_start_slot(IO_TIMEOUT).await.err();
+        anyhow::ensure!(
+            generation.invalidate() != expected,
+            "close the local spawn gate"
+        );
+        let after = reserved.read_start_slot(IO_TIMEOUT).await.err();
+        Ok::<_, anyhow::Error>((before, after))
+    }
+    .await;
+    fixture.finish().await;
+
+    // The guardian has a reservation but no bound slot. Both reads must
+    // observe its Conflict, including after the local spawn gate was closed.
+    assert_eq!(
+        replies?,
+        (Some(EnforcerError::Conflict), Some(EnforcerError::Conflict))
+    );
     Ok(())
 }
 
