@@ -24,7 +24,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: d63500fdf47ccfcbe7e3f56593a2167f8cdb5379
+          ref: ${{ env.SOURCE_SHA }}
           persist-credentials: false
 
       - name: Build one library harness and verify two exact G04 tests
