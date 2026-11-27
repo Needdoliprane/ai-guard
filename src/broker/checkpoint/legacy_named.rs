@@ -731,15 +731,9 @@ impl LegacyNamedAdmissionCheckpoint {
             request.claim.operation_id != self.plan.operation_id.to_string()
                 && request.claim.operation_id != arm.arm.operation_id,
         )?;
-        if let Some(receipt) = saved.receipt() {
-            validation::bound_receipt(
-                receipt,
-                &request.claim.operation_id,
-                &checked(request.input_hash())?,
-                Some(&arm.arm.worker_id),
-                None,
-            )?;
-            ensure(receipt.audit_seq > arm_receipt.audit_seq)?;
+        if let Some(acknowledgement) = saved.receipt() {
+            receipt(acknowledgement)?;
+            checked(request.validate_receipt(acknowledgement))?;
         }
         Ok(())
     }
