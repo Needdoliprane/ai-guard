@@ -3,6 +3,7 @@
 use super::*;
 use crate::{
     broker_registry::owned_supervision::OwnedBrokerOperationV2,
+    control::session_control::LEGACY_NAMED_ADMISSION_REQUEST_BYTES,
     control_transport::{ControlRouteIdentity, control_query, control_route},
 };
 use axum::{body::HttpBody, extract::FromRequestParts};
@@ -10,6 +11,7 @@ use tokio::sync::Semaphore;
 
 const RUNNER_OPERATIONS: usize = 16;
 const BROKER_PRESENCE: usize = 4;
+const BROKER_SESSION_OPERATIONS: usize = 4;
 const WORKER_RELAY_OPERATIONS: usize = 8;
 const MAX_BODY: usize = 262_144;
 const UPLOAD_TOTAL: Duration = Duration::from_secs(5);
@@ -95,6 +97,7 @@ pub(super) fn owned_broker_request(request: &Request) -> bool {
 pub(super) struct ControlCapacity {
     runner: Arc<Semaphore>,
     presence: Arc<Semaphore>,
+    broker_sessions: Arc<Semaphore>,
     worker_relay: Arc<Semaphore>,
 }
 impl ControlCapacity {
@@ -102,6 +105,7 @@ impl ControlCapacity {
         Self {
             runner: Arc::new(Semaphore::new(RUNNER_OPERATIONS)),
             presence: Arc::new(Semaphore::new(BROKER_PRESENCE)),
+            broker_sessions: Arc::new(Semaphore::new(BROKER_SESSION_OPERATIONS)),
             worker_relay: Arc::new(Semaphore::new(WORKER_RELAY_OPERATIONS)),
         }
     }
@@ -196,13 +200,6 @@ async fn gate(State(state): State<GatewayState>, request: Request, next: Next) -
         )
         .into_response();
     }
-    let max_body = if policy_route {
-        crate::control::egress_policy::REQUEST_BYTES
-    } else if let Some(operation) = owned_broker {
-        operation.request_limit()
-    } else {
-        MAX_BODY
-    };
     if state.owned_human.is_some()
         && !(crate::control_transport::owned_protocol_route(request.method(), request.uri().path())
             || policy_route
@@ -257,6 +254,15 @@ async fn gate(State(state): State<GatewayState>, request: Request, next: Next) -
             "Unknown control transport route.",
         );
     };
+    let max_body = if policy_route {
+        crate::control::egress_policy::REQUEST_BYTES
+    } else if let Some(operation) = owned_broker {
+        operation.request_limit()
+    } else if identity == ControlRouteIdentity::BrokerSession {
+        LEGACY_NAMED_ADMISSION_REQUEST_BYTES
+    } else {
+        MAX_BODY
+    };
     let (mut parts, body) = request.into_parts();
     parts.extensions.insert(ControlTransportRequest(()));
     let mut owned_identity = None;
@@ -299,13 +305,16 @@ async fn gate(State(state): State<GatewayState>, request: Request, next: Next) -
             owned_broker_identity = Some(identity);
             capacity
         }
-        ControlRouteIdentity::BrokerPresence => {
+        ControlRouteIdentity::BrokerPresence | ControlRouteIdentity::BrokerSession => {
             let broker =
                 match workload::VerifiedBroker::from_request_parts(&mut parts, &state).await {
                     Ok(broker) => broker,
                     Err(rejection) => return rejection.into_response(),
                 };
             match broker.control_capacity() {
+                Ok(capacity) if identity == ControlRouteIdentity::BrokerSession => {
+                    capacity.broker_sessions.clone()
+                }
                 Ok(capacity) => capacity.presence.clone(),
                 Err(rejection) => return rejection.into_response(),
             }

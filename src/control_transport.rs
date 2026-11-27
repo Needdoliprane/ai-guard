@@ -47,6 +47,7 @@ impl ControlTransportFailureV1 {
 pub enum ControlRouteIdentity {
     Runner,
     BrokerPresence,
+    BrokerSession,
     WorkerRelay,
 }
 
@@ -166,7 +167,7 @@ pub fn control_route(method: &Method, path: &str) -> Option<ControlRouteIdentity
     {
         return None;
     }
-    use ControlRouteIdentity::{BrokerPresence, Runner, WorkerRelay};
+    use ControlRouteIdentity::{BrokerPresence, BrokerSession, Runner, WorkerRelay};
     match (method, segments.as_slice()) {
         (&Method::GET, ["identity"])
         | (&Method::GET, ["workers", _])
@@ -224,12 +225,12 @@ pub fn control_route(method: &Method, path: &str) -> Option<ControlRouteIdentity
             Some(BrokerPresence)
         }
         (&Method::GET, ["control", "session-confirmations", id]) if v1 && canonical_uuid(id) => {
-            Some(BrokerPresence)
+            Some(BrokerSession)
         }
         (&Method::POST, ["control", "session-confirmations", id, "admission"])
             if v1 && canonical_uuid(id) =>
         {
-            Some(BrokerPresence)
+            Some(BrokerSession)
         }
         // Proposed owned broker-supervision targets (`OwnedBrokerOperationV2`).
         // Classified for relay forwarding and presence capacity only: the

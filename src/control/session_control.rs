@@ -140,6 +140,8 @@ pub(crate) struct LegacyConfirmedPlanV1 {
     pub expires_at: chrono::DateTime<chrono::Utc>,
 }
 
+pub(crate) const LEGACY_NAMED_ADMISSION_REQUEST_BYTES: usize = 65_536;
+
 /// Versioned input for the Legacy named admission transaction.
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

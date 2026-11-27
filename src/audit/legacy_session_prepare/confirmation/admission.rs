@@ -4,7 +4,10 @@ use crate::{
     audit::{identity::projection::Projection, supervision_admission as admission_codec},
     control::{
         DecisionPhaseV1, MutationReceiptV1, QuotaPolicyV1, conflict,
-        session_control::{LegacyNamedAdmissionReceiptV1, LegacyNamedSupervisedAdmissionV1},
+        session_control::{
+            LEGACY_NAMED_ADMISSION_REQUEST_BYTES, LegacyNamedAdmissionReceiptV1,
+            LegacyNamedSupervisedAdmissionV1,
+        },
     },
     identity::{
         IdentityChangeV1, IdentityMutationV1, IdentityReceiptV1, ResourceGrantV1, ResourceKindV1,
@@ -301,7 +304,8 @@ impl Store {
         let input_hash = request.input_hash()?;
         let value = serde_json::to_value(request)?;
         crate::control::invalid(
-            self.redactor.value(&value) == value && serde_json::to_vec(&value)?.len() <= 65536,
+            self.redactor.value(&value) == value
+                && serde_json::to_vec(&value)?.len() <= LEGACY_NAMED_ADMISSION_REQUEST_BYTES,
         )?;
         Ok(input_hash)
     }

@@ -236,6 +236,26 @@ async fn broker_presence_is_separate_and_revocation_is_rechecked_after_upload() 
         .acquire_many_owned(RUNNER_OPERATIONS as u32)
         .await
         .unwrap();
+    let session_full = capacity
+        .broker_sessions
+        .clone()
+        .acquire_many_owned(BROKER_SESSION_OPERATIONS as u32)
+        .await
+        .unwrap();
+    let admission_path = format!(
+        "/api/v1/control/session-confirmations/{}/admission",
+        Uuid::new_v4()
+    );
+    let polls = Arc::new(AtomicUsize::new(0));
+    let response = request(
+        app.clone(),
+        &admission_path,
+        Some(&token),
+        counted_body(polls.clone()),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(polls.load(Ordering::SeqCst), 0);
     let response = app
         .clone()
         .oneshot(
@@ -248,6 +268,8 @@ async fn broker_presence_is_separate_and_revocation_is_rechecked_after_upload() 
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(capacity.presence.available_permits(), BROKER_PRESENCE);
+    drop(session_full);
     let polls = Arc::new(AtomicUsize::new(0));
     let response = request(
         app.clone(),
