@@ -879,9 +879,9 @@ impl Fixture {
                     .file_name()
                     .is_some_and(|n| n.to_string_lossy().starts_with("fact-"))
                 {
-                    let value: Value = serde_json::from_slice(&std::fs::read(path)?)?;
-                    if value["fact"]["job_id"] == job.to_string() {
-                        return Ok(value["fact"].clone());
+                    let record: Value = serde_json::from_slice(&std::fs::read(path)?)?;
+                    if let Some(fact) = channel_fact_for_job(&record, job)? {
+                        return Ok(fact.clone());
                     }
                 }
             }
@@ -996,6 +996,73 @@ impl Drop for Fixture {
             let _ = stop.send(());
         }
     }
+}
+
+fn channel_fact_for_job(record: &Value, job: Uuid) -> Result<Option<&Value>> {
+    let (fact, record_job) = match record["version"].as_u64() {
+        Some(1) => (&record["fact"], None),
+        Some(2) => {
+            let record_job: Uuid = serde_json::from_value(record["job_id"].clone())
+                .context("invalid V2 channel record job identity")?;
+            ensure!(
+                !record_job.is_nil(),
+                "V2 channel record job identity is nil"
+            );
+            let change = &record["change"];
+            match change["kind"].as_str() {
+                Some("fact" | "begin_retirement" | "finalize") => {
+                    (&change["fact"], Some(record_job))
+                }
+                Some("history" | "retirement_intent" | "mutation") => {
+                    ensure!(change.get("fact").is_none(), "unexpected V2 channel fact");
+                    return Ok(None);
+                }
+                _ => bail!("unknown V2 channel change"),
+            }
+        }
+        _ => bail!("unknown channel record version"),
+    };
+    let fact_job: Uuid = serde_json::from_value(fact["job_id"].clone())
+        .context("invalid channel fact job identity")?;
+    ensure!(
+        fact["version"].as_u64() == Some(1) && !fact_job.is_nil(),
+        "invalid channel fact version or identity"
+    );
+    ensure!(
+        record_job.is_none_or(|record_job| record_job == fact_job),
+        "channel fact job identity differs from V2 record"
+    );
+    Ok((fact_job == job).then_some(fact))
+}
+
+#[test]
+fn relay_fact_selection_preserves_v1_and_checks_v2_job_binding() -> Result<()> {
+    let job = Uuid::from_u128(1);
+    let other = Uuid::from_u128(2);
+    let fact = json!({ "version": 1, "job_id": job });
+    let mut legacy = json!({ "version": 1, "fact": &fact });
+    assert_eq!(channel_fact_for_job(&legacy, job)?, Some(&fact));
+    assert_eq!(channel_fact_for_job(&legacy, other)?, None);
+    legacy["version"] = json!(3);
+    assert!(channel_fact_for_job(&legacy, job).is_err());
+
+    for kind in ["fact", "begin_retirement", "finalize"] {
+        let mut record = json!({
+            "version": 2,
+            "job_id": job,
+            "change": { "kind": kind, "fact": &fact },
+        });
+        assert_eq!(channel_fact_for_job(&record, job)?, Some(&fact));
+        assert_eq!(channel_fact_for_job(&record, other)?, None);
+        record["job_id"] = json!(other);
+        assert!(channel_fact_for_job(&record, other).is_err());
+    }
+
+    let mut history = json!({ "version": 2, "job_id": job, "change": { "kind": "history" } });
+    assert_eq!(channel_fact_for_job(&history, job)?, None);
+    history["change"]["kind"] = json!("unknown");
+    assert!(channel_fact_for_job(&history, job).is_err());
+    Ok(())
 }
 
 pub async fn grant(
