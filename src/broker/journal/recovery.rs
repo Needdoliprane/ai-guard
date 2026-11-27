@@ -7,7 +7,7 @@ use crate::{
     audit::legacy_session_prepare::LegacyNamedCancelReservationV1,
     broker::{
         checkpoint::{LegacyNamedAdmissionCheckpoint, SupervisionOperationV1},
-        lifecycle::LocalCommandRequestV1,
+        lifecycle::{LocalCommandRequestV1, LocalCommandV1},
     },
     control::{
         ArmReceiptV1, ArmSubjectV1, ArmV1, WorkerMutationV1, WorkerTransitionV1, WorkerV1,
@@ -173,6 +173,35 @@ impl NamedImportStop {
     }
 }
 
+/// Facts of one verified named STOP, borrowed from the projection that owns
+/// the reader lease. The packet carries no authority and excludes a Core Arm
+/// receipt, which can arrive after STOP without changing these facts.
+#[derive(Serialize)]
+pub(in crate::broker) struct NamedImportStopFactsV1<'a> {
+    version: u32,
+    scope: &'a JournalScopeV1,
+    operation_id: Uuid,
+    binding_ref: Uuid,
+    arm_pending_head: &'a RevisionRefV1,
+    command_id: Uuid,
+    command_input_hash: &'a str,
+    stop_head: &'a RevisionRefV1,
+    arm_id: &'a str,
+    arm_input_hash: String,
+    owned_snapshot_hash: String,
+    runtime_binding_hash: &'a str,
+}
+
+/// Fingerprint the exact retained Created snapshot using journal canonical JSON.
+pub(in crate::broker) fn named_import_stop_owned_hash(
+    owned: &OwnedContainerSnapshot,
+) -> JournalResult<String> {
+    Ok(digest(
+        "ai-guard:legacy-named-import-stop-owned:v1",
+        &canonical(owned)?,
+    ))
+}
+
 /// Metadata attested by the existing reader's verified revision chain. This
 /// type has no deserializer or caller constructor and grants no new mutation.
 #[derive(Clone)]
@@ -278,6 +307,57 @@ impl CancelStopProjectionV1 {
     pub(in crate::broker) fn named_import(&self) -> Option<&NamedImportStop> {
         self.named_import.as_deref()
     }
+
+    /// Derive the wire facts for this command from its verified journal prefix.
+    /// Absence of a projection leaves the native target's status unknown.
+    #[allow(
+        dead_code,
+        reason = "the named guardian STOP transport is composed separately"
+    )]
+    pub(in crate::broker) fn named_import_stop_facts(
+        &self,
+    ) -> JournalResult<Option<NamedImportStopFactsV1<'_>>> {
+        self.revalidate()?;
+        let Some(named) = self.named_import() else {
+            return Ok(None);
+        };
+        let scope = self.scope();
+        let plan = named.admission().plan();
+        let evidence = named.evidence();
+        let arm = evidence.arm();
+        let receipt = self.receipt();
+        let cancel = LocalCommandV1::new(
+            self.operation_id(),
+            &arm.intent_hash,
+            self.command_id(),
+            LocalCommandRequestV1::CancelRequested,
+        )?;
+        if plan.operation_id != self.operation_id()
+            || plan.control_namespace_uuid != scope.control_namespace_uuid().to_string()
+            || plan.broker_profile_id != scope.profile_id()
+            || named.command_id() != receipt.command_id()
+            || named.stop_head() != receipt.head()
+            || receipt.command_id() != cancel.command_id()
+            || receipt.input_hash() != cancel.input_hash()
+        {
+            return Err(JournalError::Conflict);
+        }
+        Ok(Some(NamedImportStopFactsV1 {
+            version: 1,
+            scope,
+            operation_id: self.operation_id(),
+            binding_ref: plan.binding_ref,
+            arm_pending_head: named.arm_pending_head(),
+            command_id: receipt.command_id(),
+            command_input_hash: receipt.input_hash(),
+            stop_head: receipt.head(),
+            arm_id: &arm.operation_id,
+            arm_input_hash: arm.input_hash().map_err(|_| JournalError::Corrupt)?,
+            owned_snapshot_hash: named_import_stop_owned_hash(evidence.owned())?,
+            runtime_binding_hash: evidence.runtime_binding_hash(),
+        }))
+    }
+
     pub(crate) fn cancel_prefix_for_stop(&self, index: usize) -> Option<&ConfirmedCancelPrefixV1> {
         self.cancel_prefixes.get(index)
     }
