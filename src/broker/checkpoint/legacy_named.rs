@@ -589,7 +589,7 @@ mod tests {
         let mut divergent = saved.clone();
         divergent.admission.receipt.input_hash = "0".repeat(64);
         assert!(pending.clone().acknowledge(divergent).is_err());
-        let acknowledged = pending.acknowledge(saved.clone())?;
+        let acknowledged = pending.clone().acknowledge(saved.clone())?;
         assert!(acknowledged.pending_v2().is_none());
         assert_eq!(acknowledged.archive_digest(), Some(digest.as_str()));
         let acknowledged = checkpoint(acknowledged)?;
