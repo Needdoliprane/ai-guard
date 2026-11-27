@@ -230,6 +230,39 @@ fn spawn_fixture(mode: &str) -> StdioConversation {
     StdioConversation::spawn_with_env(exe.as_os_str(), &args, &env).unwrap()
 }
 
+#[test]
+fn dropping_stdio_reaps_the_owned_fixture_child() {
+    use std::time::{Duration, Instant};
+
+    let channel = spawn_fixture("normal");
+    let pid = channel.child.as_ref().unwrap().id() as libc::id_t;
+    drop(channel);
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        // SAFETY: waitid writes into info. WNOWAIT observes without taking
+        // the exit status from the retirement owner.
+        let mut info = std::mem::MaybeUninit::<libc::siginfo_t>::uninit();
+        let result = unsafe {
+            libc::waitid(
+                libc::P_PID,
+                pid,
+                info.as_mut_ptr(),
+                libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+            )
+        };
+        if result == -1 {
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() == Some(libc::ECHILD) {
+                break;
+            }
+            assert_eq!(error.kind(), std::io::ErrorKind::Interrupted);
+        }
+        assert!(Instant::now() < deadline, "fixture child was not reaped");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
 /// Read the next JSON object frame, skipping harness noise, within a deadline.
 fn next_json(child: &mut StdioConversation) -> Value {
     let deadline = std::time::Duration::from_secs(10);

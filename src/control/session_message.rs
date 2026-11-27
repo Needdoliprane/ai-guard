@@ -276,7 +276,8 @@ impl ConversationAdapterV1 {
 /// instruction as a shell command and never opens a network socket: it is a
 /// pipe to the provider client process the trusted broker already owns.
 pub struct StdioConversation {
-    child: std::process::Child,
+    child: Option<std::process::Child>,
+    retire: std::sync::mpsc::Sender<std::process::Child>,
     stdin: Option<std::process::ChildStdin>,
     lines: std::sync::mpsc::Receiver<std::io::Result<String>>,
 }
@@ -309,11 +310,28 @@ impl StdioConversation {
         for (key, value) in env {
             command.env(key, value);
         }
+        // Reserve a reaper before spawning the child. An abandoned channel
+        // hands off its child without waiting under the caller's locks.
+        let (retire, abandoned) = std::sync::mpsc::channel::<std::process::Child>();
+        let reaper = std::thread::Builder::new().spawn(move || {
+            if let Ok(mut child) = abandoned.recv() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        })?;
+        drop(reaper);
         let mut child = command.spawn()?;
         let stdin = child.stdin.take();
-        let stdout = child.stdout.take().expect("piped stdout");
+        let stdout = child.stdout.take();
         let (sender, lines) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
+        let channel = Self {
+            child: Some(child),
+            retire,
+            stdin,
+            lines,
+        };
+        let stdout = stdout.ok_or_else(|| io::Error::other("conversation stdout unavailable"))?;
+        let reader = std::thread::Builder::new().spawn(move || {
             use std::io::{BufRead, Read};
             let mut reader = std::io::BufReader::new(stdout);
             loop {
@@ -347,12 +365,9 @@ impl StdioConversation {
                     }
                 }
             }
-        });
-        Ok(Self {
-            child,
-            stdin,
-            lines,
-        })
+        })?;
+        drop(reader);
+        Ok(channel)
     }
 
     // The fixture can retain the peer past child teardown to observe every
@@ -407,14 +422,17 @@ impl StdioConversation {
 
     pub(crate) fn close_and_reap(&mut self) -> io::Result<()> {
         self.close_input();
-        if self.child.try_wait()?.is_some() {
+        let Some(child) = &mut self.child else {
             return Ok(());
-        }
-        if let Err(error) = self.child.kill() {
-            return self.child.try_wait()?.map(|_| ()).ok_or(error);
+        };
+        if child.try_wait()?.is_none()
+            && let Err(error) = child.kill()
+            && child.try_wait()?.is_none()
+        {
+            return Err(error);
         }
         let deadline = Instant::now() + CHILD_REAP_TIMEOUT;
-        while self.child.try_wait()?.is_none() {
+        while child.try_wait()?.is_none() {
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
                 return Err(io::Error::new(
@@ -424,6 +442,7 @@ impl StdioConversation {
             }
             std::thread::sleep(remaining.min(CHILD_REAP_POLL_INTERVAL));
         }
+        self.child = None;
         Ok(())
     }
 }
@@ -465,6 +484,7 @@ impl ConversationInput<'_> {
             };
             let result = {
                 let effect = enter_effect(written, deadline)?;
+                check_effect(&effect)?;
                 if Instant::now() >= deadline {
                     return Err(io::Error::new(
                         io::ErrorKind::TimedOut,
@@ -472,7 +492,6 @@ impl ConversationInput<'_> {
                     )
                     .into());
                 }
-                check_effect(&effect)?;
                 // ChildStdin is unbuffered. This is one nonblocking write;
                 // the guard drops before retry or any wait.
                 self.0.write(chunk)
@@ -550,7 +569,11 @@ impl ConversationInput<'_> {
 
 impl Drop for StdioConversation {
     fn drop(&mut self) {
-        self.close();
+        self.close_input();
+        if let Some(child) = self.child.take() {
+            // The receiver waits for this single handoff until Drop.
+            let _ = self.retire.send(child);
+        }
     }
 }
 
