@@ -640,6 +640,7 @@ impl LegacyNamedAdmissionCheckpoint {
                 .import_observations
                 .iter()
                 .any(|observation| observation.receipt().is_none())
+            || self.import_verification_plan().is_some()
     }
 
     #[allow(
@@ -1166,10 +1167,16 @@ mod tests {
         arm_result: &ArmResultV1,
         claim: &LegacyNamedImportClaimRequestV1,
         claim_receipt: &MutationReceiptV1,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<u64> {
         writer
             .record_legacy_named_import_creation(plan, archive_digest, helper_id, authority)
             .await?;
+        let creation_revision = writer
+            .load(plan.operation_id)
+            .await?
+            .ok_or(JournalError::Conflict)?
+            .head()
+            .revision();
         writer
             .acknowledge_legacy_named_import_creation(
                 plan,
@@ -1194,7 +1201,7 @@ mod tests {
         writer
             .acknowledge_legacy_named_import_claim(plan.operation_id, claim, claim_receipt.clone())
             .await?;
-        Ok(())
+        Ok(creation_revision)
     }
 
     /// Reopen an existing named Writer journal and retry the exact retained
@@ -2358,7 +2365,7 @@ mod tests {
         // guardian. Exercise write-before-send, Started -> Terminal, exact
         // replay, divergence refusal, and ACK CAS after a concurrent STOP.
         let observation_writer = start_admitted_writer("import-observation-race").await?;
-        seed_named_import_writer_through_claim(
+        let creation_revision = seed_named_import_writer_through_claim(
             &observation_writer,
             &plan,
             &digest,
@@ -2371,10 +2378,6 @@ mod tests {
             &claim_receipt,
         )
         .await?;
-        let creation = observation_writer
-            .load(operation)
-            .await?
-            .ok_or(JournalError::Conflict)?;
         assert!(
             observation_writer
                 .load(operation)
@@ -2382,7 +2385,7 @@ mod tests {
                 .unwrap()
                 .head()
                 .revision()
-                > creation.job().head().revision()
+                > creation_revision
         );
 
         let now = chrono::Utc::now();
@@ -2727,10 +2730,18 @@ mod tests {
                 terminal_receipt.clone(),
             )
             .await?;
-        let inserted = verification_writer
-            .record_legacy_named_import_verification_plan(&plan, verification_helper_id)
-            .await?;
+        // Both calls queue their load against the same Writer head before
+        // either receives its response and can attempt the append.
+        let (inserted, concurrent) = tokio::join!(
+            verification_writer
+                .record_legacy_named_import_verification_plan(&plan, verification_helper_id),
+            verification_writer
+                .record_legacy_named_import_verification_plan(&plan, verification_helper_id),
+        );
+        let inserted = inserted?;
+        let concurrent = concurrent?;
         assert!(inserted.inserted());
+        assert!(!concurrent.inserted());
         assert!(equal(
             inserted.preparation().permission(),
             &verified_prefix.import_verification_permission()?
@@ -2742,11 +2753,7 @@ mod tests {
             .unwrap()
             .head()
             .clone();
-        let replay = verification_writer
-            .record_legacy_named_import_verification_plan(&plan, verification_helper_id)
-            .await?;
-        assert!(!replay.inserted());
-        assert!(equal(replay.preparation(), inserted.preparation())?);
+        assert!(equal(concurrent.preparation(), inserted.preparation())?);
         assert_eq!(
             verification_writer.load(operation).await?.unwrap().head(),
             &planned_head
@@ -2817,6 +2824,81 @@ mod tests {
             &stopped_head
         );
         drop(cold_verification_writer);
+
+        // The lifecycle validator must independently fence adding this new
+        // stage after a durable STOP, even if a caller bypasses WriterClient's
+        // open-lifecycle check and supplies an otherwise valid named plan.
+        let stopped_plan_writer = start_admitted_writer("verification-stop-transition").await?;
+        seed_named_import_writer_through_claim(
+            &stopped_plan_writer,
+            &plan,
+            &digest,
+            helper_id,
+            &authority,
+            &owned,
+            &arm,
+            &arm_result,
+            &claim,
+            &claim_receipt,
+        )
+        .await?;
+        stopped_plan_writer
+            .record_legacy_named_import_observation(&plan, terminal_request.clone())
+            .await?;
+        stopped_plan_writer
+            .acknowledge_legacy_named_import_observation(
+                operation,
+                &terminal_request,
+                terminal_receipt.clone(),
+            )
+            .await?;
+        let before_stop = stopped_plan_writer
+            .load(operation)
+            .await?
+            .ok_or(JournalError::Conflict)?;
+        let before_lifecycle = before_stop
+            .broker_checkpoint_v3()
+            .ok_or(JournalError::Conflict)?;
+        stopped_plan_writer
+            .stops()
+            .append_cancel(CancelInputV1::new(operation, Uuid::new_v4())?)
+            .await
+            .map_err(|failure| failure.error())?;
+        let after_stop = stopped_plan_writer
+            .load(operation)
+            .await?
+            .ok_or(JournalError::Conflict)?;
+        let after_stop_lifecycle = after_stop
+            .broker_checkpoint_v3()
+            .ok_or(JournalError::Conflict)?;
+        let stopped_named = after_stop
+            .broker_checkpoint_v2()
+            .and_then(|checkpoint| checkpoint.supervision().legacy_named_admission())
+            .ok_or(JournalError::Conflict)?
+            .clone()
+            .with_import_verification_plan(verification_helper_id)?;
+        let forged_supervision = after_stop_lifecycle
+            .broker()
+            .supervision()
+            .clone()
+            .with_legacy_named_admission(stopped_named)?;
+        let forged_broker = BrokerCheckpointV2::new(
+            after_stop_lifecycle.broker().runner().clone(),
+            forged_supervision,
+        )?;
+        let forged_after_stop =
+            BrokerCheckpointV3::new(forged_broker, after_stop_lifecycle.commands().to_vec())?;
+        assert!(
+            forged_after_stop
+                .validate_transition(
+                    Some(before_lifecycle),
+                    Some(before_lifecycle.broker()),
+                    before_stop.checkpoint(),
+                    None,
+                )
+                .is_err()
+        );
+        drop(stopped_plan_writer);
 
         let writer = start_admitted_writer("import-creation").await?;
         let before_creation = writer.load(operation).await?.unwrap();
