@@ -1530,9 +1530,9 @@ mod tests {
                 writer.record_legacy_named_import_arm(&plan, &digest, arm.clone()),
                 writer.record_legacy_named_import_arm(&plan, &digest, arm.clone()),
             );
-            let submitted = match (first, second) {
+            let recorded = match (first, second) {
                 (Ok(recorded), Err(JournalError::Conflict))
-                | (Err(JournalError::Conflict), Ok(recorded)) => recorded.into_request(),
+                | (Err(JournalError::Conflict), Ok(recorded)) => recorded,
                 _ => panic!("only one exact import Arm write may issue a ticket"),
             };
             let next = BrokerCheckpointV3::new(
@@ -1552,6 +1552,8 @@ mod tests {
             ));
 
             let pending_arm = writer.load(operation).await?.unwrap();
+            assert_eq!(recorded.birth(), pending_arm.head());
+            let submitted = recorded.request().clone();
             if record_claim {
                 assert!(matches!(
                     writer

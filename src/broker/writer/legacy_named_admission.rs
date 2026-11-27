@@ -11,7 +11,7 @@ use crate::{
             DecisionAnswerV1, LegacyNamedAdmissionCheckpoint, SupervisionCheckpointV1,
             SupervisionOperationV1,
         },
-        journal::{AcceptedJobV1, canonical},
+        journal::{AcceptedJobV1, RevisionRefV1, canonical},
         lifecycle::LocalCommandRequestV1,
     },
     control::{
@@ -58,11 +58,18 @@ impl RecordedLegacyNamedImportCreation {
     dead_code,
     reason = "the named import transport is composed separately"
 )]
-pub(in crate::broker) struct RecordedLegacyNamedImportArm(LegacyNamedImportArmRequestV1);
+pub(in crate::broker) struct RecordedLegacyNamedImportArm {
+    request: LegacyNamedImportArmRequestV1,
+    birth: RevisionRefV1,
+}
 
 impl RecordedLegacyNamedImportArm {
-    pub(in crate::broker) fn into_request(self) -> LegacyNamedImportArmRequestV1 {
-        self.0
+    pub(in crate::broker) fn request(&self) -> &LegacyNamedImportArmRequestV1 {
+        &self.request
+    }
+
+    pub(in crate::broker) fn birth(&self) -> &RevisionRefV1 {
+        &self.birth
     }
 }
 
@@ -370,7 +377,10 @@ impl WriterClient {
             {
                 return Err(JournalError::Conflict);
             }
-            Ok(RecordedLegacyNamedImportArm(confirmed_request))
+            Ok(RecordedLegacyNamedImportArm {
+                request: confirmed_request,
+                birth: receipt.head().clone(),
+            })
         }
         .await
         .map_err(NamedImportArmWriteFailure::ReloadAfterPublication)

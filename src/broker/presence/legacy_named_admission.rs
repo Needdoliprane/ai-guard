@@ -9,10 +9,10 @@ use crate::{
             EnforcerClient, EnforcerError, ExecutionEnforcerV1, LegacyNamedProspectiveFailure,
             ProspectiveArmExchange, ProspectiveRegistrationV1,
         },
-        journal::{CancelStopProjectionV1, JournalError, JournalScopeV1, canonical},
+        journal::{CancelStopProjectionV1, JournalError, JournalScopeV1, RevisionRefV1, canonical},
         lifecycle::LocalCommandRequestV1,
         presence::http::{Client, Limits},
-        writer::NamedImportArmWriteFailure,
+        writer::{NamedImportArmWriteFailure, RecordedLegacyNamedImportArm as ImportArmWrite},
     },
     control::{AdmissionRefusalV1, MutationResultV1, RuntimeKindV1, WorkerV1, session_control::*},
 };
@@ -55,7 +55,7 @@ pub(crate) struct RecordedLegacyNamedImportArm<'enforcer> {
     enforcer: &'enforcer EnforcerClient,
     writer: WriterClient,
     operation: Uuid,
-    request: LegacyNamedImportArmRequestV1,
+    write: ImportArmWrite,
     target: ProspectiveRegistrationV1,
     cancel: CancelGeneration,
     expected: u64,
@@ -303,7 +303,7 @@ pub(super) async fn record_import_arm<'enforcer>(
         return Err(PresenceError::Forbidden);
     }
     let operation = plan.operation_id;
-    let retained = open_named_import(writer, operation, &target).await?;
+    let (retained, _) = open_named_import(writer, operation, &target).await?;
     let owned = retained
         .import_creation()
         .and_then(|creation| creation.owned())
@@ -349,7 +349,7 @@ pub(super) async fn record_import_arm<'enforcer>(
         enforcer,
         writer: writer.clone(),
         operation,
-        request: recorded.into_request(),
+        write: recorded,
         target,
         cancel: cancel.clone(),
         expected,
@@ -365,7 +365,7 @@ pub(super) async fn arm_import(
         enforcer,
         writer,
         operation,
-        request,
+        write,
         target,
         cancel,
         expected,
@@ -376,7 +376,7 @@ pub(super) async fn arm_import(
     require_arm_generation(&cancel, expected)?;
     let client = Client::new(presence)?;
     checked_identity(&client, presence).await?;
-    require_pending_import_arm(&writer, operation, &request, &target).await?;
+    require_pending_import_arm(&writer, operation, &write, &target).await?;
     enforcer
         .legacy_require_new_prearm_identity()
         .map_err(prospective_error)?;
@@ -393,12 +393,17 @@ pub(super) async fn arm_import(
     if !exchange.permits_original() {
         return Err(PresenceError::Conflict);
     }
-    require_pending_import_arm(&writer, operation, &request, &target).await?;
-    let result = send_import_arm(&client, presence, &request, Some((&cancel, expected)))
-        .await?
-        .ok_or(PresenceError::AdmissionOutcomeUnknown)?;
+    require_pending_import_arm(&writer, operation, &write, &target).await?;
+    let result = send_import_arm(
+        &client,
+        presence,
+        write.request(),
+        Some((&cancel, expected)),
+    )
+    .await?
+    .ok_or(PresenceError::AdmissionOutcomeUnknown)?;
     writer
-        .acknowledge_legacy_named_import_arm(operation, &request, result.clone())
+        .acknowledge_legacy_named_import_arm(operation, write.request(), result.clone())
         .await
         .map_err(|_| PresenceError::AdmissionOutcomeUnknown)?;
     // Keep the exact reply even if STOP won during transport. STOP notification
@@ -416,7 +421,7 @@ async fn open_named_import(
     writer: &WriterClient,
     operation: Uuid,
     target: &ProspectiveRegistrationV1,
-) -> Result<LegacyNamedAdmissionCheckpoint> {
+) -> Result<(LegacyNamedAdmissionCheckpoint, RevisionRefV1)> {
     let job = writer
         .load(operation)
         .await
@@ -440,23 +445,28 @@ async fn open_named_import(
     retained
         .require_import_creation_binding(target.authority())
         .map_err(import_arm_journal_error)?;
-    Ok(retained)
+    Ok((retained, job.head().clone()))
 }
 
 async fn require_pending_import_arm(
     writer: &WriterClient,
     operation: Uuid,
-    request: &LegacyNamedImportArmRequestV1,
+    write: &ImportArmWrite,
     target: &ProspectiveRegistrationV1,
 ) -> Result<()> {
-    let retained = open_named_import(writer, operation, target).await?;
+    let (retained, head) = open_named_import(writer, operation, target).await?;
     let arm = retained.import_arm().ok_or(PresenceError::Conflict)?;
     let exact = retained
         .import_arm_request()
         .ok_or(PresenceError::Conflict)?;
-    if arm.receipt().is_some()
+    // The Writer verified this exact birth under the live job's append-only
+    // journal lease. A later head must still carry the same pending Arm.
+    let birth = write.birth();
+    if head.revision() < birth.revision()
+        || (head.revision() == birth.revision() && &head != birth)
+        || arm.receipt().is_some()
         || canonical(&exact).map_err(import_arm_journal_error)?
-            != canonical(request).map_err(import_arm_journal_error)?
+            != canonical(write.request()).map_err(import_arm_journal_error)?
     {
         return Err(PresenceError::Conflict);
     }

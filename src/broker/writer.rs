@@ -48,7 +48,9 @@ mod legacy_named_admission;
     unused_imports,
     reason = "the named Presence caller is composed separately"
 )]
-pub(in crate::broker) use legacy_named_admission::NamedImportArmWriteFailure;
+pub(in crate::broker) use legacy_named_admission::{
+    NamedImportArmWriteFailure, RecordedLegacyNamedImportArm,
+};
 mod queue;
 mod retirement_owners;
 mod status_cache;
