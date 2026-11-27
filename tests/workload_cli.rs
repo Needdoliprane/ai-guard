@@ -257,9 +257,19 @@ impl Drop for Gateway {
 }
 
 impl Gateway {
+    fn migrated_tenants(root: &Path) -> (Arc<Store>, Arc<Store>) {
+        (
+            migrated_store(&root.join("tenant-a.sqlite"), "tenant-a"),
+            migrated_store(&root.join("tenant-b.sqlite"), "tenant-b"),
+        )
+    }
+
     async fn new(root: &Path, operation: PathBuf) -> Self {
-        let store = migrated_store(&root.join("tenant-a.sqlite"), "tenant-a");
-        let neighbor = migrated_store(&root.join("tenant-b.sqlite"), "tenant-b");
+        let (store, neighbor) = Self::migrated_tenants(root);
+        Self::serve(store, neighbor, operation).await
+    }
+
+    async fn serve(store: Arc<Store>, neighbor: Arc<Store>, operation: PathBuf) -> Self {
         let namespace = store
             .supervision_state()
             .unwrap()
@@ -1497,11 +1507,14 @@ async fn worker_binding_cli_authenticates_only_its_authorized_software_attempt()
     let directory = support::private_tempdir();
     let root = directory.path();
     let operation = root.join("worker-a");
-    let gateway = Gateway::new(root, operation.clone()).await;
+    let (store, neighbor) = Gateway::migrated_tenants(root);
     // Real typed Store gates and SQLite projections; runtime observations in
     // these helpers are declared software fixtures, never container evidence.
-    let a = running_worker(&gateway.store);
-    let b = running_worker(&gateway.neighbor);
+    let a = running_worker(&store);
+    let b = running_worker(&neighbor);
+    // Gateway startup opens and verifies the connections with its masking policy.
+    // Issuance only consults the neighbor's already-verified snapshot.
+    let gateway = Gateway::serve(store, neighbor, operation.clone()).await;
     let control = gateway.control_file(root, "control", RUNNER, "tenant-a");
     let manifest = |worker: &WorkerV1| {
         json!({
