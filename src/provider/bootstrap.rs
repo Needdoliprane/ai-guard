@@ -788,8 +788,9 @@ impl BootstrapExecution {
                 .all(|name| !self.environment.contains_key(name)),
             "invalid provider bootstrap request: environment collision"
         );
-        self.probe().await?;
+        let facts = self.probe().await?;
         self.login().await?;
+        self.apply_probe_facts(facts);
         self.home.revalidate()?;
         self.state.revalidate()?;
         let mut command = tokio::process::Command::new(self.program);
@@ -1294,6 +1295,117 @@ mod tests {
         let mut expected = arguments.clone();
         expected.insert(5, "--forward-subagent-text".into());
         assert_eq!(execution.arguments(), expected.as_slice());
+    }
+
+    #[tokio::test]
+    async fn spawn_child_applies_optional_claude_batch_probe_flags() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = private_dir(0o700);
+        let home = Directory::open_existing(&temp.path().canonicalize().unwrap()).unwrap();
+        let state = home.child("state").unwrap();
+        let program = home.path().join("provider-fixture");
+        std::fs::write(
+            &program,
+            r#"#!/bin/sh
+case "$*" in
+    --version) printf '%s\n' "$AI_GUARD_FIXTURE_VERSION" ;;
+    --help|'exec --help') printf '%s\n' "$AI_GUARD_FIXTURE_HELP" ;;
+    *) printf '%s\n' "$@" ;;
+esac
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+        // BootstrapExecution's executable path has a static lifetime.
+        let program: &'static str = Box::leak(
+            program
+                .into_os_string()
+                .into_string()
+                .unwrap()
+                .into_boxed_str(),
+        );
+        let help = concat!(
+            "  --setting-sources <sources>\n",
+            "  --print\n",
+            "  --output-format <format>\n",
+            "  --verbose\n",
+            "  --no-session-persistence\n",
+            "  --permission-mode <mode>\n",
+            "  --json\n",
+            "  --sandbox\n",
+            "  --skip-git-repo-check\n",
+            "  --ephemeral\n",
+            "  --config\n",
+        );
+        let advertised_help = format!("{help}  {FORWARD_SUBAGENT_TEXT}\n");
+        let arguments = [
+            "--model",
+            "fixture-model",
+            "--",
+            "--forward-subagent-text is data",
+        ]
+        .map(str::to_owned)
+        .to_vec();
+
+        for (client, transport, advertised, forwarded) in [
+            (ClientKind::ClaudeCode, ClientTransport::Batch, true, true),
+            (ClientKind::ClaudeCode, ClientTransport::Batch, false, false),
+            (ClientKind::Codex, ClientTransport::Batch, true, false),
+            (
+                ClientKind::ClaudeCode,
+                ClientTransport::InteractiveTty,
+                true,
+                false,
+            ),
+        ] {
+            let version = match client {
+                ClientKind::ClaudeCode => "2.1.140 (Claude Code)",
+                ClientKind::Codex => "codex-cli 0.170.0",
+            };
+            let execution = BootstrapExecution {
+                program,
+                arguments: arguments.clone(),
+                options_end: 0,
+                environment: BTreeMap::from([
+                    ("AI_GUARD_FIXTURE_VERSION".into(), version.into()),
+                    (
+                        "AI_GUARD_FIXTURE_HELP".into(),
+                        if advertised {
+                            advertised_help.as_str()
+                        } else {
+                            help
+                        }
+                        .into(),
+                    ),
+                ]),
+                api_login: None,
+                home: home.clone(),
+                state: state.clone(),
+                transport,
+                client,
+            };
+            let child = execution
+                .spawn_child(home.path(), &BTreeMap::new())
+                .await
+                .unwrap();
+            let output = tokio::time::timeout(Duration::from_secs(2), child.wait_with_output())
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(output.status.success());
+            assert!(output.stderr.is_empty());
+            let stdout = std::str::from_utf8(&output.stdout).unwrap();
+            let mut expected = arguments.clone();
+            if forwarded {
+                expected.insert(0, FORWARD_SUBAGENT_TEXT.into());
+            }
+            assert_eq!(
+                stdout,
+                format!("{}\n", expected.join("\n")),
+                "{client:?} {transport:?}"
+            );
+        }
     }
 
     #[tokio::test]
