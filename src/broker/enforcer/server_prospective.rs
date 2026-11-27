@@ -58,6 +58,7 @@ struct PendingState {
 pub(super) struct ProspectiveActor {
     prospective: ProspectiveRegistrationV1,
     reservation: ProspectiveReservationV1,
+    rail: LegacyProspectiveRailV1,
     key: ActorKey,
     state: Mutex<PendingState>,
     wake: Condvar,
@@ -119,6 +120,12 @@ impl ProspectiveActor {
         if reservation.reservation_nonce != self.reservation.reservation_nonce
             || reservation.admission_generation != self.reservation.admission_generation
         {
+            return Err(EnforcerError::Conflict);
+        }
+        Ok(())
+    }
+    fn require_rail(&self, rail: LegacyProspectiveRailV1) -> EnforcerResult<()> {
+        if self.rail != rail {
             return Err(EnforcerError::Conflict);
         }
         Ok(())
@@ -322,20 +329,43 @@ impl State {
         }
         Ok(())
     }
-    pub(super) fn begin_recovery(&self) -> EnforcerResult<u64> {
-        // Restrictive intent precedes the lock: every post-Ready recheck sees
-        // it even if the transport waiter disappears before the native commit.
-        self.recovery_requested.store(true, Ordering::SeqCst);
+    pub(super) fn begin_recovery_for_historical(
+        &self,
+        arm_id: Option<&str>,
+    ) -> EnforcerResult<u64> {
+        // Global intent blocks post-Ready rechecks while waiting for admission.
+        // A targeted Register must first prove it can address the prospect.
+        if arm_id.is_none() {
+            self.recovery_requested.store(true, Ordering::SeqCst);
+        }
         let mut admission = self
             .admission
             .lock()
             .map_err(|_| EnforcerError::Unhealthy)?;
+        if let Some(arm_id) = arm_id {
+            self.require_historical_prospective(arm_id)?;
+            self.recovery_requested.store(true, Ordering::SeqCst);
+        }
         admission.generation = admission.generation.max(1);
+        // Bind retains both maps under admission. The prospective entry keeps
+        // provenance for the bound slot and survives for the native lifetime.
+        let named_arms = self
+            .prospective
+            .lock()
+            .map_err(|_| EnforcerError::Unhealthy)?
+            .iter()
+            .filter(|(_, actor)| matches!(actor.rail, LegacyProspectiveRailV1::Named(_)))
+            .map(|(arm_id, _)| arm_id.clone())
+            .collect::<BTreeSet<_>>();
+        if !named_arms.is_empty() {
+            self.recovery_incomplete.store(true, Ordering::SeqCst);
+        }
         for actor in self
             .slots
             .lock()
             .map_err(|_| EnforcerError::Unhealthy)?
             .values()
+            .filter(|actor| !named_arms.contains(actor.registration.arm_id()))
         {
             actor.stop.store(true, Ordering::SeqCst);
             actor
@@ -349,15 +379,28 @@ impl State {
             .lock()
             .map_err(|_| EnforcerError::Unhealthy)?
             .values()
+            .filter(|actor| actor.rail == LegacyProspectiveRailV1::Historical)
         {
             actor.reserve_stop()?;
         }
-        // The ACK commits the entire retained cohort, never only a flag.
+        // A recovery ACK commits STOP intent for the historical cohort.
         Ok(admission.generation)
+    }
+    /// Call with admission held before a historical slot operation.
+    pub(super) fn require_historical_prospective(&self, arm_id: &str) -> EnforcerResult<()> {
+        let prospective = self
+            .prospective
+            .lock()
+            .map_err(|_| EnforcerError::Unhealthy)?;
+        if let Some(actor) = prospective.get(arm_id) {
+            actor.require_rail(LegacyProspectiveRailV1::Historical)?;
+        }
+        Ok(())
     }
     fn pending(
         &self,
         reservation: &ProspectiveReservationV1,
+        rail: LegacyProspectiveRailV1,
     ) -> EnforcerResult<Arc<ProspectiveActor>> {
         let actor = self
             .prospective
@@ -366,6 +409,7 @@ impl State {
             .get(&reservation.arm_id)
             .cloned()
             .ok_or(EnforcerError::Conflict)?;
+        actor.require_rail(rail)?;
         actor.validate_reservation(reservation, self.epoch)?;
         Ok(actor)
     }
@@ -378,7 +422,7 @@ impl State {
             .admission
             .lock()
             .map_err(|_| EnforcerError::Unhealthy)?;
-        let actor = self.pending(reservation)?;
+        let actor = self.pending(reservation, LegacyProspectiveRailV1::Historical)?;
         if generation < actor.reservation.cancel_generation {
             return Err(EnforcerError::Conflict);
         }
@@ -396,13 +440,20 @@ impl State {
         prospective: ProspectiveRegistrationV1,
         generation: u64,
         replay_only: bool,
+        rail: LegacyProspectiveRailV1,
     ) -> Result<ProspectiveReservationV1, LegacyReservationRefusalV1> {
         prospective.validate()?;
+        if let LegacyProspectiveRailV1::Named(custody_nonce) = rail {
+            if custody_nonce.is_nil() || replay_only {
+                return Err(EnforcerError::InvalidInput.into());
+            }
+            prospective.validate_named_import()?;
+        }
         if generation == u64::MAX && !replay_only {
             return Err(EnforcerError::InvalidInput.into());
         }
         let digest = prospective.digest()?;
-        let actor = {
+        let (actor, install) = {
             let mut admission = self
                 .admission
                 .lock()
@@ -412,6 +463,7 @@ impl State {
                 .lock()
                 .map_err(|_| EnforcerError::Unhealthy)?;
             if let Some(actor) = pending.get(prospective.arm_id()) {
+                actor.require_rail(rail)?;
                 actor.reservation.validate_for(
                     &prospective,
                     self.epoch,
@@ -434,7 +486,8 @@ impl State {
                 } else {
                     self.check_original(&admission)?;
                 }
-                Arc::clone(actor)
+                let retry_install = !replay_only && rail == LegacyProspectiveRailV1::Historical;
+                (Arc::clone(actor), retry_install)
             } else {
                 if replay_only {
                     return Err(EnforcerError::Conflict.into());
@@ -472,6 +525,7 @@ impl State {
                     },
                     prospective,
                     reservation,
+                    rail,
                     state: Mutex::new(PendingState {
                         bound: None,
                         stop_reserved: false,
@@ -495,13 +549,12 @@ impl State {
                     .entries
                     .insert(actor.prospective.arm_id().to_owned());
                 pending.insert(actor.prospective.arm_id().to_owned(), Arc::clone(&actor));
-                actor
+                (actor, true)
             }
         };
-        // A replay cannot manufacture the native resources that were absent
-        // on its ambiguous first admission. It can only rediscover a retained
-        // cell; a fresh retry may still retry a positively failed spawn.
-        if !replay_only {
+        // Only the first named reservation can install its native owner.
+        // Historical original requests can also retry a failed spawn.
+        if install {
             #[cfg(test)]
             self.reserve_probe.hold_before_start().await?;
             actor.start(Arc::clone(&self.clock))?;
@@ -564,13 +617,17 @@ impl State {
         &self,
         reservation: &ProspectiveReservationV1,
         generation: u64,
+        rail: LegacyProspectiveRailV1,
     ) -> EnforcerResult<Option<Uuid>> {
         let admission = self
             .admission
             .lock()
             .map_err(|_| EnforcerError::Unhealthy)?;
-        let actor = self.pending(reservation)?;
-        if generation < actor.reservation.cancel_generation {
+        let actor = self.pending(reservation, rail)?;
+        if generation < actor.reservation.cancel_generation
+            || (rail != LegacyProspectiveRailV1::Historical
+                && generation != actor.reservation.cancel_generation)
+        {
             return Err(EnforcerError::Conflict);
         }
         let mut value = actor.state.lock().map_err(|_| EnforcerError::Unhealthy)?;
@@ -601,7 +658,13 @@ impl State {
         generation: u64,
         observe_only: bool,
         original_exchange_nonce: Option<Uuid>,
+        rail: LegacyProspectiveRailV1,
     ) -> EnforcerResult<Response> {
+        if rail != LegacyProspectiveRailV1::Historical
+            && (observe_only || original_exchange_nonce.is_none())
+        {
+            return Err(EnforcerError::Unauthorized);
+        }
         let digest = registration.digest()?;
         let (actor, replayed) = {
             let admission = self
@@ -614,7 +677,7 @@ impl State {
             if self.closing.load(Ordering::SeqCst) || self.owners.failed() {
                 return Err(EnforcerError::Unhealthy);
             }
-            let pending = self.pending(&reservation)?;
+            let pending = self.pending(&reservation, rail)?;
             pending.prospective.matches_registration(&registration)?;
             if generation < pending.reservation.cancel_generation
                 || (!observe_only && generation != pending.reservation.cancel_generation)
@@ -625,8 +688,9 @@ impl State {
                 return Err(EnforcerError::NotReady);
             }
             let mut value = pending.state.lock().map_err(|_| EnforcerError::Unhealthy)?;
-            value.current_generation = value.current_generation.max(generation);
-            if !observe_only {
+            if observe_only {
+                value.current_generation = value.current_generation.max(generation);
+            } else {
                 if value.stop_reserved {
                     return Err(EnforcerError::NotReady);
                 }
@@ -742,16 +806,26 @@ impl State {
         registration: RegistrationV1,
         generation: u64,
     ) -> EnforcerResult<Response> {
-        let reservation = self
-            .prospective
-            .lock()
-            .map_err(|_| EnforcerError::Unhealthy)?
-            .get(registration.arm_id())
-            .ok_or(EnforcerError::Conflict)?
-            .reservation
-            .clone();
-        self.bind_prospective(reservation, registration, generation, true, None)
-            .await
+        let reservation = {
+            let prospective = self
+                .prospective
+                .lock()
+                .map_err(|_| EnforcerError::Unhealthy)?;
+            let actor = prospective
+                .get(registration.arm_id())
+                .ok_or(EnforcerError::Conflict)?;
+            actor.require_rail(LegacyProspectiveRailV1::Historical)?;
+            actor.reservation.clone()
+        };
+        self.bind_prospective(
+            reservation,
+            registration,
+            generation,
+            true,
+            None,
+            LegacyProspectiveRailV1::Historical,
+        )
+        .await
     }
 }
 
