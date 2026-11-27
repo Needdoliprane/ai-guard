@@ -1574,7 +1574,8 @@ async fn retains_confirmed_intent_that_policy_refuses(cwd: &str, executable: &st
         .permissions(std::fs::Permissions::from_mode(0o700))
         .tempdir()
         .unwrap();
-    let wrong = open(&Directory::open_existing(wrong_dir.path()).unwrap()).unwrap();
+    let wrong_root = wrong_dir.path().canonicalize().unwrap();
+    let wrong = open(&Directory::open_existing(&wrong_root).unwrap()).unwrap();
     let ReserveResult::New(wrong_ticket) = wrong
         .reserve_with_mode(
             operation,
