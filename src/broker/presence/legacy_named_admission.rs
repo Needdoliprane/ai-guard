@@ -8,7 +8,8 @@ use crate::{
         clock::{HostClock, NativeHostClock},
         enforcer::{
             EnforcerClient, EnforcerError, ExecutionEnforcerV1, LegacyNamedProspectiveFailure,
-            NamedImportArmBirthV1, ProspectiveArmExchange, ProspectiveRegistrationV1, RegistrationV1,
+            NamedImportArmBirthV1, ProspectiveArmExchange, ProspectiveRegistrationV1,
+            RegistrationV1,
         },
         journal::{CancelStopProjectionV1, JournalError, JournalScopeV1, RevisionRefV1, canonical},
         lifecycle::LocalCommandRequestV1,
