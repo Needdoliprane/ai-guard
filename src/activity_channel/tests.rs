@@ -8,6 +8,13 @@ use super::{
     wire::*,
 };
 use crate::control_fs::Directory;
+use crate::{
+    provider_activity::{
+        ActivityClient, ActivityCollector, ActivityContext, ActivityLimits, ActivitySpool, HookAck,
+        HookFrame, HookTransport, pump_hooks,
+    },
+    redaction::Redactor,
+};
 use serde_json::json;
 use std::{
     ffi::OsString,
@@ -979,6 +986,116 @@ async fn a_recorded_gate_process_exits_zero_without_any_output() {
     assert!(result.stdout_after_start.is_empty());
     drop(broker);
     assert_eq!(join(task).await, Ok(()));
+}
+
+/// The parent-side adapter used by the real activity pump in the SessionStart
+/// fixture. It preserves the helper's sequence and payload and routes the
+/// pump's recorded/refused decision back over the real helper socket.
+struct PumpBroker {
+    broker: Broker,
+}
+
+impl HookTransport for PumpBroker {
+    async fn next(&mut self) -> anyhow::Result<Option<HookFrame>> {
+        match self.broker.next().await {
+            Some(HelperFrameV1::Hook(hook)) => {
+                anyhow::ensure!(hook.seq == 1, "expected the first helper sequence");
+                anyhow::ensure!(
+                    hook.submit.client == ClientV1::ClaudeCode
+                        && hook.submit.event == EventV1::SessionStart
+                        && !hook.submit.gate
+                        && !hook.submit.stdin_truncated
+                        && !hook.submit.payload_invalid_utf8,
+                    "expected a complete Claude SessionStart"
+                );
+                Ok(Some(HookFrame::Hook {
+                    seq: hook.seq,
+                    event: hook.submit.event,
+                    payload: hook.submit.payload,
+                    truncated: hook.submit.stdin_truncated || hook.submit.payload_invalid_utf8,
+                }))
+            }
+            None => Ok(None),
+            other => anyhow::bail!("expected one Claude hook frame, got {other:?}"),
+        }
+    }
+
+    async fn ack(&mut self, seq: u64, ack: HookAck) -> anyhow::Result<()> {
+        let status = match ack {
+            HookAck::Recorded => StatusV1::Recorded,
+            HookAck::Refused => StatusV1::Refused,
+        };
+        self.broker.ack(seq, status).await;
+        // This fixture has exactly one SessionStart. Close the broker-to-
+        // helper control half after its ACK so the helper exits and `next`
+        // observes EOF instead of waiting for another provider hook.
+        self.broker.output.take();
+        Ok(())
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn claude_session_start_is_spooled_and_acked_by_the_parent_pump() {
+    let (_temporary, root) = fixture_root();
+    let (_spool_temporary, spool_root) = fixture_root();
+    let (mut broker, helper) = Broker::start(root.clone());
+    broker.ready().await;
+
+    let hook_root = root.path().to_owned();
+    let hook_process = tokio::spawn(async move {
+        hook_process(
+            &hook_root,
+            "claude-code SessionStart",
+            br#"{"hook_event_name":"SessionStart","session_id":"fixture-session","source":"startup","model":"fixture-model"}"#,
+        )
+        .await
+    });
+
+    let session = uuid::Uuid::new_v4();
+    let collector = ActivityCollector::new(
+        ActivitySpool::create(&spool_root, session).unwrap(),
+        ActivityContext {
+            session,
+            session_id: Some("fixture-session".into()),
+            project_id: Some("fixture-project".into()),
+            sandbox_id: Some("fixture-sandbox".into()),
+            agent_id: Some("fixture-agent".into()),
+            correlation_id: None,
+            trace_id: None,
+            worker_id: Some("fixture-worker".into()),
+            attempt_id: Some("fixture-attempt".into()),
+            client: ActivityClient::ClaudeCode,
+            interactive: true,
+            client_version_label: Some("fixture".into()),
+        },
+        Redactor::new(Vec::new()),
+        ActivityLimits::default(),
+    )
+    .unwrap();
+    let transport = PumpBroker { broker };
+
+    let outcome = pump_hooks(collector.clone(), transport).await;
+    assert_eq!(outcome.hooks, 1);
+    assert_eq!(outcome.recorded, 1);
+    assert_eq!(outcome.refused, 0);
+    assert!(!outcome.transport_error);
+    let result = hook_process.await.unwrap();
+    assert_eq!(result.code, Some(EXIT_CONTINUE));
+    assert!(result.stderr.is_empty());
+    assert!(result.stdout_after_start.is_empty());
+    assert!(!root.path().join(LOSS_DIRECTORY).exists());
+    let summary = collector.summary().unwrap();
+    assert_eq!(summary.hook.records, 1);
+    assert_eq!(summary.hook.mapped, 1);
+    assert!(
+        summary.spooled_events > 0,
+        "SessionStart must be durably spooled before ACK"
+    );
+
+    // Dropping the transport closes the broker side; the helper must then
+    // finish cleanly after the hook client received the pump's ACK.
+    drop(collector);
+    assert_eq!(join(helper).await, Ok(()));
 }
 
 /// Internal child of the process tests above; not a provider qualification.
