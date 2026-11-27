@@ -464,6 +464,12 @@ impl Store {
             quota,
         )?;
         let accepted = worker_record.worker.is_some();
+        if accepted {
+            // A retained policy result cannot reserve a worker for an
+            // invocation that the runtime cannot represent.
+            crate::runtime::validate_command(&resolved.launch.command.argv)
+                .map_err(|_| ControlFailure::InvalidRequest)?;
+        }
         let record = admission_codec::Record::new(input, Some(worker_record));
         let admission = self.persist_supervision_record(&tx, &record)?;
         let result = admission_codec::result(&admission, &record, false)?;

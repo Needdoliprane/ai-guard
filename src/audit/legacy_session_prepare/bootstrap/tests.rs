@@ -1943,6 +1943,34 @@ fn legacy_named_admission_retains_policy_and_quota_refusals_without_a_grant() {
 }
 
 #[test]
+fn legacy_named_admission_rejects_an_unsupported_runtime_command_before_reserving() {
+    let mut fixture = Fixture::new();
+    fixture.target.target.launch.command.argv = vec![r"fixture\program".into()];
+    let (store, _) = fixture.provision(fixture.create().unwrap()).unwrap();
+    let (request, _) = fixture.confirmed_request(&store);
+    let Some(AuthenticatedWorkload::Broker(broker)) =
+        store.authenticate_workload_token(BROKER_TOKEN).unwrap()
+    else {
+        panic!("fixture broker identity");
+    };
+    let policy = Policy::default();
+    let quota = QuotaPolicyV1::default();
+    let decision = policy::evaluate(&policy, &request.admission.admission.decision_request);
+    assert_eq!(decision.outcome, Outcome::Allow);
+    let before = store.integrity().unwrap();
+    let refusal = store
+        .admit_legacy_named(&broker, &request, &policy, decision, Value::Null, &quota)
+        .err()
+        .expect("unsupported invocation must be refused before reservation");
+    assert!(matches!(
+        refusal.downcast_ref::<ControlFailure>(),
+        Some(ControlFailure::InvalidRequest)
+    ));
+    assert_eq!(store.integrity().unwrap().head_hash, before.head_hash);
+    assert_eq!(store.worker_quota(&quota).unwrap().held_workers, 0);
+}
+
+#[test]
 fn legacy_named_admission_rolls_back_worker_and_grant_when_link_exceeds_audit_capacity() {
     let f = Fixture::new();
     let (store, _) = f.provision(f.create().unwrap()).unwrap();
