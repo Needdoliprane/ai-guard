@@ -259,13 +259,14 @@ pub(super) fn validate_fact(db: &Connection, stored: &StoredEvent) -> anyhow::Re
         broker_profile_id: fact.broker_profile_id.clone(),
         admission: supervised.clone(),
     };
-    request.require_plan(&confirmed_plan(
+    let (plan, _) = confirmed_plan(
         fact.binding_ref,
         &confirmation,
         &prepared,
         target,
         authority.expires_at,
-    )?)?;
+    )?;
+    request.require_plan(&plan)?;
     conflict(
         request.input_hash()? == fact.input_hash
             && supervised.admission.receipt.phase == DecisionPhaseV1::Initial,
