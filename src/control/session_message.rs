@@ -2,6 +2,7 @@
 //! documented Codex app-server JSON-RPC stdio protocol (`turn/start` request,
 //! typed response carrying the turn id, correlated `turn/completed`
 //! notification). See `docs/engineering/evidence/2026-11-25/provider-conversation.fr.md`.
+//! The [claude] module correlates Claude Code stream-json on its own wire format.
 //!
 //! This module is the correlation and framing layer only. It never opens a
 //! network socket, never enables Bridge, never loosens a preset and never falls
@@ -27,6 +28,8 @@ use std::{
     os::fd::AsRawFd,
     time::{Duration, Instant},
 };
+
+pub mod claude;
 
 /// Upper bound of one framed conversation line (request or response). A frame
 /// beyond this bound is refused, never partially written or read.
