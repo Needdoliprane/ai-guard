@@ -14,7 +14,7 @@ use agentsandbox::{
     },
     control::{HostClockSampleV1, WorkerStateV1},
     relay::{
-        RelayAckV1, RelaySendV1,
+        RelayAckV1, RelayEndpointV1, RelaySendV1,
         admission::{RelayChannelResultV1, RelayChannelStateV1},
         channel::{
             CloseReasonV1, ErrorCodeV1, InboxRequestV1, ReplyV1, RequestPayloadV1, ResponseResultV1,
@@ -613,9 +613,110 @@ async fn software_broker_missing_receipt_expires_under_original_arm_without_exec
     with_fixture(12, missing_receipt_expiry).await
 }
 
+async fn report_missing_receipt_wait_failure(
+    fixture: &Fixture,
+    job: Uuid,
+    endpoint: Option<&RelayEndpointV1>,
+    phase: &'static str,
+    error: &anyhow::Error,
+) {
+    let category = if error.is::<tokio::time::error::Elapsed>() {
+        "timeout"
+    } else {
+        "error"
+    };
+    println!("phase={phase} category={category}");
+
+    // Snapshot the same authenticated projections once after the wait fails.
+    // These observations cannot make the exercise pass or delay its deadline.
+    let probe = |command| {
+        timeout(
+            Duration::from_millis(500),
+            service::request(&fixture.broker_root, "a", A_RUNNER, command),
+        )
+    };
+    let (relay, status) = tokio::join!(
+        probe(BrokerCommandV1::RelayStatus { operation_id: job }),
+        probe(BrokerCommandV1::Status { operation_id: job }),
+    );
+    let mut observed_endpoint = None;
+    for (view, reply) in [("relay_status", relay), ("job_status", status)] {
+        match (view, reply) {
+            ("relay_status", Ok(Ok(BrokerReplyV1::RelayStatus { status })))
+                if status.operation_id == job && status.tenant_id == "tenant-a" =>
+            {
+                println!(
+                    "phase={phase} view={view} category=observed configured={} freshness={:?} attachment_phase={:?} endpoint_present={} core_state={:?} last_error={:?} reconciliation_required={}",
+                    status.configured,
+                    status.freshness,
+                    status.phase,
+                    status.endpoint.is_some(),
+                    status.core_state,
+                    status.last_error,
+                    status.reconciliation_required,
+                );
+                observed_endpoint = status.endpoint;
+            }
+            ("job_status", Ok(Ok(BrokerReplyV1::Status { status })))
+                if status.operation_id == job =>
+            {
+                println!(
+                    "phase={phase} view={view} category=observed state={:?} head_revision={:?} pending_rpcs={:?} failure_count={} worker_state={:?} quota_held={:?} executor_running={} executor_error={:?}",
+                    status.state,
+                    status.head_revision,
+                    status.pending_rpc_count,
+                    status.failure_count,
+                    status.worker_state,
+                    status.quota_held,
+                    status.executor_task_running,
+                    status.executor_error,
+                );
+            }
+            (_, Ok(Ok(BrokerReplyV1::Error { code }))) => {
+                println!("phase={phase} view={view} category=broker_refusal refusal={code:?}");
+            }
+            (_, Ok(Ok(_))) => println!("phase={phase} view={view} category=unexpected_reply"),
+            (_, Ok(Err(_))) => println!("phase={phase} view={view} category=request_error"),
+            (_, Err(_)) => println!("phase={phase} view={view} category=probe_timeout"),
+        }
+    }
+
+    let Some(endpoint) = endpoint.or(observed_endpoint.as_ref()) else {
+        println!("phase={phase} view=worker category=endpoint_unavailable");
+        return;
+    };
+    match fixture.a.worker(&endpoint.worker_id) {
+        Ok(Some(worker))
+            if worker.admission_operation_id == job.to_string()
+                && worker.attempt.attempt_id == endpoint.attempt_id =>
+        {
+            println!(
+                "phase={phase} view=worker category=observed state={:?} quota_held={}",
+                worker.state, worker.quota_held,
+            );
+        }
+        Ok(Some(_)) => println!("phase={phase} view=worker category=identity_unconfirmed"),
+        Ok(None) => println!("phase={phase} view=worker category=absent"),
+        Err(_) => println!("phase={phase} view=worker category=read_error"),
+    }
+}
+
 async fn missing_receipt_expiry(fixture: &mut Fixture) -> Result<()> {
     let job = fixture.submit("a", 12).await?;
-    let endpoint = fixture.wait_endpoint(job).await?;
+    let endpoint = match fixture.wait_endpoint(job).await {
+        Ok(endpoint) => endpoint,
+        Err(error) => {
+            report_missing_receipt_wait_failure(
+                fixture,
+                job,
+                None,
+                "handoff_wait_endpoint",
+                &error,
+            )
+            .await;
+            return Err(error.context("phase=handoff_wait_endpoint"));
+        }
+    };
     let fact = fixture.latest_fact(job)?;
     let original: HostClockSampleV1 = serde_json::from_value(fact["original_clock"].clone())?;
     let deadline: u128 = fact["original_deadline_ns_decimal"]
@@ -633,7 +734,17 @@ async fn missing_receipt_expiry(fixture: &mut Fixture) -> Result<()> {
         before_ns < deadline,
         "fixture must reach Awaiting within its original budget"
     );
-    worker_terminal(&fixture.a, &endpoint).await?;
+    if let Err(error) = worker_terminal(&fixture.a, &endpoint).await {
+        report_missing_receipt_wait_failure(
+            fixture,
+            job,
+            Some(&endpoint),
+            "handoff_worker_terminal",
+            &error,
+        )
+        .await;
+        return Err(error.context("phase=handoff_worker_terminal"));
+    }
     let after = clock.sample()?;
     let after_ns: u128 = after.continuous_ns_decimal.parse()?;
     ensure!(
