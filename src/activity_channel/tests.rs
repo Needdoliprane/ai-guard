@@ -30,6 +30,7 @@ use tokio::{
         UnixStream,
         unix::{OwnedReadHalf, OwnedWriteHalf},
     },
+    sync::oneshot,
     task::JoinHandle,
     time::{Instant, timeout},
 };
@@ -993,10 +994,45 @@ async fn a_recorded_gate_process_exits_zero_without_any_output() {
 /// pump's recorded/refused decision back over the real helper socket.
 struct PumpBroker {
     broker: Broker,
+    root: PathBuf,
+    child: Option<JoinHandle<ProcessResult>>,
+    child_result: Option<oneshot::Sender<ChildObservation>>,
+    ack_sent: bool,
+}
+
+struct ChildObservation {
+    result: ProcessResult,
+    loss_entries: usize,
 }
 
 impl HookTransport for PumpBroker {
     async fn next(&mut self) -> anyhow::Result<Option<HookFrame>> {
+        if self.ack_sent {
+            self.ack_sent = false;
+            let child = self
+                .child
+                .take()
+                .ok_or_else(|| anyhow::anyhow!("fixture child is missing"))?;
+            let result = child
+                .await
+                .map_err(|_| anyhow::anyhow!("fixture child task failed"))?;
+            let loss_entries = std::fs::read_dir(self.root.join(LOSS_DIRECTORY))?
+                .collect::<std::io::Result<Vec<_>>>()?
+                .len();
+            self.child_result
+                .take()
+                .ok_or_else(|| anyhow::anyhow!("fixture child observer is missing"))?
+                .send(ChildObservation {
+                    result,
+                    loss_entries,
+                })
+                .map_err(|_| anyhow::anyhow!("fixture child observer was dropped"))?;
+            // Only close the helper after its ACK has reached the wrapper and
+            // the wrapper has exited. That preserves the loss marker as an
+            // independent witness if the child did not receive Recorded.
+            self.broker.output.take();
+        }
+
         match self.broker.next().await {
             Some(HelperFrameV1::Hook(hook)) => {
                 anyhow::ensure!(hook.seq == 1, "expected the first helper sequence");
@@ -1015,6 +1051,11 @@ impl HookTransport for PumpBroker {
                     truncated: hook.submit.stdin_truncated || hook.submit.payload_invalid_utf8,
                 }))
             }
+            Some(HelperFrameV1::Loss(loss)) => Ok(Some(HookFrame::Loss {
+                seq: loss.seq,
+                count: loss.count,
+                reason: format!("{:?}", loss.reason),
+            })),
             None => Ok(None),
             other => anyhow::bail!("expected one Claude hook frame, got {other:?}"),
         }
@@ -1026,11 +1067,16 @@ impl HookTransport for PumpBroker {
             HookAck::Refused => StatusV1::Refused,
         };
         self.broker.ack(seq, status).await;
-        // This fixture has exactly one SessionStart. Close the broker-to-
-        // helper control half after its ACK so the helper exits and `next`
-        // observes EOF instead of waiting for another provider hook.
-        self.broker.output.take();
+        self.ack_sent = true;
         Ok(())
+    }
+}
+
+impl Drop for PumpBroker {
+    fn drop(&mut self) {
+        if let Some(child) = self.child.take() {
+            child.abort();
+        }
     }
 }
 
@@ -1072,18 +1118,30 @@ async fn claude_session_start_is_spooled_and_acked_by_the_parent_pump() {
         ActivityLimits::default(),
     )
     .unwrap();
-    let transport = PumpBroker { broker };
+    let (child_result_tx, child_result_rx) = oneshot::channel();
+    let transport = PumpBroker {
+        broker,
+        root: root.path().to_owned(),
+        child: Some(hook_process),
+        child_result: Some(child_result_tx),
+        ack_sent: false,
+    };
 
     let outcome = pump_hooks(collector.clone(), transport).await;
     assert_eq!(outcome.hooks, 1);
     assert_eq!(outcome.recorded, 1);
     assert_eq!(outcome.refused, 0);
     assert!(!outcome.transport_error);
-    let result = hook_process.await.unwrap();
+    let child = child_result_rx.await.unwrap();
+    let result = child.result;
     assert_eq!(result.code, Some(EXIT_CONTINUE));
     assert!(result.stderr.is_empty());
     assert!(result.stdout_after_start.is_empty());
-    assert!(!root.path().join(LOSS_DIRECTORY).exists());
+    assert_eq!(
+        child.loss_entries, 0,
+        "the wrapper must receive Recorded, not lose the hook"
+    );
+    assert_eq!(outcome.declared_losses, 0);
     let summary = collector.summary().unwrap();
     assert_eq!(summary.hook.records, 1);
     assert_eq!(summary.hook.mapped, 1);
