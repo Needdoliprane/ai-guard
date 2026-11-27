@@ -1,7 +1,11 @@
 //! Historical validation of the first Legacy named Import arm.
 use super::*;
-use crate::control::{
-    ArmSubjectV1, ArmV1, HelperPermissionV1, HelperPurposeV1, WorkerStateV1, WorkerV1,
+use crate::{
+    audit::{control as control_store, worker_transition},
+    control::{
+        ArmResultV1, ArmSubjectV1, ArmV1, HelperPermissionV1, HelperPurposeV1, WorkerMutationV1,
+        WorkerStateV1, WorkerTransitionV1, WorkerV1,
+    },
 };
 
 pub(in crate::audit) const LEGACY_NAMED_ARM_KIND: &str = "control.execution.arm.legacy_named";
@@ -42,6 +46,151 @@ impl LegacyNamedArmV1 {
         crate::control::hash(&self.admission_fact_hash)?;
         self.arm.validate()?;
         crate::control::content_hash("ai-guard:legacy-named-import-arm:v1", self)
+    }
+}
+
+impl Store {
+    /// Commit the named Import Arm or reconcile its exact prior receipt.
+    /// The caller supplies the inspected Arm from the broker's retained
+    /// checkpoint. Starting the helper has its own authorization boundary.
+    #[allow(dead_code, reason = "the private named checkpoint handoff is pending")]
+    pub(crate) fn arm_legacy_named_import(
+        &self,
+        broker: &BrokerIdentityV1,
+        binding_ref: Uuid,
+        namespace: &str,
+        arm: &ArmV1,
+    ) -> anyhow::Result<ArmResultV1> {
+        crate::control::invalid(!binding_ref.is_nil())?;
+        canonical_uuid(namespace)?;
+        arm.validate()?;
+        let mut db = self
+            .db
+            .lock()
+            .map_err(|_| IdentityFailureV1::IdentityUnavailable)?;
+        let tx = self.begin_checked(&mut db)?;
+        let version = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        anyhow::ensure!(
+            format_admits(version) && capability_present(&tx)?,
+            ControlFailure::MigrationRequired
+        );
+        let clock = workload::capture_control_time(&tx)?;
+
+        if let Some((stored, record)) = supervision::load_record(&tx, &arm.operation_id)? {
+            let admission_codec::Input::LegacyNamedArm(named) = &record.input else {
+                return Err(ControlFailure::Conflict.into());
+            };
+            let actor = arm_admission(&tx, named, stored.seq)?.actor;
+            anyhow::ensure!(actor.matches_binding(broker), ControlFailure::NotFound);
+            workload::revalidate_broker_identity_checked(&tx, broker, clock.at())?;
+            conflict(
+                named.binding_ref == binding_ref
+                    && named.namespace == namespace
+                    && serde_json::to_value(&named.arm)? == serde_json::to_value(arm)?,
+            )?;
+            let receipt = supervision::arm_receipt(&named.arm, &named.namespace, &stored)?;
+            self.commit_legacy_named_control(tx, &clock, |tx, current| {
+                let retained = arm_admission(tx, named, stored.seq)?;
+                anyhow::ensure!(
+                    retained.actor.matches_binding(broker),
+                    ControlFailure::NotFound
+                );
+                Ok((
+                    None,
+                    workload::broker_identity_deadline_checked(tx, broker, current.at())?,
+                ))
+            })?;
+            return Ok(ArmResultV1 {
+                replayed: true,
+                arm: named.arm.clone(),
+                receipt,
+            });
+        }
+
+        let record =
+            self.build_legacy_named_import_arm(&tx, broker, binding_ref, namespace, arm, &clock)?;
+        let worker = record
+            .worker_record
+            .as_ref()
+            .and_then(|record| record.worker.as_ref())
+            .ok_or(ControlFailure::Conflict)?;
+        let stored = self.persist_supervision_record(&tx, &record)?;
+        self.validate_supervision_write(&tx)?;
+        let receipt = supervision::arm_receipt(arm, namespace, &stored)?;
+        self.commit_legacy_named_control(tx, &clock, |tx, current| {
+            anyhow::ensure!(tx.lease.active, ControlFailure::SupervisionInactive);
+            let (seq, hash) = audit_head(tx)?;
+            conflict(seq == stored.seq && hash == stored.hash)?;
+            let before_seq = seq.checked_add(1).context("audit sequence exhausted")?;
+            let actual = control_store::worker_at(tx, &arm.worker_id, before_seq)?
+                .ok_or(ControlFailure::NotFound)?;
+            conflict(serde_json::to_value(&actual)? == serde_json::to_value(worker)?)?;
+            let (human_deadline, broker_deadline) = self.require_legacy_named_execution(
+                tx,
+                broker,
+                binding_ref,
+                namespace,
+                worker,
+                current,
+            )?;
+            Ok((Some(human_deadline), broker_deadline))
+        })?;
+        Ok(ArmResultV1 {
+            replayed: false,
+            arm: arm.clone(),
+            receipt,
+        })
+    }
+
+    /// Build the first named Import record inside the writer's checked
+    /// transaction. The caller supplies the existing inspected Arm and
+    /// handles exact retained operation replay before entering this path.
+    /// The writer must revalidate authority at its final commit boundary.
+    fn build_legacy_named_import_arm(
+        &self,
+        tx: &CheckedTransaction<'_>,
+        broker: &BrokerIdentityV1,
+        binding_ref: Uuid,
+        namespace: &str,
+        arm: &ArmV1,
+        clock: &workload::AuthorizedControlTimeV1,
+    ) -> anyhow::Result<admission_codec::Record> {
+        anyhow::ensure!(tx.lease.active, ControlFailure::SupervisionInactive);
+        let before_seq = audit_head(tx)?
+            .0
+            .checked_add(1)
+            .context("audit sequence exhausted")?;
+        let parent = control_store::worker_at(tx, &arm.worker_id, before_seq)?
+            .ok_or(ControlFailure::NotFound)?;
+        self.require_legacy_named_execution(tx, broker, binding_ref, namespace, &parent, clock)?;
+        conflict(supervision::operation_receipt(tx, &arm.operation_id)?.is_none())?;
+        let fact = event_by_id(tx, &fact_id(binding_ref))?.ok_or(ControlFailure::NotFound)?;
+        let named = LegacyNamedArmV1 {
+            version: 1,
+            binding_ref,
+            admission_fact_seq: fact.seq,
+            admission_fact_hash: fact.hash,
+            namespace: namespace.into(),
+            session_id: parent.launch.session_id.clone(),
+            authorization_revision: identity::authorization_revision(tx)?,
+            authorized_at: clock.at(),
+            arm: arm.clone(),
+        };
+        legacy_named_arm_predecessor(tx, &named, &parent, before_seq)?;
+        let prepare = WorkerMutationV1 {
+            version: 1,
+            operation_id: arm.operation_id.clone(),
+            worker_id: parent.worker_id.clone(),
+            attempt_id: parent.attempt.attempt_id.clone(),
+            expected_revision: parent.revision,
+            transition: WorkerTransitionV1::Prepare,
+        };
+        let mutation_hash = worker_transition::validate_input(&prepare, &self.redactor)?;
+        let prepared = worker_transition::build_record(parent, &prepare, mutation_hash)?;
+        arm.validate_for_parent(prepared.worker.as_ref().ok_or(ControlFailure::Conflict)?)?;
+        let input = admission_codec::Input::LegacyNamedArm(Box::new(named));
+        admission_codec::validate_input(&input, &self.redactor)?;
+        Ok(admission_codec::Record::new(input, Some(prepared)))
     }
 }
 

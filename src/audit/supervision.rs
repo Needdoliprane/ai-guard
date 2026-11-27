@@ -186,7 +186,10 @@ fn mutation_row_for(
         rusqlite::types::Value::Integer(stored.seq),
     ])
 }
-fn load_record(db: &Connection, id: &str) -> anyhow::Result<Option<(StoredEvent, Record)>> {
+pub(in crate::audit) fn load_record(
+    db: &Connection,
+    id: &str,
+) -> anyhow::Result<Option<(StoredEvent, Record)>> {
     let stored=db.query_row("SELECT e.seq,e.received_at,e.prev_hash,e.hash,e.payload FROM worker_mutations m JOIN events e ON e.seq=m.event_seq WHERE m.operation_id=?1",[id],row_event).optional()?;
     stored
         .map(|stored: StoredEvent| {
@@ -252,7 +255,7 @@ fn arm_entry(db: &Connection, id: &str) -> anyhow::Result<Option<ArmEntry>> {
     }))
 }
 
-fn arm_receipt(
+pub(in crate::audit) fn arm_receipt(
     request: &ArmV1,
     namespace: &str,
     stored: &StoredEvent,

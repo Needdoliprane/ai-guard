@@ -50,6 +50,10 @@ impl AdmissionActor {
             && self.grant_revision == broker.grant_revision()
     }
 
+    fn matches_binding(&self, broker: &BrokerIdentityV1) -> bool {
+        self.matches_grant(broker) && self.binding_revision == broker.binding_revision()
+    }
+
     fn historical_identity(&self) -> anyhow::Result<BrokerIdentityV1> {
         BrokerIdentityV1::authenticated(
             self.tenant_id.clone(),
@@ -341,7 +345,7 @@ impl Store {
             conflict(fact.binding_ref == request.binding_ref && fact.input_hash == input_hash)?;
             let (admission, record) = admission_record(&tx, &fact)?;
             let result = admission_codec::result(&admission, &record, true)?;
-            self.commit_named_admission(tx, &clock, |tx, current| {
+            self.commit_legacy_named_control(tx, &clock, |tx, current| {
                 Ok((
                     None,
                     workload::broker_identity_deadline_checked(tx, broker, current.at())?,
@@ -401,7 +405,7 @@ impl Store {
         };
         let stored = self.append_legacy_session_record(&tx, &clock, ADMITTED, event_id, &fact)?;
         self.validate_supervision_write(&tx)?;
-        self.commit_named_admission(tx, &clock, |tx, current| {
+        self.commit_legacy_named_control(tx, &clock, |tx, current| {
             if let Some(worker) = &result.worker {
                 let (human_deadline, broker_deadline) = self.require_legacy_named_execution(
                     tx,
@@ -427,7 +431,7 @@ impl Store {
         })
     }
 
-    fn commit_named_admission(
+    fn commit_legacy_named_control(
         &self,
         tx: CheckedTransaction<'_>,
         clock: &workload::AuthorizedControlTimeV1,
@@ -444,7 +448,7 @@ impl Store {
             let now = Utc::now();
             #[cfg(test)]
             let now = self
-                .named_admission_commit_observation
+                .named_control_commit_observation
                 .lock()
                 .map_err(|_| IdentityFailureV1::IdentityUnavailable)?
                 .take()

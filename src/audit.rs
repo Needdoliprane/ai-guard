@@ -304,7 +304,7 @@ pub struct Store {
     #[cfg(test)]
     read_test_observer: read_test_observer::ReadTestObserver,
     #[cfg(test)]
-    named_admission_commit_observation: Mutex<Option<chrono::DateTime<chrono::Utc>>>,
+    named_control_commit_observation: Mutex<Option<chrono::DateTime<chrono::Utc>>>,
 }
 
 struct SupervisionOrigin {
@@ -1194,7 +1194,7 @@ impl Store {
             #[cfg(test)]
             read_test_observer: read_test_observer::ReadTestObserver::default(),
             #[cfg(test)]
-            named_admission_commit_observation: Mutex::new(None),
+            named_control_commit_observation: Mutex::new(None),
         }
     }
     /// Another connection to this live origin; no caller-selected identity or path.

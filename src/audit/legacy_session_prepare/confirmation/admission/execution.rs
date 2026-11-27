@@ -30,8 +30,7 @@ impl Store {
                 && fact.confirmation_hash == resolved.confirmed.hash
                 && fact.broker_profile_id == resolved.plan.broker_profile_id
                 && fact.authorization_revision <= resolved.authorization_revision
-                && fact.actor.matches_grant(broker)
-                && fact.actor.binding_revision == broker.binding_revision()
+                && fact.actor.matches_binding(broker)
                 && fact.grant.is_some()
                 && expected.launch.spec_hash()? == resolved.plan.launch_spec_hash,
             ControlFailure::NotFound

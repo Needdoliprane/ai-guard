@@ -1,14 +1,13 @@
 use super::*;
 use crate::{
-    audit::{supervision_admission, worker_transition},
     broker_registry::BrokerAuthorityV1,
     control::{
-        AdmissionRefusalV1, AdmissionV1, ArmReceiptV1, ArmSubjectV1, ArmV1, ControlFailure,
-        DecisionPhaseV1, DecisionReceiptV1, HelperPermissionV1, HelperPurposeV1,
-        HelperStartClaimV1, HostClockMethodV1, HostClockSampleV1, LaunchSpecV1, NetworkV1,
-        QuotaPolicyV1, RestartPolicyV1, RuntimeInspectionV1, SecurityPresetV1,
-        SupervisedAdmissionV1, SupervisionProtocolV1, WorkerMutationV1, WorkerStateV1,
-        WorkerTransitionV1, WorkerV1, helper_execution_policy_v1,
+        AdmissionRefusalV1, AdmissionV1, ArmSubjectV1, ArmV1, ControlFailure, DecisionPhaseV1,
+        DecisionReceiptV1, HelperPermissionV1, HelperPurposeV1, HelperStartClaimV1,
+        HostClockMethodV1, HostClockSampleV1, LaunchSpecV1, NetworkV1, QuotaPolicyV1,
+        RestartPolicyV1, RuntimeInspectionV1, SecurityPresetV1, SupervisedAdmissionV1,
+        SupervisionProtocolV1, WorkerMutationV1, WorkerStateV1, WorkerTransitionV1, WorkerV1,
+        helper_execution_policy_v1,
         session_control::{
             LegacyNamedSupervisedAdmissionV1, LegacySessionTargetV1, SessionLaunchPrepareRequestV1,
             SessionLaunchRequestV1, SessionLaunchTargetRecordV1,
@@ -497,7 +496,7 @@ fn legacy_named_admission_commits_a_grant_and_replays_after_reopen() {
     drop(reopened);
     let reopened = f.reopen();
     assert!(reopened.integrity().unwrap().valid);
-    *reopened.named_admission_commit_observation.lock().unwrap() =
+    *reopened.named_control_commit_observation.lock().unwrap() =
         Some(crate::broker_registry::parse_time(DEADLINE).unwrap());
     assert_eq!(
         apply(&reopened, &request)
@@ -788,84 +787,53 @@ fn legacy_named_import_arm_preserves_its_prefix_and_closes_manual_claims() {
         timeout_seconds: 120,
         deadline_ns_decimal: "220000000000".into(),
     };
-    let mutation = WorkerMutationV1 {
-        version: 1,
-        operation_id: arm.operation_id.clone(),
-        worker_id: parent.worker_id.clone(),
-        attempt_id: parent.attempt.attempt_id.clone(),
-        expected_revision: parent.revision,
-        transition: WorkerTransitionV1::Prepare,
+    let write = |store: &Store, namespace: &str, given: &ArmV1| {
+        store.arm_legacy_named_import(&broker, request.binding_ref, namespace, given)
     };
-    let staged = {
-        let mut db = store.db.lock().unwrap();
-        let tx = store.begin_checked(&mut db).unwrap();
-        let control_time = workload::capture_control_time(&tx).unwrap();
-        store
-            .require_legacy_named_execution(
-                &tx,
-                &broker,
-                request.binding_ref,
-                &namespace,
-                &parent,
-                &control_time,
-            )
-            .unwrap();
-        let proof = LegacyNamedArmV1 {
-            version: 1,
-            binding_ref: request.binding_ref,
-            admission_fact_seq: committed.audit_seq,
-            admission_fact_hash: committed.audit_hash,
-            namespace: namespace.clone(),
-            session_id: parent.launch.session_id.clone(),
-            authorization_revision: identity::authorization_revision(&tx).unwrap(),
-            authorized_at: control_time.at(),
-            arm: arm.clone(),
-        };
-        let inner = worker_transition::build_record(
-            parent.clone(),
-            &mutation,
-            worker_transition::validate_input(&mutation, &store.redactor).unwrap(),
-        )
-        .unwrap();
-        let record = |proof| {
-            supervision_admission::Record::new(
-                supervision_admission::Input::LegacyNamedArm(Box::new(proof)),
-                Some(inner.clone()),
-            )
-        };
-        let mut wrong_namespace = proof.clone();
-        wrong_namespace.namespace = Uuid::new_v4().to_string();
-        {
-            let save_before = audit_head(&tx).unwrap();
-            assert!(
-                legacy_named_arm_predecessor(&tx, &wrong_namespace, &parent, save_before.0 + 1)
-                    .is_err()
-            );
-            assert_eq!(audit_head(&tx).unwrap(), save_before);
-        }
-        let staged = store
-            .persist_supervision_record(&tx, &record(proof))
-            .unwrap();
-        store.validate_supervision_write(&tx).unwrap();
-        store.commit_checked(tx).unwrap();
-        staged
+    let before = store.head().unwrap();
+    assert!(write(&store, &Uuid::new_v4().to_string(), &arm).is_err());
+    let mut wrong_receipt = arm.clone();
+    let ArmSubjectV1::Helper { permission, .. } = &mut wrong_receipt.subject else {
+        panic!("fixture requires an Import helper");
     };
-    let receipt = ArmReceiptV1 {
-        version: 1,
-        arm_id: arm.operation_id.clone(),
-        worker_id: arm.worker_id.clone(),
-        attempt_id: arm.attempt_id.clone(),
-        input_hash: arm.input_hash().unwrap(),
-        control_namespace_uuid: namespace,
-        audit_seq: staged.seq,
-        audit_hash: staged.hash.clone(),
+    let HelperPermissionV1::Admission { receipt } = permission.as_mut() else {
+        panic!("fixture requires an admission receipt");
     };
+    receipt.audit_seq = committed.audit_seq;
+    assert!(write(&store, &namespace, &wrong_receipt).is_err());
+    let mut other_attempt = arm.clone();
+    other_attempt.attempt_id = Uuid::new_v4().to_string();
+    assert!(write(&store, &namespace, &other_attempt).is_err());
+    let mut other_intent = arm.clone();
+    other_intent.intent_hash = "e".repeat(64);
+    assert!(write(&store, &namespace, &other_intent).is_err());
+    assert_eq!(store.head().unwrap(), before);
+
+    let expiry = crate::broker_registry::parse_time(DEADLINE).unwrap();
+    *store.named_control_commit_observation.lock().unwrap() = Some(expiry);
+    assert_eq!(
+        write(&store, &namespace, &arm)
+            .unwrap_err()
+            .downcast_ref::<ControlFailure>(),
+        Some(&ControlFailure::NotFound)
+    );
+    assert_eq!(store.head().unwrap(), before);
+    assert_eq!(
+        store.worker(&parent.worker_id).unwrap().unwrap().state,
+        WorkerStateV1::Reserved
+    );
+    assert!(store.integrity().unwrap().valid);
+
+    let armed = write(&store, &namespace, &arm).unwrap();
+    assert!(!armed.replayed);
+    assert_eq!(armed.receipt.control_namespace_uuid, namespace);
+    armed.receipt.validate_for_arm(&arm).unwrap();
     let claim = HelperStartClaimV1 {
         version: 1,
         operation_id: Uuid::new_v4().to_string(),
         helper_id: helper_id.to_string(),
         emitter_id: Uuid::new_v4().to_string(),
-        arm_receipt: receipt,
+        arm_receipt: armed.receipt.clone(),
         clock_check: HostClockSampleV1 {
             continuous_ns_decimal: "100000000001".into(),
             ..clock
@@ -885,16 +853,18 @@ fn legacy_named_import_arm_preserves_its_prefix_and_closes_manual_claims() {
             .unwrap()
             .is_none()
     );
-    assert_eq!(store.head().unwrap(), staged.seq);
+    assert_eq!(store.head().unwrap(), armed.receipt.audit_seq);
     let prepared = store.worker(&parent.worker_id).unwrap().unwrap();
     assert_eq!(prepared.state, WorkerStateV1::Preparing);
     assert_eq!(prepared.revision, parent.revision + 1);
     assert!(prepared.quota_held);
     let generic_cancel = WorkerMutationV1 {
+        version: 1,
+        worker_id: prepared.worker_id.clone(),
+        attempt_id: prepared.attempt.attempt_id.clone(),
         operation_id: Uuid::new_v4().to_string(),
         expected_revision: prepared.revision,
         transition: WorkerTransitionV1::CancelReserved,
-        ..mutation
     };
     assert_eq!(
         store
@@ -903,7 +873,7 @@ fn legacy_named_import_arm_preserves_its_prefix_and_closes_manual_claims() {
             .downcast_ref::<ControlFailure>(),
         Some(&ControlFailure::Conflict)
     );
-    assert_eq!(store.head().unwrap(), staged.seq);
+    assert_eq!(store.head().unwrap(), armed.receipt.audit_seq);
     assert_eq!(store.worker_quota(&quota).unwrap().held_workers, 1);
 
     credential.active = false;
@@ -922,12 +892,31 @@ fn legacy_named_import_arm_preserves_its_prefix_and_closes_manual_claims() {
     drop(store);
 
     let reopened = f.reopen();
+    assert_eq!(
+        write(&reopened, &namespace, &wrong_receipt)
+            .unwrap_err()
+            .downcast_ref::<ControlFailure>(),
+        Some(&ControlFailure::Conflict)
+    );
+    *reopened.named_control_commit_observation.lock().unwrap() = Some(expiry);
+    assert_eq!(
+        write(&reopened, &namespace, &arm)
+            .unwrap_err()
+            .downcast_ref::<WorkloadFailureV1>(),
+        Some(&WorkloadFailureV1::Unauthorized)
+    );
+    let replay = write(&reopened, &namespace, &arm).unwrap();
+    assert!(replay.replayed);
+    assert_eq!(
+        serde_json::to_value(replay.receipt).unwrap(),
+        serde_json::to_value(&armed.receipt).unwrap()
+    );
     let retained = reopened
         .worker_operation(&arm.operation_id)
         .unwrap()
         .unwrap();
-    assert_eq!(retained.audit_seq, staged.seq);
-    assert_eq!(retained.audit_hash, staged.hash);
+    assert_eq!(retained.audit_seq, armed.receipt.audit_seq);
+    assert_eq!(retained.audit_hash, armed.receipt.audit_hash);
     assert!(reopened.execution_arm(&arm.operation_id).unwrap().is_none());
     assert!(reopened.integrity().unwrap().valid);
     assert_eq!(reopened.head().unwrap(), revoked.audit_seq);
@@ -1046,7 +1035,7 @@ fn legacy_named_admission_rolls_back_at_commit_when_human_deadline_is_reached() 
         panic!("fixture broker identity");
     };
     let before = store.integrity().unwrap();
-    *store.named_admission_commit_observation.lock().unwrap() =
+    *store.named_control_commit_observation.lock().unwrap() =
         Some(crate::broker_registry::parse_time(DEADLINE).unwrap());
     let policy = Policy::default();
     let quota = QuotaPolicyV1::default();
@@ -1067,7 +1056,7 @@ fn legacy_named_admission_rolls_back_at_commit_when_human_deadline_is_reached() 
     );
     assert!(
         store
-            .named_admission_commit_observation
+            .named_control_commit_observation
             .lock()
             .unwrap()
             .is_none()
