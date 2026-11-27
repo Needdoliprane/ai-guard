@@ -1,0 +1,130 @@
+name: G04 retained import acknowledgement Linux QA
+
+on:
+  push:
+    branches: [codex/g04-named-ack-driver-qa-20261127]
+    paths: [.github/workflows/g04-named-service-linux-qa.yaml]
+
+permissions:
+  contents: read
+
+jobs:
+  writer:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      SOURCE_SHA: a4a9a35d83a92d54934eec84423b55847e315fdf
+      SOURCE_TREE: 77163b4fb33360dbb877531db5f9f22017662fcd
+      CARGO_BUILD_JOBS: '1'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      CARGO_TERM_COLOR: never
+      RUST_MIN_STACK: '8388608'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: d63500fdf47ccfcbe7e3f56593a2167f8cdb5379
+          persist-credentials: false
+
+      - name: Build one library harness and verify two exact G04 tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          selectors=(
+            broker::checkpoint::legacy_named::tests::explicit_named_admission_requires_an_immutable_archive_digest
+            runtime::managed::deadline_semantic_tests::import_creation_orders_native_mutations_with_stop
+          )
+
+          report_not_run() {
+            local selector
+            for selector in "${selectors[@]}"; do
+              printf 'test=%s status=NOT_RUN\n' "$selector"
+            done
+          }
+
+          if [[ "$(git rev-parse HEAD 2>/dev/null)" != "$SOURCE_SHA" ||
+                "$(git rev-parse 'HEAD^{tree}' 2>/dev/null)" != "$SOURCE_TREE" ]]; then
+            printf 'source=FAIL\n'
+            report_not_run
+            exit 1
+          fi
+          printf 'source=PASS\nsource_sha=%s\nsource_tree=%s\n' "$SOURCE_SHA" "$SOURCE_TREE"
+          export AI_GUARD_BUILD_REVISION="$SOURCE_SHA"
+
+          # Keep fixture paths short for Unix sockets and keep all raw output private.
+          scratch=$(mktemp -d /tmp/aig-g04.XXXXXX)
+          trap 'rm -rf -- "$scratch"' EXIT
+          export TMPDIR="$scratch"
+          export CARGO_TARGET_DIR="$scratch/target"
+          build_json="$scratch/build.jsonl"
+
+          if ! cargo fetch --locked --target host-tuple >"$scratch/fetch.log" 2>&1; then
+            printf 'fetch=FAIL\nbuild=NOT_RUN\n'
+            report_not_run
+            exit 1
+          fi
+          printf 'fetch=PASS\n'
+
+          if ! cargo test --locked --offline --features mysql-storage --lib --no-run \
+              --message-format=json >"$build_json" 2>"$scratch/build.stderr"; then
+            printf 'build=FAIL\n'
+            jq -Rr 'fromjson? | objects
+              | select(.reason == "compiler-message" and .message.level == "error")
+              | .message as $message
+              | ($message.code.code // empty) as $code
+              | select($code | test("\\AE[0-9]{4}\\z"))
+              | $message.spans[] | select(.is_primary)
+              | select(.file_name | test("\\Asrc/[A-Za-z0-9_./-]+[.]rs\\z"))
+              | "compiler_error=\($code) file=\(.file_name) line=\(.line_start)"' "$build_json" 2>/dev/null | sort -u || true
+            report_not_run
+            exit 1
+          fi
+          printf 'build=PASS\n'
+
+          if ! libtest=$(jq -ers '[.[] | select(.reason == "compiler-artifact"
+              and .target.name == "agentsandbox" and .target.kind == ["lib"]
+              and .profile.test == true and (.executable | type) == "string") | .executable]
+              | unique | select(length == 1) | .[0]' "$build_json" 2>/dev/null) ||
+              [[ "$libtest" != "$CARGO_TARGET_DIR"/debug/deps/agentsandbox-* ||
+                 ! -f "$libtest" || ! -x "$libtest" || -L "$libtest" ]]; then
+            printf 'libtest=FAIL\n'
+            report_not_run
+            exit 1
+          fi
+          if ! checksum=$(sha256sum -- "$libtest" 2>/dev/null) ||
+              [[ ! ${checksum%% *} =~ ^[0-9a-f]{64}$ ]]; then
+            printf 'libtest=FAIL\n'
+            report_not_run
+            exit 1
+          fi
+          printf 'libtest=PASS\nlibtest_sha256=%s\n' "${checksum%% *}"
+
+          check_selector() {
+            local selector=$1
+            local log="$scratch/test.log"
+            if ! "$libtest" --exact "$selector" --test-threads=1 --color never >"$log" 2>&1; then
+              printf 'FAIL'
+            elif grep -Fqx 'running 0 tests' "$log"; then
+              printf 'NO_TEST'
+            elif grep -Fqx 'running 1 test' "$log" &&
+                grep -Fqx "test $selector ... ok" "$log" &&
+                grep -Eq '^test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; [0-9]+ filtered out;' "$log"; then
+              printf 'PASS'
+            else
+              printf 'FAIL'
+            fi
+          }
+
+          failed=0
+          for selector in "${selectors[@]}"; do
+            status=$(check_selector "$selector")
+            printf 'test=%s status=%s\n' "$selector" "$status"
+            if [[ "$status" != PASS ]]; then
+              failed=1
+              grep -E '^(Error: (Conflict|Corrupt|Interrupted|InvalidInput|UnsafeFilesystem|UnsupportedVersion|Capacity|Io))$' "$scratch/test.log" || true
+              grep -Eo 'panicked at src/[A-Za-z0-9_./-]+[.]rs:[0-9]+:[0-9]+' "$scratch/test.log" || true
+            fi
+          done
+          exit "$failed"
