@@ -352,6 +352,25 @@ async fn cold_legacy_terminal_read_requires_the_exact_latch_and_preserves_state(
     assert_eq!(terminal.process.finished_at, Some(finish));
     assert_eq!(terminal.process.exit_code, Some(17));
     assert!(observation_target_facts(observed.evidence())? == observation_target_facts(&proof)?);
+    let mutation = observed.terminal_mutation()?;
+    let same_mutation = observed.terminal_mutation()?;
+    assert_eq!(canonical(&mutation)?, canonical(&same_mutation)?);
+    assert_ne!(mutation.operation_id, proof.claim().1.operation_id);
+    assert_ne!(mutation.operation_id, command.to_string());
+    let projected = crate::audit::expected_worker_transition(proof.worker(), &mutation)?;
+    assert_eq!(projected.state, WorkerStateV1::Terminal);
+    assert!(!projected.quota_held);
+    assert_eq!(
+        projected.attempt.container_id.as_deref(),
+        Some(cid.as_str())
+    );
+    assert_eq!(
+        projected
+            .last_observation
+            .as_ref()
+            .and_then(|value| value.exit_code),
+        Some(17)
+    );
     assert_eq!(seed.worker_get_count(), reads + 2);
     assert_eq!(seed.post_count(), posts);
     assert_eq!(store.head()?, core_head);

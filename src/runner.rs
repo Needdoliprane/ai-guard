@@ -30,6 +30,14 @@ pub(crate) fn relay_worker_inspection(
 ) -> anyhow::Result<crate::control::RuntimeInspectionV1> {
     managed::inspection(worker, observed)
 }
+/// Apply the runner's normalization to an already observed worker.
+pub(crate) fn broker_worker_observation(
+    worker: &crate::control::WorkerV1,
+    observed: &crate::runtime::ContainerObservation,
+) -> anyhow::Result<crate::control::RuntimeObservationV1> {
+    managed::observation_dto(worker, observed)
+}
+
 /// Pure normalization of one already-owned broker helper observation. This
 /// projects runtime facts into the exact helper-policy inspection used by
 /// the runner; it does not authorize or start the helper.

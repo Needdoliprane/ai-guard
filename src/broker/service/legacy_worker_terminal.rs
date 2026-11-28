@@ -2,7 +2,7 @@
 use super::*;
 use crate::{
     broker::journal::recovery::legacy_worker_terminal::LegacyWorkerTerminalEvidenceV1,
-    control::{RuntimeStatusV1, WorkerStateV1, WorkerV1},
+    control::{RuntimeStatusV1, WorkerMutationV1, WorkerStateV1, WorkerTransitionV1, WorkerV1},
     runner::ColdAuditBudget,
     runtime::{ContainerObservation, InvocationBindingV1, ManagedRuntime, Runtime, RuntimeKind},
 };
@@ -30,6 +30,33 @@ impl ObservedLegacyWorkerTerminal {
 
     pub(super) fn observation(&self) -> &ContainerObservation {
         &self.observation
+    }
+
+    /// Derive the observation mutation from the retained claim. The claim ID
+    /// keeps the central operation stable across multiple STOP requests for
+    /// this attempt. A publisher must retain the first exact body before send.
+    #[allow(dead_code, reason = "terminal publication is composed separately")]
+    pub(super) fn terminal_mutation(&self) -> Result<WorkerMutationV1, Code> {
+        let evidence = self.evidence();
+        let worker = evidence.worker();
+        let claim_id =
+            crate::control::session_control::canonical_uuid(&evidence.claim().1.operation_id)
+                .map_err(|_| Code::Conflict)?;
+        let observation = crate::runner::broker_worker_observation(worker, self.observation())
+            .map_err(|_| Code::NeedsReconciliation)?;
+        let mutation = WorkerMutationV1 {
+            version: 1,
+            operation_id: crate::model::bound_event_id(
+                b"ai-guard:legacy-worker-terminal-observation:v1",
+                claim_id,
+            ),
+            worker_id: worker.worker_id.clone(),
+            attempt_id: worker.attempt.attempt_id.clone(),
+            expected_revision: worker.revision,
+            transition: WorkerTransitionV1::Observe { observation },
+        };
+        crate::audit::expected_worker_transition(worker, &mutation).map_err(|_| Code::Conflict)?;
+        Ok(mutation)
     }
 }
 
