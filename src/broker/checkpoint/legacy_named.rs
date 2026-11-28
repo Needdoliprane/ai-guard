@@ -1548,7 +1548,8 @@ mod tests {
 
     #[tokio::test]
     async fn explicit_named_admission_requires_an_immutable_archive_digest() -> anyhow::Result<()> {
-        named_admission_fixture(false).await
+        // Keep the large checkpoint fixture out of the libtest thread's future.
+        Box::pin(named_admission_fixture(false)).await
     }
 
     async fn named_admission_fixture(verification_created_ack: bool) -> anyhow::Result<()> {
@@ -2148,7 +2149,7 @@ mod tests {
             Ok(writer)
         };
         if verification_created_ack {
-            return verification_created_writer::exercise(
+            return Box::pin(verification_created_writer::exercise(
                 &root,
                 start_admitted_writer(verification_created_writer::JOURNAL).await?,
                 &plan,
@@ -2156,7 +2157,7 @@ mod tests {
                 arm_result,
                 claim,
                 claim_receipt,
-            )
+            ))
             .await;
         }
         let mut cold_stop_case = None;

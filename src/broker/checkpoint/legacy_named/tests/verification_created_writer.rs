@@ -12,7 +12,7 @@ pub(super) const JOURNAL: &str = "verification-created-writer";
 #[tokio::test]
 async fn named_verification_created_ack_survives_durable_stop_and_lost_reply() -> anyhow::Result<()>
 {
-    named_admission_fixture(true).await
+    Box::pin(named_admission_fixture(true)).await
 }
 
 async fn fixture_runtime(root: &Path, authority: Uuid) -> anyhow::Result<ManagedRuntime> {
