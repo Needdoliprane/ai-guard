@@ -433,20 +433,21 @@ impl Write for BoundedBody {
     }
 }
 
-/// Serialization is bounded too: an oversized value never builds an unbounded
-/// JSON allocation or emits a partial frame before its size has been checked.
-pub async fn write_frame<T: Serialize>(
-    stream: &mut (impl AsyncWrite + Unpin),
+const FRAME_PREFIX_BYTES: usize = std::mem::size_of::<u32>();
+
+/// Build the length-prefixed JSON frame within the body limit before writing.
+pub(super) fn encode_frame<T: Serialize>(
     value: &T,
     max_bytes: u32,
     timeout: Duration,
-) -> IpcResult<()> {
+) -> IpcResult<Vec<u8>> {
     check_frame_options(max_bytes, timeout)?;
     let mut body = BoundedBody {
-        bytes: Vec::with_capacity((max_bytes as usize).min(4096)),
-        limit: max_bytes as usize,
+        bytes: Vec::with_capacity(FRAME_PREFIX_BYTES + (max_bytes as usize).min(4096)),
+        limit: FRAME_PREFIX_BYTES + max_bytes as usize,
         exceeded: false,
     };
+    body.bytes.resize(FRAME_PREFIX_BYTES, 0);
     if serde_json::to_writer(&mut body, value).is_err() {
         return Err(if body.exceeded {
             IpcError::TooLarge
@@ -454,14 +455,28 @@ pub async fn write_frame<T: Serialize>(
             IpcError::InvalidInput
         });
     }
-    let length = u32::try_from(body.bytes.len()).map_err(|_| IpcError::TooLarge)?;
+    let length =
+        u32::try_from(body.bytes.len() - FRAME_PREFIX_BYTES).map_err(|_| IpcError::TooLarge)?;
+    body.bytes[..FRAME_PREFIX_BYTES].copy_from_slice(&length.to_be_bytes());
+    Ok(body.bytes)
+}
+
+/// The write timeout covers both the length prefix and the JSON body.
+pub async fn write_frame<T: Serialize>(
+    stream: &mut (impl AsyncWrite + Unpin),
+    value: &T,
+    max_bytes: u32,
+    timeout: Duration,
+) -> IpcResult<()> {
+    let frame = encode_frame(value, max_bytes, timeout)?;
+    let (prefix, body) = frame.split_at(FRAME_PREFIX_BYTES);
     tokio::time::timeout(timeout, async {
         stream
-            .write_all(&length.to_be_bytes())
+            .write_all(prefix)
             .await
             .map_err(|_| IpcError::Unavailable)?;
         stream
-            .write_all(&body.bytes)
+            .write_all(body)
             .await
             .map_err(|_| IpcError::Unavailable)?;
         Ok(())

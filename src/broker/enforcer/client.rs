@@ -317,26 +317,57 @@ async fn write_request_in_generation(
     request: &Request,
     generation: Option<(&CancelGeneration, u64)>,
 ) -> Result<(), LegacyNamedProspectiveFailure> {
-    use std::task::Poll;
+    use crate::broker::local_ipc::{IpcError, encode_frame};
+    use LegacyNamedProspectiveFailure::{BeforeSend, OutcomeUnknown};
+    use std::io::ErrorKind;
+    use tokio::time::{Instant, timeout_at};
 
-    let write = write_frame(stream, request, MAX_FRAME, IO_TIMEOUT);
-    let written = if let Some((cancel, expected)) = generation {
-        tokio::pin!(write);
-        // Connect, authenticate and negotiate first. Order only the first
-        // poll of the business frame with invalidation of this exact guard.
-        let first = std::future::poll_fn(|context| {
-            Poll::Ready(cancel.with_current_generation(expected, || write.as_mut().poll(context)))
-        })
-        .await
-        .map_err(LegacyNamedProspectiveFailure::BeforeSend)?;
-        match first {
-            Poll::Ready(result) => result,
-            Poll::Pending => write.await,
-        }
-    } else {
-        write.await
+    let Some((cancel, expected)) = generation else {
+        return write_frame(stream, request, MAX_FRAME, IO_TIMEOUT)
+            .await
+            .map_err(|error| OutcomeUnknown(error.into()));
     };
-    written.map_err(|error| LegacyNamedProspectiveFailure::OutcomeUnknown(error.into()))
+    let frame =
+        encode_frame(request, MAX_FRAME, IO_TIMEOUT).map_err(|error| BeforeSend(error.into()))?;
+    let deadline = Instant::now() + IO_TIMEOUT;
+    let mut written = 0;
+    while written < frame.len() {
+        let write_error = move |error: IpcError| {
+            if written == 0 {
+                BeforeSend(error.into())
+            } else {
+                OutcomeUnknown(error.into())
+            }
+        };
+        timeout_at(deadline, stream.writable())
+            .await
+            .map_err(|_| write_error(IpcError::Timeout))?
+            .map_err(|_| write_error(IpcError::Unavailable))?;
+        let write = || {
+            if Instant::now() >= deadline {
+                return Err(IpcError::Timeout);
+            }
+            match stream.try_write(&frame[written..]) {
+                Ok(0) => Err(IpcError::Unavailable),
+                Ok(bytes) => Ok(Some(bytes)),
+                Err(error) if error.kind() == ErrorKind::WouldBlock => Ok(None),
+                Err(_) => Err(IpcError::Unavailable),
+            }
+        };
+        // Readiness is a hint. Order each attempt to write the first byte
+        // with STOP. Once any bytes are accepted, finish this same frame.
+        let accepted = if written == 0 {
+            cancel
+                .with_current_generation(expected, write)
+                .map_err(BeforeSend)?
+        } else {
+            write()
+        };
+        if let Some(bytes) = accepted.map_err(write_error)? {
+            written += bytes;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -361,6 +392,79 @@ async fn stale_named_generation_writes_no_business_frame() -> anyhow::Result<()>
         reader.try_read(&mut [0]).unwrap_err().kind(),
         std::io::ErrorKind::WouldBlock
     );
+    Ok(())
+}
+
+#[cfg(test)]
+#[tokio::test]
+async fn named_request_invalidated_while_waiting_to_write_sends_no_frame() -> anyhow::Result<()> {
+    use std::io::ErrorKind;
+    use tokio::io::AsyncReadExt;
+
+    let (mut writer, mut reader) = UnixStream::pair()?;
+    tokio::time::timeout(IO_TIMEOUT, writer.writable()).await??;
+    let filler = [b'x'; 4096];
+    let mut filled = 0;
+    let mut saturated = false;
+    for _ in 0..1024 {
+        match writer.try_write(&filler) {
+            Ok(0) => anyhow::bail!("fixture socket accepted no filler bytes"),
+            Ok(written) => filled += written,
+            Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                saturated = true;
+                break;
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    anyhow::ensure!(saturated && filled > 0, "fixture socket did not fill");
+
+    let cancel = CancelGeneration::new();
+    let expected = cancel.current();
+    let request = Request::Status {};
+    let mut write = Box::pin(write_request_in_generation(
+        &mut writer,
+        &request,
+        Some((&cancel, expected)),
+    ));
+    assert!(futures_util::poll!(write.as_mut()).is_pending());
+    cancel.invalidate();
+    let mut drained = vec![0; filled];
+    tokio::time::timeout(IO_TIMEOUT, reader.read_exact(&mut drained)).await??;
+    assert!(drained.iter().all(|&byte| byte == filler[0]));
+    assert_eq!(
+        tokio::time::timeout(IO_TIMEOUT, write).await?,
+        Err(LegacyNamedProspectiveFailure::BeforeSend(
+            EnforcerError::NotReady
+        )),
+    );
+    drop(writer);
+    assert_eq!(
+        tokio::time::timeout(IO_TIMEOUT, reader.read(&mut [0])).await??,
+        0,
+    );
+    Ok(())
+}
+
+#[cfg(test)]
+#[tokio::test]
+async fn guarded_named_request_keeps_the_existing_frame_bytes() -> anyhow::Result<()> {
+    use tokio::io::AsyncReadExt;
+
+    let cancel = CancelGeneration::new();
+    let body = br#"{"kind":"status"}"#;
+    let mut expected = u32::try_from(body.len())?.to_be_bytes().to_vec();
+    expected.extend_from_slice(body);
+    for generation in [None, Some((&cancel, cancel.current()))] {
+        let (mut writer, mut reader) = UnixStream::pair()?;
+        write_request_in_generation(&mut writer, &Request::Status {}, generation)
+            .await
+            .map_err(LegacyNamedProspectiveFailure::code)?;
+        drop(writer);
+        let mut frame = Vec::new();
+        tokio::time::timeout(IO_TIMEOUT, reader.read_to_end(&mut frame)).await??;
+        assert_eq!(frame, expected);
+    }
     Ok(())
 }
 
