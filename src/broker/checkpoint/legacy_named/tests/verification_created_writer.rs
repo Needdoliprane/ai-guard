@@ -1,5 +1,6 @@
 use super::*;
 use crate::{
+    broker::enforcer::check_verification_prospective_facts_for_test,
     broker::writer::LegacyNamedImportVerificationArmWrite,
     runner::broker::{broker_helper_spec, create_import_volume},
     runtime::{ContainerPurpose, ContainerSpec, ManagedRuntime, NetworkMode, Runtime},
@@ -450,16 +451,60 @@ async fn exercise_arm_writer(
         .head()
         .clone();
     assert_eq!(arm_head.revision(), before_revision + 1);
-    if let Some(confirmation) = &confirmation {
+    let projected_generation = if let Some(confirmation) = confirmation {
         assert_eq!(confirmation.job().head(), &arm_head);
         assert_eq!(confirmation.job().operation_id(), operation);
         assert_eq!(confirmation.job().intent_hash(), admitted.intent_hash());
-        assert_eq!(
-            canonical(confirmation.job().scope())?,
-            canonical(writer.scope())?
-        );
+        let scope = writer.scope();
+        assert_eq!(canonical(confirmation.job().scope())?, canonical(scope)?);
         assert_eq!(confirmation.generation().1, expected_generation);
-    }
+        let owned = confirmation
+            .job()
+            .broker_checkpoint_v2()
+            .and_then(|checkpoint| checkpoint.supervision().legacy_named_admission())
+            .and_then(LegacyNamedAdmissionCheckpoint::import_verification_created)
+            .context(ArmWriterPhase("born_head"))?
+            .clone();
+        let control_origin_hash = hex::encode(Sha256::digest(scope.gateway_origin().as_bytes()));
+        let target = ProspectiveRegistrationV1::new(
+            control_origin_hash.clone(),
+            scope.tenant_id().to_owned(),
+            request.arm.clone(),
+            binding.clone(),
+            owned.clone(),
+        )?;
+        let other_installation = Uuid::from_u128(scope.installation_id().as_u128() ^ 1);
+        let other_scope = JournalScopeV1::new(
+            other_installation,
+            scope.tenant_id(),
+            scope.gateway_origin(),
+            scope.control_namespace_uuid(),
+            scope.profile_id(),
+        )?;
+        // Keep the target shape valid and vary only the retained observation.
+        let mut other_owned = owned;
+        other_owned.observation.observed_at += chrono::TimeDelta::seconds(1);
+        let other_target = ProspectiveRegistrationV1::new(
+            control_origin_hash,
+            scope.tenant_id().to_owned(),
+            request.arm.clone(),
+            binding.clone(),
+            other_owned,
+        )?;
+        let projected = check_verification_prospective_facts_for_test(
+            confirmation,
+            target,
+            scope,
+            &request,
+            &other_scope,
+            &other_target,
+        )
+        .context(ArmWriterPhase("born_head"))?;
+        assert_eq!(projected.1, expected_generation);
+        Some(projected)
+    } else {
+        None
+    };
     assert_replayed(retain().await, &request).context(ArmWriterPhase("replay_before_stop"))?;
     assert_eq!(
         writer
@@ -472,8 +517,9 @@ async fn exercise_arm_writer(
 
     let stopped_generation = generation.invalidate();
     assert_eq!(stopped_generation, expected_generation + 1);
-    if let Some(confirmation) = confirmation {
-        assert_eq!(confirmation.generation().0.current(), stopped_generation);
+    if let Some((projected, expected)) = projected_generation {
+        assert_eq!(projected.current(), stopped_generation);
+        assert!(projected.with_current_generation(expected, || ()).is_err());
     }
     let stop_id = Uuid::new_v4();
     let stop_head = {

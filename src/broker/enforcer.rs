@@ -574,6 +574,63 @@ impl ProspectiveRegistrationV1 {
     }
 }
 
+#[cfg(test)]
+pub(in crate::broker) fn check_verification_prospective_facts_for_test(
+    recorded: Box<crate::broker::writer::RecordedLegacyNamedImportVerificationArm>,
+    target: ProspectiveRegistrationV1,
+    expected_scope: &crate::broker::journal::JournalScopeV1,
+    request: &crate::control::session_control::LegacyNamedImportVerificationArmRequestV2,
+    other_scope: &crate::broker::journal::JournalScopeV1,
+    other_target: &ProspectiveRegistrationV1,
+) -> anyhow::Result<(CancelGeneration, u64)> {
+    use crate::broker::journal::canonical;
+    use legacy_named_stop::{
+        NamedImportVerificationArmBirthV2, NamedImportVerificationProspectiveFactsV2,
+    };
+
+    let expected_head = recorded.job().head().clone();
+    let expected_operation = recorded.job().operation_id();
+    let expected_create_hash = recorded
+        .job()
+        .broker_checkpoint_v2()
+        .and_then(|checkpoint| checkpoint.supervision().legacy_named_admission())
+        .and_then(|named| named.import_verification_create())
+        .ok_or_else(|| anyhow::anyhow!("verification Create prefix missing"))?
+        .facts_hash()?;
+    let (facts, target, generation) =
+        NamedImportVerificationArmBirthV2::from_recorded(recorded, target)?
+            .into_prospective_facts()?;
+    let bytes = canonical(&facts)?;
+    let decoded: NamedImportVerificationProspectiveFactsV2 = serde_json::from_slice(&bytes)?;
+    anyhow::ensure!(
+        canonical(&decoded)? == bytes,
+        "verification facts changed on decode"
+    );
+    let payload = serde_json::to_value(&decoded)?;
+    anyhow::ensure!(
+        payload["operation_id"] == serde_json::to_value(expected_operation)?
+            && payload["arm_pending_head"] == serde_json::to_value(expected_head)?
+            && payload["create_facts_hash"] == serde_json::to_value(expected_create_hash)?
+            && payload["request"] == serde_json::to_value(request)?,
+        "verification facts changed confirmed journal data"
+    );
+    decoded.validate_target(expected_scope, &target)?;
+    anyhow::ensure!(
+        matches!(
+            decoded.validate_target(other_scope, &target),
+            Err(EnforcerError::Conflict)
+        ),
+        "verification facts accepted a different scope"
+    );
+    anyhow::ensure!(
+        matches!(
+            decoded.validate_target(expected_scope, other_target),
+            Err(EnforcerError::Conflict)
+        ),
+        "verification facts accepted a different Created snapshot"
+    );
+    Ok(generation)
+}
 /// Acknowledgement from a real native prospective owner, bound to its epoch,
 /// admission generation and exact pending Arm. Serialized bytes never create
 /// an Original grant; the server checks its retained owner on every use.

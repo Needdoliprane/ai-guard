@@ -1,15 +1,22 @@
 //! Compare verified journal STOP facts with one live named Import target.
-use super::{EnforcerError, EnforcerResult, ProspectiveRegistrationV1, hex_hash};
+use super::{
+    CancelGeneration, EnforcerError, EnforcerResult, ProspectiveRegistrationV1, hex_hash,
+};
 use crate::{
     broker::{
         journal::{
-            JournalScopeV1, RevisionRefV1, canonical, recovery::named_import_stop_owned_hash,
+            AcceptedJobV1, JournalScopeV1, RevisionRefV1, canonical,
+            recovery::named_import_stop_owned_hash,
         },
         lifecycle::{LocalCommandRequestV1, LocalCommandV1},
+        writer::RecordedLegacyNamedImportVerificationArm,
     },
     control::{
         ArmSubjectV1, HelperPermissionV1, HelperPurposeV1, content_hash,
-        session_control::{LegacyConfirmedPlanV1, LegacyNamedImportArmRequestV1, canonical_uuid},
+        session_control::{
+            LegacyConfirmedPlanV1, LegacyNamedImportArmRequestV1,
+            LegacyNamedImportVerificationArmRequestV2, canonical_uuid,
+        },
     },
 };
 use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
@@ -51,6 +58,227 @@ impl NamedImportArmBirthV1 {
     pub(super) fn matches(&self, other: &Self) -> EnforcerResult<bool> {
         let invalid = |_| EnforcerError::InvalidInput;
         Ok(canonical(self).map_err(invalid)? == canonical(other).map_err(invalid)?)
+    }
+}
+
+/// Confirmed journal birth and immutable prospective target of the named
+/// verification helper. Native custody and its deadline check are separate.
+#[allow(
+    dead_code,
+    reason = "the verification prospective reservation is composed separately"
+)]
+pub(in crate::broker) struct NamedImportVerificationArmBirthV2 {
+    recorded: Box<RecordedLegacyNamedImportVerificationArm>,
+    target: ProspectiveRegistrationV1,
+    prospective_hash: String,
+}
+
+#[allow(
+    dead_code,
+    reason = "the verification prospective reservation is composed separately"
+)]
+impl NamedImportVerificationArmBirthV2 {
+    pub(in crate::broker) fn from_recorded(
+        recorded: Box<RecordedLegacyNamedImportVerificationArm>,
+        target: ProspectiveRegistrationV1,
+    ) -> EnforcerResult<Self> {
+        let invalid = |_| EnforcerError::InvalidInput;
+        let job = recorded.job();
+        let scope = job.scope();
+        let plan = job
+            .intent()
+            .legacy_named_plan()
+            .ok_or(EnforcerError::Conflict)?;
+        let checkpoint = job.broker_checkpoint_v3().ok_or(EnforcerError::Conflict)?;
+        let named = checkpoint
+            .broker()
+            .supervision()
+            .legacy_named_admission()
+            .ok_or(EnforcerError::Conflict)?;
+        let request = named
+            .import_verification_arm_request()
+            .ok_or(EnforcerError::Conflict)?;
+        let facts = named
+            .import_verification_arm_facts()
+            .map_err(|_| EnforcerError::Conflict)?
+            .ok_or(EnforcerError::Conflict)?;
+        facts
+            .validate_request(request, target.authority())
+            .map_err(|_| EnforcerError::Conflict)?;
+        let prospective_hash = target.digest()?;
+        if job.head().revision() == 0
+            || job.operation_id() != plan.operation_id
+            || facts.plan() != plan
+            || request.arm.intent_hash != job.intent_hash()
+            || scope.profile_id() != plan.broker_profile_id
+            || scope.control_namespace_uuid().to_string() != request.namespace
+            || target.tenant_id() != scope.tenant_id()
+            || target.control_origin_hash()
+                != hex::encode(Sha256::digest(scope.gateway_origin().as_bytes()))
+            || target.owned().handle.session_id() != plan.session_id
+            || canonical(target.arm()).map_err(invalid)?
+                != canonical(&request.arm).map_err(invalid)?
+            || canonical(target.owned()).map_err(invalid)?
+                != canonical(facts.owned()).map_err(invalid)?
+            || checkpoint
+                .commands()
+                .iter()
+                .any(|command| matches!(command.request(), LocalCommandRequestV1::CancelRequested))
+        {
+            return Err(EnforcerError::Conflict);
+        }
+        let (cancel, generation) = recorded.generation();
+        cancel.with_current_generation(generation, || ())?;
+        Ok(Self {
+            recorded,
+            target,
+            prospective_hash,
+        })
+    }
+
+    pub(in crate::broker) fn job(&self) -> &AcceptedJobV1 {
+        self.recorded.job()
+    }
+
+    pub(in crate::broker) fn generation(&self) -> (&CancelGeneration, u64) {
+        self.recorded.generation()
+    }
+
+    pub(in crate::broker) fn target(&self) -> &ProspectiveRegistrationV1 {
+        &self.target
+    }
+
+    pub(in crate::broker) fn prospective_hash(&self) -> &str {
+        &self.prospective_hash
+    }
+
+    /// Consume the confirmed birth. Keep the exact target and its generation
+    /// gate alongside the DTO in memory, ready for the separate transport.
+    pub(super) fn into_prospective_facts(
+        self,
+    ) -> EnforcerResult<(
+        NamedImportVerificationProspectiveFactsV2,
+        ProspectiveRegistrationV1,
+        (CancelGeneration, u64),
+    )> {
+        let job = self.recorded.job();
+        let named = job
+            .broker_checkpoint_v3()
+            .and_then(|checkpoint| checkpoint.broker().supervision().legacy_named_admission())
+            .ok_or(EnforcerError::Conflict)?;
+        let request = named
+            .import_verification_arm_request()
+            .ok_or(EnforcerError::Conflict)?;
+        let facts = named
+            .import_verification_arm_facts()
+            .map_err(|_| EnforcerError::Conflict)?
+            .ok_or(EnforcerError::Conflict)?;
+        let data = NamedImportVerificationProspectiveFactsV2 {
+            version: 2,
+            scope: job.scope().clone(),
+            operation_id: job.operation_id(),
+            arm_pending_head: job.head().clone(),
+            session_id: facts.plan().session_id,
+            helper_id: facts.owned().handle.operation_id(),
+            request: request.clone(),
+            create_facts_hash: facts.create_facts_hash().to_owned(),
+            owned_snapshot_hash: named_import_stop_owned_hash(facts.owned())
+                .map_err(|_| EnforcerError::InvalidInput)?,
+            runtime_binding_hash: facts.runtime_binding_hash().to_owned(),
+            prospective_hash: self.prospective_hash,
+        };
+        data.validate_target(job.scope(), &self.target)?;
+        let (cancel, generation) = self.recorded.generation();
+        Ok((data, self.target, (cancel.clone(), generation)))
+    }
+}
+
+/// Private data for checking one verification target. The authenticated
+/// sender or a retained latch establishes the journal provenance of the head
+/// and of the Create facts digest.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[allow(
+    dead_code,
+    reason = "the verification prospective transport is composed separately"
+)]
+pub(super) struct NamedImportVerificationProspectiveFactsV2 {
+    version: u32,
+    scope: JournalScopeV1,
+    #[serde(deserialize_with = "deserialize_non_nil_uuid")]
+    operation_id: Uuid,
+    arm_pending_head: RevisionRefV1,
+    #[serde(deserialize_with = "deserialize_non_nil_uuid")]
+    session_id: Uuid,
+    #[serde(deserialize_with = "deserialize_non_nil_uuid")]
+    helper_id: Uuid,
+    request: LegacyNamedImportVerificationArmRequestV2,
+    create_facts_hash: String,
+    owned_snapshot_hash: String,
+    runtime_binding_hash: String,
+    prospective_hash: String,
+}
+
+impl NamedImportVerificationProspectiveFactsV2 {
+    /// Compare the decoded data with the exact target. The caller supplies
+    /// the expected scope from authenticated or locally retained context.
+    pub(super) fn validate_target(
+        &self,
+        expected_scope: &JournalScopeV1,
+        target: &ProspectiveRegistrationV1,
+    ) -> EnforcerResult<()> {
+        if self.version != 2
+            || self.operation_id.is_nil()
+            || self.session_id.is_nil()
+            || self.helper_id.is_nil()
+            || self.arm_pending_head.revision() == 0
+            || !hex_hash(self.arm_pending_head.hash())
+            || !hex_hash(&self.create_facts_hash)
+        {
+            return Err(EnforcerError::InvalidInput);
+        }
+        self.request
+            .validate()
+            .map_err(|_| EnforcerError::InvalidInput)?;
+        let prospective_hash = target.digest()?;
+        let owned = target.owned();
+        let owned_snapshot_hash =
+            named_import_stop_owned_hash(owned).map_err(|_| EnforcerError::InvalidInput)?;
+        let runtime_binding_hash = content_hash(
+            "ai-guard:legacy-named-import-runtime-binding:v1",
+            target.authority(),
+        )
+        .map_err(|_| EnforcerError::InvalidInput)?;
+        let process = &owned.observation.process;
+        let invalid = |_| EnforcerError::InvalidInput;
+        if canonical(&self.scope).map_err(invalid)? != canonical(expected_scope).map_err(invalid)?
+            || self.request.namespace != self.scope.control_namespace_uuid().to_string()
+            || self.operation_id == self.helper_id
+            || self.request.arm.operation_id == self.operation_id.to_string()
+            || self.request.arm.operation_id == self.helper_id.to_string()
+            || target.tenant_id() != self.scope.tenant_id()
+            || target.control_origin_hash()
+                != hex::encode(Sha256::digest(self.scope.gateway_origin().as_bytes()))
+            || owned.handle.session_id() != self.session_id
+            || owned.handle.operation_id() != self.helper_id
+            || canonical(&self.request.arm).map_err(invalid)?
+                != canonical(target.arm()).map_err(invalid)?
+            || self.prospective_hash != prospective_hash
+            || self.owned_snapshot_hash != owned_snapshot_hash
+            || self.runtime_binding_hash != runtime_binding_hash
+            || process.running != Some(false)
+            || !matches!(
+                process.status.as_deref(),
+                Some("created" | "configured" | "initialized")
+            )
+            || process.started_at.is_some()
+            || process.finished_at.is_some()
+            || !matches!(process.exit_code, None | Some(0))
+            || process.oom_killed == Some(true)
+        {
+            return Err(EnforcerError::Conflict);
+        }
+        Ok(())
     }
 }
 
