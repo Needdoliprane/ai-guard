@@ -1597,6 +1597,38 @@ impl StopRecoveryReportV1 {
         Ok(evidence)
     }
 
+    #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+    pub(crate) fn full3_worker_terminal_evidence_for_test(
+        self: &Arc<Self>,
+        scope: &JournalScopeV1,
+        operation: Uuid,
+        head: &RevisionRefV1,
+        stop_command: Uuid,
+        expected_binding: &Full3RegistrationBindingV1,
+    ) -> JournalResult<(
+        WorkerV1,
+        LocalCommandReceiptV1,
+        ArmV1,
+        RevisionRefV1,
+        Full3RegistrationBindingV1,
+    )> {
+        let evidence = self.full3_worker_terminal_evidence(
+            scope,
+            operation,
+            head,
+            stop_command,
+            expected_binding,
+        )?;
+        evidence.revalidate()?;
+        Ok((
+            evidence.worker().clone(),
+            evidence.cancel_receipt().clone(),
+            evidence.arm().clone(),
+            evidence.head().clone(),
+            evidence.binding().clone(),
+        ))
+    }
+
     /// The original cold fixture also exercises a claim without a Running
     /// observation. Both paths use the same exact pre-STOP acknowledgement.
     #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
@@ -1619,13 +1651,14 @@ impl StopRecoveryReportV1 {
     }
 
     fn revalidate_full3_observation_lease(&self) -> JournalResult<()> {
+        self.revalidate()?;
         if self.incomplete
             || self.actor_claimed.load(Ordering::SeqCst)
             || self.retained_core.get().is_some()
         {
             return Err(JournalError::Interrupted);
         }
-        self.revalidate()
+        Ok(())
     }
 
     fn full3_worker_claim_before_stop(
