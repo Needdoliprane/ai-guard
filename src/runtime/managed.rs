@@ -1845,10 +1845,12 @@ impl ManagedRuntime {
         parent_operation: Uuid,
         policy: &crate::control::HelperExecutionPolicyV1,
         authorization: crate::broker::writer::AuthorizedLegacyNamedImportCreate,
-        cancel: &CancelGeneration,
-        expected: u64,
     ) -> Result<OwnedContainerSnapshot> {
         authorization.validate_runtime_request(parent_operation, policy, spec, &self.binding)?;
+        let (generation, expected_generation) = authorization.generation();
+        generation
+            .with_current_generation(expected_generation, || ())
+            .context("named ImportVerification Create authorization was canceled before runtime inspection")?;
         ensure!(
             spec.security_preset == crate::control::SecurityPresetV1::FixedSandboxV2
                 && spec
@@ -1875,8 +1877,8 @@ impl ManagedRuntime {
                 spec,
                 false,
                 Some(GenerationSpawnGuard {
-                    generation: cancel.clone(),
-                    expected,
+                    generation: generation.clone(),
+                    expected: expected_generation,
                 }),
             )
             .await?;
@@ -1973,6 +1975,11 @@ impl ManagedRuntime {
             "the retained named Import helper identity changed before verification Create"
         );
         validate_authorized_identity(&import_spec, &observation)?;
+        observation.validate_terminal(self.binding.kind, &retained.observation)?;
+        ensure!(
+            observation.process.exit_code == Some(0) && observation.restart_count == Some(0),
+            "the retained Import helper did not complete successfully without restart"
+        );
         retained
             .observation
             .validate_identity_allocation(&observation)?;

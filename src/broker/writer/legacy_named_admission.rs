@@ -11,6 +11,7 @@ use crate::{
             DecisionAnswerV1, HelperPreparationV1, LegacyNamedAdmissionCheckpoint,
             LegacyNamedImportVerificationPlanV1, SupervisionCheckpointV1, SupervisionOperationV1,
         },
+        enforcer::CancelGeneration,
         journal::{AcceptedJobV1, RevisionRefV1, canonical, digest},
         lifecycle::LocalCommandRequestV1,
     },
@@ -114,6 +115,8 @@ pub(crate) struct AuthorizedLegacyNamedImportCreate {
     import_policy: crate::control::HelperExecutionPolicyV1,
     import_snapshot: OwnedContainerSnapshot,
     authority: RuntimeAuthority,
+    generation: CancelGeneration,
+    expected_generation: u64,
     confirmed_head: RevisionRefV1,
     facts_hash: String,
 }
@@ -129,6 +132,10 @@ impl AuthorizedLegacyNamedImportCreate {
 
     pub(crate) fn import_snapshot(&self) -> &OwnedContainerSnapshot {
         &self.import_snapshot
+    }
+
+    pub(crate) fn generation(&self) -> (&CancelGeneration, u64) {
+        (&self.generation, self.expected_generation)
     }
 
     pub(crate) fn validate_runtime_request(
@@ -715,6 +722,8 @@ impl WriterClient {
         plan: &LegacyConfirmedPlanV1,
         terminal_receipt: &MutationReceiptV1,
         binding: &RuntimeAuthority,
+        generation: &CancelGeneration,
+        expected_generation: u64,
     ) -> JournalResult<Option<AuthorizedLegacyNamedImportCreate>> {
         for _ in 0..ACK_CAS_ATTEMPTS {
             let job = self.load_named_job(plan).await?;
@@ -730,6 +739,9 @@ impl WriterClient {
                 return Ok(None);
             }
 
+            generation
+                .with_current_generation(expected_generation, || ())
+                .map_err(|_| JournalError::Interrupted)?;
             require_open(&current)?;
             let pending = retained
                 .clone()
@@ -756,10 +768,6 @@ impl WriterClient {
                     {
                         return Err(JournalError::Conflict);
                     }
-                    let facts_hash = digest(
-                        "legacy-named-import-verification-create-token-v1",
-                        &canonical(saved)?,
-                    );
                     let policy = retained
                         .import_verification_plan()
                         .ok_or(JournalError::Corrupt)?
@@ -767,26 +775,42 @@ impl WriterClient {
                         .policy();
                     let helper_id =
                         Uuid::parse_str(&policy.helper_id).map_err(|_| JournalError::Corrupt)?;
-                    return Ok(Some(AuthorizedLegacyNamedImportCreate {
-                        operation_id: plan.operation_id,
-                        helper_id,
-                        policy_hash: policy.spec_hash().map_err(|_| JournalError::Corrupt)?,
-                        readonly_spec_hash:
-                            super::super::checkpoint::import_verification_spec_hash(policy)?,
-                        import_policy: retained
-                            .import_creation()
-                            .ok_or(JournalError::Corrupt)?
-                            .policy()
-                            .clone(),
-                        import_snapshot: retained
-                            .import_creation()
-                            .and_then(HelperPreparationV1::owned)
-                            .ok_or(JournalError::Corrupt)?
-                            .clone(),
-                        authority: binding.clone(),
-                        confirmed_head: receipt.head().clone(),
-                        facts_hash,
-                    }));
+                    let facts_hash = digest(
+                        "legacy-named-import-verification-create-token-v1",
+                        &canonical(saved)?,
+                    );
+                    let policy_hash = policy.spec_hash().map_err(|_| JournalError::Corrupt)?;
+                    let readonly_spec_hash =
+                        super::super::checkpoint::import_verification_spec_hash(policy)?;
+                    let import_policy = retained
+                        .import_creation()
+                        .ok_or(JournalError::Corrupt)?
+                        .policy()
+                        .clone();
+                    let import_snapshot = retained
+                        .import_creation()
+                        .and_then(HelperPreparationV1::owned)
+                        .ok_or(JournalError::Corrupt)?
+                        .clone();
+                    let confirmed_head = receipt.head().clone();
+                    let authorization = generation
+                        .with_current_generation(expected_generation, || {
+                            AuthorizedLegacyNamedImportCreate {
+                                operation_id: plan.operation_id,
+                                helper_id,
+                                policy_hash,
+                                readonly_spec_hash,
+                                import_policy,
+                                import_snapshot,
+                                authority: binding.clone(),
+                                generation: generation.clone(),
+                                expected_generation,
+                                confirmed_head,
+                                facts_hash,
+                            }
+                        })
+                        .map_err(|_| JournalError::Interrupted)?;
+                    return Ok(Some(authorization));
                 }
                 Err(LifecycleWriteFailure::BeforePublication(JournalError::Conflict)) => continue,
                 Err(failure) => return Err(failure.journal_error()),

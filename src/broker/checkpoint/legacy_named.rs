@@ -3082,6 +3082,8 @@ mod tests {
             verification_writer.load(operation).await?.unwrap().head(),
             &planned_head
         );
+        let create_generation = CancelGeneration::new();
+        let create_expected_generation = create_generation.current();
         let create_base = verification_writer
             .load(operation)
             .await?
@@ -3090,6 +3092,25 @@ mod tests {
             .broker_checkpoint_v3()
             .ok_or(JournalError::Conflict)?;
         let create_base_head = create_base.head().clone();
+        let stale_create_generation = CancelGeneration::new();
+        let stale_expected_generation = stale_create_generation.current();
+        stale_create_generation.advance_to(stale_expected_generation + 1);
+        assert!(matches!(
+            verification_writer
+                .record_legacy_named_import_verification_create(
+                    &plan,
+                    &terminal_receipt,
+                    &authority,
+                    &stale_create_generation,
+                    stale_expected_generation,
+                )
+                .await,
+            Err(JournalError::Interrupted)
+        ));
+        assert_eq!(
+            verification_writer.load(operation).await?.unwrap().head(),
+            &create_base_head
+        );
         let mut wrong_endpoint = authority.clone();
         wrong_endpoint.endpoint.push_str("-wrong");
         assert!(matches!(
@@ -3098,6 +3119,8 @@ mod tests {
                     &plan,
                     &terminal_receipt,
                     &wrong_endpoint,
+                    &create_generation,
+                    create_expected_generation,
                 )
                 .await,
             Err(JournalError::Conflict)
@@ -3111,6 +3134,8 @@ mod tests {
                     &plan,
                     &terminal_receipt,
                     &changed_invocation,
+                    &create_generation,
+                    create_expected_generation,
                 )
                 .await,
             Err(JournalError::Conflict)
@@ -3181,11 +3206,15 @@ mod tests {
                 &plan,
                 &terminal_receipt,
                 &authority,
+                &create_generation,
+                create_expected_generation,
             ),
             verification_writer.record_legacy_named_import_verification_create(
                 &plan,
                 &terminal_receipt,
                 &authority,
+                &create_generation,
+                create_expected_generation,
             ),
         );
         let create_one = create_one?;
@@ -3206,6 +3235,22 @@ mod tests {
         assert_eq!(create_token.operation_id(), operation);
         assert_eq!(create_token.confirmed_head(), committed_create.head());
         assert_eq!(create_token.facts_hash(), create_facts_hash.as_str());
+        assert_eq!(create_token.generation().1, create_expected_generation);
+        assert!(
+            create_token
+                .generation()
+                .0
+                .with_current_generation(create_expected_generation, || ())
+                .is_ok()
+        );
+        create_generation.advance_to(create_expected_generation + 1);
+        assert!(
+            create_token
+                .generation()
+                .0
+                .with_current_generation(create_expected_generation, || ())
+                .is_err()
+        );
         assert!(matches!(
             verification_writer
                 .advance_lifecycle(operation, create_base_head, exact_pending_create)
@@ -3247,6 +3292,8 @@ mod tests {
                     &plan,
                     &terminal_receipt,
                     &authority,
+                    &create_generation,
+                    create_expected_generation,
                 )
                 .await?
                 .is_none()
@@ -3260,6 +3307,8 @@ mod tests {
                     &plan,
                     &divergent_terminal,
                     &authority,
+                    &create_generation,
+                    create_expected_generation,
                 )
                 .await,
             Err(JournalError::Conflict)
@@ -3272,6 +3321,8 @@ mod tests {
                     &plan,
                     &terminal_receipt,
                     &divergent_binding,
+                    &create_generation,
+                    create_expected_generation,
                 )
                 .await,
             Err(JournalError::Conflict)
@@ -3404,6 +3455,8 @@ mod tests {
                     &plan,
                     &terminal_receipt,
                     &authority,
+                    &create_generation,
+                    create_expected_generation,
                 )
                 .await?
                 .is_none()
@@ -3455,6 +3508,8 @@ mod tests {
             &claim_receipt,
         )
         .await?;
+        let stopped_create_generation = CancelGeneration::new();
+        let stopped_expected_generation = stopped_create_generation.current();
         stopped_plan_writer
             .record_legacy_named_import_observation(&plan, terminal_request.clone())
             .await?;
@@ -3487,6 +3542,8 @@ mod tests {
                     &plan,
                     &terminal_receipt,
                     &authority,
+                    &stopped_create_generation,
+                    stopped_expected_generation,
                 )
                 .await,
             Err(JournalError::Interrupted)
