@@ -6,7 +6,8 @@
 //! The sentinel stays absent until this transaction; an interrupted publication
 //! leaves a partial target that the next attempt refuses. After COMMIT the same
 //! locked connection re-reads the published prefix in a new snapshot before any
-//! receipt, and the open guard repeats that verification before admission.
+//! receipt. Opening an existing source also requires verification of any later
+//! history.
 
 use super::super::fresh_anchor::{FreshAnchorDraft, FreshAnchorRequestV1};
 use super::super::{OwnedAuditLock, decode_row, driver_error};
@@ -221,8 +222,7 @@ async fn read_published_binding(
     })
 }
 
-/// Replay the closed genesis+anchor prefix and recompute the durable head from
-/// the exact stored payload bytes, never a re-serialization.
+/// Verify the entire history of a source that has just been published.
 async fn replay_published_prefix(
     tx: &mut Transaction<'_>,
     bound: &AuditHead,
@@ -239,15 +239,25 @@ async fn replay_published_prefix(
         )
         .await
         .map_err(driver_error)?;
-    ensure!(
-        rows.len() as i64 == PUBLISHED_EVENTS,
-        "MySQL owned publication chain length mismatch"
-    );
+    let [genesis, anchor]: [Row; PUBLISHED_EVENTS as usize] = rows
+        .try_into()
+        .map_err(|_| anyhow!("MySQL owned publication chain length mismatch"))?;
+    let head = verify_owned_origin_prefix([decode_row(genesis)?, decode_row(anchor)?], draft)?;
+    ensure!(head == *bound, "MySQL audit head mismatch");
+    Ok(())
+}
+
+/// Verify the two origin records against the expected draft and return their
+/// head. The hash covers the exact stored payload bytes. A caller verifying
+/// subsequent history must continue from this head.
+fn verify_owned_origin_prefix(
+    rows: [EventColumns; PUBLISHED_EVENTS as usize],
+    draft: &FreshAnchorDraft<'_>,
+) -> Result<AuditHead> {
     let request = draft.request();
     let namespace = request.namespace_id.to_string();
     let mut head = AuditHead::empty();
-    for row in rows {
-        let columns: EventColumns = decode_row(row)?;
+    for columns in rows {
         let encoded = decode_event_columns(columns)?;
         let stored = &encoded.stored;
         ensure!(
@@ -277,14 +287,122 @@ async fn replay_published_prefix(
             );
         }
     }
-    ensure!(head == *bound, "MySQL audit head mismatch");
-    Ok(())
+    Ok(head)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::audit::event_codec::digest;
+    use crate::mysql_storage::owned_origin::fresh_anchor::ConfiguredTenantNamespace;
+
+    fn origin_request(schema_version: u16) -> FreshAnchorRequestV1 {
+        FreshAnchorRequestV1 {
+            operation_id: Uuid::from_u128(1),
+            schema_version,
+            tenant_id: "tenant-qa".into(),
+            namespace_id: Uuid::from_u128(2),
+            installation_id: Uuid::from_u128(3),
+            source_id: Uuid::from_u128(4),
+            server_uuid: Uuid::from_u128(5),
+            schema: "qa_owned".into(),
+        }
+    }
+
+    fn origin_draft(request: &FreshAnchorRequestV1) -> Result<FreshAnchorDraft<'_>> {
+        request.plan(
+            request.schema_version,
+            request.server_uuid,
+            &request.schema,
+            ConfiguredTenantNamespace {
+                tenant_id: &request.tenant_id,
+                namespace_id: request.namespace_id,
+            },
+            &Redactor::new(Vec::new()),
+        )
+    }
+
+    fn encoded_origin_row(seq: i64, previous: String, mut event: Event) -> Result<EventColumns> {
+        event.timestamp = "2026-11-25T00:00:00.000Z".into();
+        let (event, payload) = prepare_event(&Redactor::new(Vec::new()), event)?;
+        let received_at = "2026-11-25T00:00:01.000Z";
+        let hash = digest(seq, received_at, &previous, &payload);
+        Ok((seq, event.id, received_at.into(), previous, hash, payload))
+    }
+
+    fn origin_rows(draft: &FreshAnchorDraft<'_>) -> Result<[EventColumns; 2]> {
+        let request = draft.request();
+        let genesis = owned_genesis_event(&request.tenant_id, &request.namespace_id.to_string());
+        let genesis = encoded_origin_row(1, "0".repeat(64), genesis)?;
+        let anchor = encoded_origin_row(2, genesis.4.clone(), draft.event().clone())?;
+        Ok([genesis, anchor])
+    }
+
+    #[test]
+    fn owned_origin_prefix_returns_the_verified_head_for_both_formats() -> Result<()> {
+        for schema_version in [14, 15] {
+            let request = origin_request(schema_version);
+            let draft = origin_draft(&request)?;
+            let rows = origin_rows(&draft)?;
+            let expected = AuditHead {
+                seq: 2,
+                hash: rows[1].4.clone(),
+                payload_bytes: (rows[0].5.len() + rows[1].5.len()) as u64,
+            };
+            assert_eq!(verify_owned_origin_prefix(rows, &draft)?, expected);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn owned_origin_prefix_hashes_the_exact_stored_genesis_bytes() -> Result<()> {
+        let request = origin_request(15);
+        let draft = origin_draft(&request)?;
+        let [mut genesis, _] = origin_rows(&draft)?;
+        genesis.5.push('\n');
+        genesis.4 = digest(genesis.0, &genesis.2, &genesis.3, &genesis.5);
+        let anchor = encoded_origin_row(2, genesis.4.clone(), draft.event().clone())?;
+        let expected = AuditHead {
+            seq: 2,
+            hash: anchor.4.clone(),
+            payload_bytes: (genesis.5.len() + anchor.5.len()) as u64,
+        };
+        assert_eq!(
+            verify_owned_origin_prefix([genesis, anchor], &draft)?,
+            expected
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn owned_origin_prefix_rejects_another_format_or_installation() -> Result<()> {
+        let request = origin_request(14);
+        let published = origin_draft(&request)?;
+        let rows = origin_rows(&published)?;
+        let another_format = origin_request(15);
+        let another_installation = FreshAnchorRequestV1 {
+            installation_id: Uuid::from_u128(6),
+            ..request.clone()
+        };
+        for expected in [another_format, another_installation] {
+            assert!(verify_owned_origin_prefix(rows.clone(), &origin_draft(&expected)?).is_err());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn owned_origin_prefix_rejects_a_disconnected_edge_or_changed_head() -> Result<()> {
+        let request = origin_request(14);
+        let draft = origin_draft(&request)?;
+        let [genesis, anchor] = origin_rows(&draft)?;
+        let disconnected = encoded_origin_row(2, "f".repeat(64), draft.event().clone())?;
+        assert!(verify_owned_origin_prefix([genesis.clone(), disconnected], &draft).is_err());
+
+        let mut changed_head = anchor;
+        changed_head.4 = "f".repeat(64);
+        assert!(verify_owned_origin_prefix([genesis, changed_head], &draft).is_err());
+        Ok(())
+    }
 
     #[test]
     fn owned_genesis_binds_the_configured_tenant_and_namespace() {
