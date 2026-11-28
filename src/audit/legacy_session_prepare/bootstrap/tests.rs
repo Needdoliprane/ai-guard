@@ -1159,15 +1159,25 @@ async fn legacy_named_cancel_releases_an_unarmed_reservation_after_revocation() 
 
 #[tokio::test]
 async fn legacy_named_import_arm_preserves_its_prefix_and_closes_manual_claims() {
-    named_import_arm_fixture(false).await;
+    named_import_arm_fixture(ImportArmCase::Import).await;
 }
 
 #[tokio::test]
 async fn legacy_named_import_verification_arm_requires_exact_named_terminal_and_authority() {
-    named_import_arm_fixture(true).await;
+    named_import_arm_fixture(ImportArmCase::VerificationArm).await;
 }
 
-async fn named_import_arm_fixture(verify_import_arm: bool) {
+#[path = "verification_claim_tests.rs"]
+mod verification_claim_tests;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ImportArmCase {
+    Import,
+    VerificationArm,
+    VerificationClaim,
+}
+
+async fn named_import_arm_fixture(case: ImportArmCase) {
     use crate::{
         api::{GatewayState, TenantGateway, gateway_router},
         audit::supervision_admission as admission_codec,
@@ -1812,7 +1822,7 @@ async fn named_import_arm_fixture(verify_import_arm: bool) {
         snapshot.exit_code = Some(0);
         terminal
     };
-    let verification = if verify_import_arm {
+    let verification = if case != ImportArmCase::Import {
         let terminal = terminal_fact();
         let import_terminal = store
             .observe_legacy_named_import(&broker, &terminal, |receipt, replayed| {
@@ -1968,6 +1978,18 @@ async fn named_import_arm_fixture(verify_import_arm: bool) {
             .receipt
             .validate_for_arm(&verification.arm)
             .unwrap();
+        if case == ImportArmCase::VerificationClaim {
+            verification_claim_tests::exercise(
+                &f,
+                &store,
+                (&broker, &other_broker),
+                credential,
+                &prepared,
+                (&verification, &accepted.receipt),
+                &named_claim,
+            );
+            return;
+        }
         assert!(
             store
                 .execution_arm(&verification.arm.operation_id)

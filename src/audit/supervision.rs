@@ -3,8 +3,9 @@ use super::*;
 use crate::audit::{
     legacy_session_prepare::{
         LEGACY_NAMED_ARM_KIND, LEGACY_NAMED_IMPORT_CLAIM_KIND,
-        LEGACY_NAMED_IMPORT_VERIFICATION_ARM_KIND, LegacyNamedArmV1, LegacyNamedCancelV1,
-        LegacyNamedImportClaimV1, legacy_named_import_claim_predecessor,
+        LEGACY_NAMED_IMPORT_VERIFICATION_ARM_KIND, LEGACY_NAMED_IMPORT_VERIFICATION_CLAIM_KIND,
+        LegacyNamedArmV1, LegacyNamedCancelV1, LegacyNamedImportClaimV1,
+        LegacyNamedImportVerificationClaimV2, legacy_named_import_claim_predecessor,
     },
     supervision_admission::{self as admission_codec, Binding, receipt_for},
     supervision_genesis,
@@ -91,6 +92,7 @@ pub(crate) enum Input {
     WorkerClaim(Box<ArmedStartClaimV1>),
     HelperClaim(Box<HelperStartClaimV1>),
     LegacyNamedImportClaim(Box<LegacyNamedImportClaimV1>),
+    LegacyNamedImportVerificationClaim(Box<LegacyNamedImportVerificationClaimV2>),
     HelperObservation(Box<HelperObservationV1>),
     LegacyNamedImportObservation(Box<LegacyNamedImportObservationV1>),
     HelperCleanup(Box<HelperCleanupV1>),
@@ -153,6 +155,7 @@ impl Input {
             Self::WorkerClaim(r) => &r.operation_id,
             Self::HelperClaim(r) => &r.operation_id,
             Self::LegacyNamedImportClaim(r) => &r.request.claim.operation_id,
+            Self::LegacyNamedImportVerificationClaim(r) => &r.request.claim.operation_id,
             Self::HelperObservation(r) => &r.operation_id,
             Self::LegacyNamedImportObservation(r) => &r.request.observation.operation_id,
             Self::HelperCleanup(r) => &r.operation_id,
@@ -168,7 +171,9 @@ impl Input {
             Self::LegacyNamedArm(_) => "prepare",
             Self::LegacyNamedCancel(_) => "cancel_reserved",
             Self::WorkerClaim(_) => "armed_start_claim",
-            Self::HelperClaim(_) | Self::LegacyNamedImportClaim(_) => "helper_start_claim",
+            Self::HelperClaim(_)
+            | Self::LegacyNamedImportClaim(_)
+            | Self::LegacyNamedImportVerificationClaim(_) => "helper_start_claim",
             Self::HelperObservation(_) | Self::LegacyNamedImportObservation(_) => "helper_observe",
             Self::HelperCleanup(_) => "helper_cleanup",
             Self::Export(_) => "export_request",
@@ -180,6 +185,9 @@ impl Input {
             Self::LegacyNamedArm(_) => LEGACY_NAMED_ARM_KIND,
             Self::LegacyNamedImportVerificationArm(_) => LEGACY_NAMED_IMPORT_VERIFICATION_ARM_KIND,
             Self::LegacyNamedImportClaim(_) => LEGACY_NAMED_IMPORT_CLAIM_KIND,
+            Self::LegacyNamedImportVerificationClaim(_) => {
+                LEGACY_NAMED_IMPORT_VERIFICATION_CLAIM_KIND
+            }
             Self::LegacyNamedImportObservation(_) => LEGACY_NAMED_IMPORT_OBSERVATION_KIND,
             _ => admission_codec::KIND,
         }
@@ -195,6 +203,7 @@ impl Input {
             Self::WorkerClaim(r) => r.input_hash(),
             Self::HelperClaim(r) => r.input_hash(),
             Self::LegacyNamedImportClaim(r) => r.input_hash(),
+            Self::LegacyNamedImportVerificationClaim(r) => r.input_hash(),
             Self::HelperObservation(r) => r.input_hash(),
             Self::LegacyNamedImportObservation(r) => r.input_hash(),
             Self::HelperCleanup(r) => r.input_hash(),
@@ -217,6 +226,9 @@ impl Input {
             Self::WorkerClaim(r) => Some(&r.worker_id),
             Self::HelperClaim(r) => Some(&r.arm_receipt.worker_id),
             Self::LegacyNamedImportClaim(r) => Some(&r.request.claim.arm_receipt.worker_id),
+            Self::LegacyNamedImportVerificationClaim(r) => {
+                Some(&r.request.claim.arm_receipt.worker_id)
+            }
             Self::HelperObservation(r) => Some(&r.arm_receipt.worker_id),
             Self::LegacyNamedImportObservation(r) => {
                 Some(&r.request.observation.arm_receipt.worker_id)
@@ -254,6 +266,7 @@ pub(in crate::audit) fn load_record(
                     | LEGACY_NAMED_ARM_KIND
                     | LEGACY_NAMED_IMPORT_VERIFICATION_ARM_KIND
                     | LEGACY_NAMED_IMPORT_CLAIM_KIND
+                    | LEGACY_NAMED_IMPORT_VERIFICATION_CLAIM_KIND
                     | LEGACY_NAMED_IMPORT_OBSERVATION_KIND
                     | "control.supervision.transition"
             ))?;
@@ -752,14 +765,19 @@ impl Replay {
         db: &Connection,
         stored: &StoredEvent,
         workers: &BTreeMap<String, WorkerV1>,
-        request: &HelperStartClaimV1,
-        named: Option<&LegacyNamedImportClaimV1>,
+        input: &Input,
     ) -> anyhow::Result<()> {
+        let (request, named) = match input {
+            Input::HelperClaim(request) => (request.as_ref(), false),
+            Input::LegacyNamedImportClaim(named) => (&named.request.claim, true),
+            Input::LegacyNamedImportVerificationClaim(named) => (&named.request.claim, true),
+            _ => return Err(ControlFailure::InvalidRequest.into()),
+        };
         let entry = self.checked_arm(&request.arm_receipt)?;
-        conflict(entry.legacy_named == named.is_some())?;
+        conflict(entry.legacy_named == named)?;
         let parent = self.parent(workers, &entry.request.worker_id)?;
-        if let Some(named) = named {
-            legacy_named_import_claim_predecessor(db, stored, named, parent)?;
+        if named {
+            legacy_named_import_claim_predecessor(db, stored, input, parent)?;
         }
         self.bound(parent, &entry.request.intent_hash)?;
         request.validate_for_arm(&entry.request)?;
@@ -799,6 +817,18 @@ impl Replay {
                 == serde_json::to_value(&request.arm_receipt)?,
         )?;
         let entry = self.checked_arm(&request.arm_receipt)?;
+        // Historical generic observations can only predate the named verification rail.
+        conflict(
+            stored.event.kind != admission_codec::KIND
+                || !entry.legacy_named
+                || !matches!(
+                    &entry.request.subject,
+                    ArmSubjectV1::Helper {
+                        purpose: HelperPurposeV1::ImportVerification,
+                        ..
+                    }
+                ),
+        )?;
         invalid(request.observation.inspection == entry.request.inspection)?;
         if let Some(report) = &request.verification {
             let ArmSubjectV1::Helper {
@@ -976,13 +1006,11 @@ impl Replay {
                     db, stored, cancel, parent, transition,
                 )?;
             }
-            Input::HelperClaim(request) => {
+            Input::HelperClaim(_)
+            | Input::LegacyNamedImportClaim(_)
+            | Input::LegacyNamedImportVerificationClaim(_) => {
                 invalid(record.worker_record.is_none())?;
-                self.record_helper_claim(db, stored, workers, request, None)?;
-            }
-            Input::LegacyNamedImportClaim(named) => {
-                invalid(record.worker_record.is_none())?;
-                self.record_helper_claim(db, stored, workers, &named.request.claim, Some(named))?;
+                self.record_helper_claim(db, stored, workers, &record.input)?;
             }
             Input::HelperObservation(request) => {
                 invalid(record.worker_record.is_none())?;

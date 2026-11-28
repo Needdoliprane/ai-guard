@@ -497,15 +497,90 @@ impl LegacyNamedImportClaimRequestV1 {
         &self,
         receipt: &super::MutationReceiptV1,
     ) -> anyhow::Result<()> {
-        hash(&receipt.audit_hash)?;
-        conflict(
-            receipt.operation_id == self.claim.operation_id
-                && receipt.worker_id.as_deref() == Some(self.claim.arm_receipt.worker_id.as_str())
-                && receipt.revision.is_none()
-                && receipt.audit_seq > self.claim.arm_receipt.audit_seq
-                && receipt.input_hash == self.input_hash()?,
+        validate_named_import_claim_receipt(&self.claim, receipt, || self.input_hash())
+    }
+}
+
+/// A separate claim for the retained verification Arm of a named Import.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct LegacyNamedImportVerificationClaimRequestV2 {
+    pub(crate) version: u32,
+    pub(crate) binding_ref: Uuid,
+    pub(crate) namespace: String,
+    pub(crate) claim: super::HelperStartClaimV1,
+}
+
+impl LegacyNamedImportVerificationClaimRequestV2 {
+    pub(crate) fn operation_id(binding_ref: Uuid, arm_id: Uuid) -> String {
+        let domain =
+            format!("ai-guard:legacy-named-import-verification-claim-operation:v2:{binding_ref}");
+        crate::model::bound_event_id(domain.as_bytes(), arm_id)
+    }
+
+    pub(crate) fn validate(&self) -> anyhow::Result<()> {
+        self.claim.validate()?;
+        let receipt = &self.claim.arm_receipt;
+        let arm_id = canonical_uuid(&receipt.arm_id)?;
+        let attempt = canonical_uuid(&receipt.attempt_id)?;
+        invalid(
+            self.version == 2
+                && !self.binding_ref.is_nil()
+                && !canonical_uuid(&self.namespace)?.is_nil()
+                && !canonical_uuid(&self.claim.helper_id)?.is_nil()
+                && !canonical_uuid(&self.claim.emitter_id)?.is_nil()
+                && !canonical_uuid(&receipt.worker_id)?.is_nil()
+                && !attempt.is_nil()
+                && receipt.control_namespace_uuid == self.namespace
+                && receipt.arm_id
+                    == LegacyNamedImportVerificationArmRequestV2::operation_id(
+                        self.binding_ref,
+                        attempt,
+                    )
+                && self.claim.operation_id == Self::operation_id(self.binding_ref, arm_id),
         )
     }
+
+    pub(crate) fn validate_for_arm(
+        &self,
+        binding_ref: Uuid,
+        namespace: &str,
+        arm: &super::ArmV1,
+        receipt: &super::ArmReceiptV1,
+    ) -> anyhow::Result<()> {
+        self.validate()?;
+        invalid(self.binding_ref == binding_ref && self.namespace == namespace)?;
+        LegacyNamedImportVerificationArmRequestV2::validate_arm(binding_ref, namespace, arm)?;
+        conflict(serde_json::to_value(&self.claim.arm_receipt)? == serde_json::to_value(receipt)?)?;
+        self.claim.validate_for_arm(arm)
+    }
+
+    pub(crate) fn input_hash(&self) -> anyhow::Result<String> {
+        self.validate()?;
+        content_hash("ai-guard:legacy-named-import-verification-claim:v2", self)
+    }
+
+    pub(crate) fn validate_receipt(
+        &self,
+        receipt: &super::MutationReceiptV1,
+    ) -> anyhow::Result<()> {
+        validate_named_import_claim_receipt(&self.claim, receipt, || self.input_hash())
+    }
+}
+
+fn validate_named_import_claim_receipt(
+    claim: &super::HelperStartClaimV1,
+    receipt: &super::MutationReceiptV1,
+    input_hash: impl FnOnce() -> anyhow::Result<String>,
+) -> anyhow::Result<()> {
+    hash(&receipt.audit_hash)?;
+    conflict(
+        receipt.operation_id == claim.operation_id
+            && receipt.worker_id.as_deref() == Some(claim.arm_receipt.worker_id.as_str())
+            && receipt.revision.is_none()
+            && receipt.audit_seq > claim.arm_receipt.audit_seq
+            && receipt.input_hash == input_hash()?,
+    )
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
