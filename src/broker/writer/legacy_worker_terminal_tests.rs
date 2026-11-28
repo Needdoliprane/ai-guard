@@ -95,6 +95,24 @@ async fn stops_writer_reads_the_exact_legacy_worker_after_durable_cancel() -> an
         after.cancel_receipts().len(),
         before.cancel_receipts().len() + 1
     );
+    let namespace = root
+        .persistent_child("broker-journal-v1", false)?
+        .context("retained fixture namespace missing")?;
+    namespace
+        .persistent_child("unclassified-fixture-entry", true)?
+        .context("cannot mark the fixture inventory incomplete")?;
+    let incomplete = stops
+        .recovery_status(operation)
+        .await?
+        .context("known job missing from the incomplete inventory")?;
+    assert!(incomplete.incomplete());
+    assert_eq!(incomplete.head(), confirmed.receipt().head());
+    assert!(matches!(
+        stops
+            .legacy_worker_terminal_recovery_state(operation, seed.scope(), after.head())
+            .await,
+        Err(JournalError::Interrupted)
+    ));
     assert_eq!(seed.store().head()?, store_head);
     assert_eq!(seed.worker_get_count(), core_reads);
     assert_eq!(seed.post_count(), core_mutations);
@@ -105,6 +123,7 @@ async fn stops_writer_reads_the_exact_legacy_worker_after_durable_cancel() -> an
 #[tokio::test]
 async fn stops_writer_retains_the_first_terminal_observation_across_later_stops()
 -> anyhow::Result<()> {
+    use LegacyWorkerTerminalRecoveryStateV1::{Confirmed, Fresh, Pending};
     use ReservedLegacyWorkerTerminalObservationV1::{Appended, Existing};
 
     let seed = running_seed_for_cold_terminal_test().await;
@@ -168,9 +187,23 @@ async fn stops_writer_retains_the_first_terminal_observation_across_later_stops(
     let stop_hash = confirmed.receipt().input_hash().to_owned();
     drop(confirmed);
 
-    let proof = stops
-        .legacy_worker_terminal_evidence(operation, command)
+    let older = stops
+        .legacy_worker_terminal_evidence(operation, seed.cancel_id)
         .await?;
+    let Fresh(proof) = stops
+        .legacy_worker_terminal_recovery_state(
+            operation,
+            seed.scope(),
+            older.cancel_receipt().head(),
+        )
+        .await?
+    else {
+        anyhow::bail!("the exact STOP and Running Worker must admit a fresh observation");
+    };
+    let proof = *proof;
+    assert_eq!(proof.head(), &stop_head);
+    assert_eq!(proof.cancel_receipt().command_id(), command);
+    assert_eq!(proof.cancel_receipt().input_hash(), stop_hash);
     let worker = proof.worker();
     let mut terminal = worker
         .last_observation
@@ -205,9 +238,6 @@ async fn stops_writer_retains_the_first_terminal_observation_across_later_stops(
     let calls_path = seed.root().join("calls");
     let engine_calls = std::fs::read(&calls_path)?;
 
-    let older = stops
-        .legacy_worker_terminal_evidence(operation, seed.cancel_id)
-        .await?;
     assert!(matches!(
         stops
             .reserve_legacy_worker_terminal_observation(older, expected.clone())
@@ -304,6 +334,17 @@ async fn stops_writer_retains_the_first_terminal_observation_across_later_stops(
     assert_eq!(pending.stop().command_id(), command);
     assert_eq!(pending.stop().head(), &stop_head);
     assert_eq!(pending.head(), &later_head);
+    let Pending(cold_pending) = reopened
+        .legacy_worker_terminal_recovery_state(operation, seed.scope(), &stop_head)
+        .await?
+    else {
+        anyhow::bail!("the new lease must recover the pending request from the original STOP");
+    };
+    assert_eq!(canonical(cold_pending.request())?, expected_bytes);
+    assert_eq!(cold_pending.stop().command_id(), command);
+    assert_eq!(cold_pending.stop().head(), &stop_head);
+    assert_eq!(cold_pending.stop().input_hash(), stop_hash);
+    assert_eq!(cold_pending.head(), &later_head);
     assert!(
         reopened
             .confirmed_legacy_worker_terminal_observation(operation, seed.scope(), pending.head())
@@ -412,12 +453,26 @@ async fn stops_writer_retains_the_first_terminal_observation_across_later_stops(
         canonical(cold.response())?,
         canonical(acknowledged.response())?
     );
+    let Confirmed(cold_ack) = restarted
+        .legacy_worker_terminal_recovery_state(operation, seed.scope(), &stop_head)
+        .await?
+    else {
+        anyhow::bail!("the new lease must recover the exact durable ACK");
+    };
+    assert_eq!(cold_ack.head(), acknowledged.head());
+    assert_eq!(canonical(cold_ack.response())?, canonical(&response)?);
     let mut wrong_scope = serde_json::to_value(seed.scope())?;
     wrong_scope["control_namespace_uuid"] = serde_json::json!(Uuid::new_v4());
     let wrong_scope: JournalScopeV1 = serde_json::from_value(wrong_scope)?;
     assert!(matches!(
         restarted
             .confirmed_legacy_worker_terminal_observation(operation, &wrong_scope, pending.head())
+            .await,
+        Err(JournalError::Conflict)
+    ));
+    assert!(matches!(
+        restarted
+            .legacy_worker_terminal_recovery_state(operation, &wrong_scope, &stop_head)
             .await,
         Err(JournalError::Conflict)
     ));
@@ -435,6 +490,12 @@ async fn stops_writer_retains_the_first_terminal_observation_across_later_stops(
     assert!(matches!(
         restarted
             .confirmed_legacy_worker_terminal_observation(operation, seed.scope(), &wrong_head)
+            .await,
+        Err(JournalError::Conflict)
+    ));
+    assert!(matches!(
+        restarted
+            .legacy_worker_terminal_recovery_state(operation, seed.scope(), &wrong_head)
             .await,
         Err(JournalError::Conflict)
     ));

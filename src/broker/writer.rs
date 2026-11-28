@@ -20,7 +20,7 @@ use super::{
             inventory::StopInventoryPageV1,
             legacy_worker_terminal::{
                 ConfirmedLegacyWorkerTerminalObservationV1, LegacyWorkerTerminalEvidenceV1,
-                ReservedLegacyWorkerTerminalObservationV1,
+                LegacyWorkerTerminalRecoveryStateV1, ReservedLegacyWorkerTerminalObservationV1,
                 RetainedLegacyWorkerTerminalObservationV1,
             },
         },
@@ -385,6 +385,11 @@ enum Command {
         operation_id: Uuid,
         expected: Box<(JournalScopeV1, RevisionRefV1)>,
         reply: Reply<Option<ConfirmedLegacyWorkerTerminalObservationV1>>,
+    },
+    ReadLegacyWorkerTerminalRecoveryState {
+        operation_id: Uuid,
+        expected: Box<(JournalScopeV1, RevisionRefV1)>,
+        reply: Reply<LegacyWorkerTerminalRecoveryStateV1>,
     },
     ReserveLegacyWorkerTerminalObservation {
         input: Box<(LegacyWorkerTerminalEvidenceV1, WorkerMutationV1)>,
@@ -824,6 +829,28 @@ impl StopWriterClient {
         self.0
             .call(
                 move |reply| Command::ReadConfirmedLegacyWorkerTerminalObservation {
+                    operation_id,
+                    expected,
+                    reply,
+                },
+            )
+            .await
+    }
+
+    #[allow(
+        dead_code,
+        reason = "the Legacy terminal recovery caller is composed separately"
+    )]
+    pub(in crate::broker) async fn legacy_worker_terminal_recovery_state(
+        &self,
+        operation_id: Uuid,
+        expected_scope: &JournalScopeV1,
+        ancestor: &RevisionRefV1,
+    ) -> JournalResult<LegacyWorkerTerminalRecoveryStateV1> {
+        let expected = Box::new((expected_scope.clone(), ancestor.clone()));
+        self.0
+            .call(
+                move |reply| Command::ReadLegacyWorkerTerminalRecoveryState {
                     operation_id,
                     expected,
                     reply,
@@ -2454,6 +2481,29 @@ fn serve_backend(
                             &scope,
                             &ancestor,
                         ),
+                    Backend::Full(_) => Err(JournalError::InvalidInput),
+                };
+                let _ = respond(
+                    &backend,
+                    &status,
+                    reply,
+                    result,
+                    status_cache::Update::None,
+                    false,
+                );
+            }
+            Command::ReadLegacyWorkerTerminalRecoveryState {
+                operation_id,
+                expected,
+                reply,
+            } => {
+                let (scope, ancestor) = *expected;
+                let result = match &backend {
+                    Backend::Stops(journal) => journal.legacy_worker_terminal_recovery_state(
+                        operation_id,
+                        &scope,
+                        &ancestor,
+                    ),
                     Backend::Full(_) => Err(JournalError::InvalidInput),
                 };
                 let _ = respond(

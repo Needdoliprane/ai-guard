@@ -88,10 +88,24 @@ pub(in crate::broker) enum ReservedLegacyWorkerTerminalObservationV1 {
     Existing(RetainedLegacyWorkerTerminalObservationV1),
 }
 
+/// Journal state at one verified head under the current STOP writer lease.
+/// Fresh carries the exact STOP and Worker evidence. An observer must recheck
+/// this evidence and its authority immediately before inspecting the target.
+#[allow(
+    dead_code,
+    reason = "the Legacy terminal recovery caller is composed separately"
+)]
+pub(in crate::broker) enum LegacyWorkerTerminalRecoveryStateV1 {
+    Confirmed(Box<ConfirmedLegacyWorkerTerminalObservationV1>),
+    Pending(Box<RetainedLegacyWorkerTerminalObservationV1>),
+    Fresh(Box<LegacyWorkerTerminalEvidenceV1>),
+}
+
 opaque!(
     RetainedLegacyWorkerTerminalObservationV1,
     ConfirmedLegacyWorkerTerminalObservationV1,
-    ReservedLegacyWorkerTerminalObservationV1
+    ReservedLegacyWorkerTerminalObservationV1,
+    LegacyWorkerTerminalRecoveryStateV1,
 );
 
 #[allow(
@@ -270,6 +284,80 @@ impl StopJournal {
         expected_scope: &JournalScopeV1,
         ancestor: &RevisionRefV1,
     ) -> JournalResult<Option<ConfirmedLegacyWorkerTerminalObservationV1>> {
+        self.read_legacy_worker_terminal_prefix(
+            operation_id,
+            expected_scope,
+            ancestor,
+            |job, proof| {
+                let recorded =
+                    recorded_observation(job, &proof)?.ok_or(JournalError::Interrupted)?;
+                Ok(recorded
+                    .response
+                    .map(|response| ConfirmedLegacyWorkerTerminalObservationV1 {
+                        head: job.head().clone(),
+                        response: response.clone(),
+                    }))
+            },
+        )
+    }
+
+    pub(in crate::broker) fn legacy_worker_terminal_recovery_state(
+        &self,
+        operation_id: Uuid,
+        expected_scope: &JournalScopeV1,
+        ancestor: &RevisionRefV1,
+    ) -> JournalResult<LegacyWorkerTerminalRecoveryStateV1> {
+        use LegacyWorkerTerminalRecoveryStateV1::{Confirmed, Fresh, Pending};
+
+        self.read_legacy_worker_terminal_prefix(
+            operation_id,
+            expected_scope,
+            ancestor,
+            |job, proof| {
+                if let Some(recorded) = recorded_observation(job, &proof)? {
+                    return Ok(match recorded.response {
+                        Some(response) => {
+                            Confirmed(Box::new(ConfirmedLegacyWorkerTerminalObservationV1 {
+                                head: job.head().clone(),
+                                response: response.clone(),
+                            }))
+                        }
+                        None => Pending(Box::new(recorded.pending)),
+                    });
+                }
+
+                let worker = proof.worker();
+                require_terminal_parent(worker)?;
+                let metadata = job.metadata.as_ref().ok_or(JournalError::Corrupt)?;
+                let operations = metadata
+                    .checkpoint
+                    .supervised()
+                    .ok_or(JournalError::Interrupted)?
+                    .supervision()
+                    .operations();
+                terminal_parent_audit_seq(operations, worker, proof.claim().1.audit_seq)?;
+                let stop = last_stop_before_observation(job, proof.claim_index, operations.len())?;
+                if stop.command_id() != proof.cancel_receipt().command_id() {
+                    return Err(JournalError::Conflict);
+                }
+                require_settled_worker_mutations(
+                    operations,
+                    &worker.worker_id,
+                    &worker.attempt.attempt_id,
+                    worker.revision,
+                )?;
+                Ok(Fresh(Box::new(proof)))
+            },
+        )
+    }
+
+    fn read_legacy_worker_terminal_prefix<T>(
+        &self,
+        operation_id: Uuid,
+        expected_scope: &JournalScopeV1,
+        ancestor: &RevisionRefV1,
+        read: impl FnOnce(&RecoveredJobV1, LegacyWorkerTerminalEvidenceV1) -> JournalResult<T>,
+    ) -> JournalResult<T> {
         if canonical(expected_scope)? != canonical(self.scope())? {
             return Err(JournalError::Conflict);
         }
@@ -288,14 +376,9 @@ impl StopJournal {
             .last()
             .ok_or(JournalError::Interrupted)?;
         let proof = project(&self.core, &job, command)?;
-        let recorded = recorded_observation(&job, &proof)?.ok_or(JournalError::Interrupted)?;
+        let result = read(&job, proof)?;
         reader.check_shared()?;
-        Ok(recorded
-            .response
-            .map(|response| ConfirmedLegacyWorkerTerminalObservationV1 {
-                head: job.head().clone(),
-                response: response.clone(),
-            }))
+        Ok(result)
     }
 
     pub(in crate::broker) fn reserve_legacy_worker_terminal_observation(
@@ -354,23 +437,12 @@ impl StopJournal {
         if stop.command_id() != command {
             return Err(JournalError::Conflict);
         }
-        // A running broker can have retained a random-id Observe (or another
-        // worker transition) before losing its Store reply. It still owns
-        // reconciliation of that request. The new ID cannot take its place.
-        for prior in &operations {
-            if let SupervisionOperationV1::WorkerMutation {
-                request: prior,
-                response,
-            } = prior
-                && prior.worker_id == request.worker_id
-                && prior.attempt_id == request.attempt_id
-            {
-                let response = response.as_ref().ok_or(JournalError::Interrupted)?;
-                if response.worker.revision > request.expected_revision {
-                    return Err(JournalError::Conflict);
-                }
-            }
-        }
+        require_settled_worker_mutations(
+            &operations,
+            &request.worker_id,
+            &request.attempt_id,
+            request.expected_revision,
+        )?;
         operations.push(SupervisionOperationV1::WorkerMutation {
             request: request.clone(),
             response: None,
@@ -711,6 +783,44 @@ fn last_stop_before_observation(
     job.cancel_receipt(*command).ok_or(JournalError::Corrupt)
 }
 
+fn require_settled_worker_mutations(
+    operations: &[SupervisionOperationV1],
+    worker_id: &str,
+    attempt_id: &str,
+    revision: u64,
+) -> JournalResult<()> {
+    // The running broker may have retained a different Observe or another
+    // Worker transition before losing its Core reply. Reconcile its request.
+    for operation in operations {
+        if let SupervisionOperationV1::WorkerMutation { request, response } = operation
+            && request.worker_id == worker_id
+            && request.attempt_id == attempt_id
+        {
+            let response = response.as_ref().ok_or(JournalError::Interrupted)?;
+            if response.worker.revision > revision {
+                return Err(JournalError::Conflict);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn require_terminal_parent(worker: &WorkerV1) -> JournalResult<()> {
+    if !matches!(
+        worker.state,
+        WorkerStateV1::Running | WorkerStateV1::Stopping
+    ) || !worker.quota_held
+        || worker.allocation_inconsistent
+        || worker.unknown_reason.is_some()
+        || worker.last_observation.as_ref().is_none_or(|last| {
+            last.status != RuntimeStatusV1::Running || last.running != Some(true)
+        })
+    {
+        return Err(JournalError::Conflict);
+    }
+    Ok(())
+}
+
 fn validate_terminal_request(
     proof: &LegacyWorkerTerminalEvidenceV1,
     worker: &WorkerV1,
@@ -721,19 +831,10 @@ fn validate_terminal_request(
     };
     if request.operation_id != proof.terminal_observation_operation_id()?
         || observation.status != RuntimeStatusV1::Exited
-        || !matches!(
-            worker.state,
-            WorkerStateV1::Running | WorkerStateV1::Stopping
-        )
-        || !worker.quota_held
-        || worker.allocation_inconsistent
-        || worker.unknown_reason.is_some()
-        || worker.last_observation.as_ref().is_none_or(|last| {
-            last.status != RuntimeStatusV1::Running || last.running != Some(true)
-        })
     {
         return Err(JournalError::Conflict);
     }
+    require_terminal_parent(worker)?;
     let observed = chrono::DateTime::parse_from_rfc3339(&observation.observed_at)
         .map_err(|_| JournalError::Conflict)?;
     let finished = chrono::DateTime::parse_from_rfc3339(
