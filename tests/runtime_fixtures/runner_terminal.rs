@@ -179,6 +179,12 @@ fn main() {
                 .next()
                 .unwrap();
             let separator = args.iter().position(|a| a == "--").unwrap();
+            if purpose == "import_verification" {
+                assert_eq!(
+                    mount,
+                    format!("type=volume,source={volume},target=/workspace,readonly")
+                );
+            }
             let cmd = args[separator + 2..]
                 .iter()
                 .map(|a| q(a))
@@ -272,6 +278,18 @@ fn main() {
             let cmd = fs::read_to_string(instance.join("cmd")).unwrap();
             let network = fs::read_to_string(instance.join("network")).unwrap();
             let open_stdin = fs::read_to_string(instance.join("purpose")).unwrap() == "import";
+            let workspace_rw =
+                fs::read_to_string(instance.join("purpose")).unwrap() != "import_verification";
+            if case == "named-verification-created-ack" && !workspace_rw {
+                fs::write(root.join("verification-inspection-entered"), b"").unwrap();
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+                while !root.join("verification-inspection-release").is_file() {
+                    if std::time::Instant::now() >= deadline {
+                        std::process::exit(125);
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+            }
             let networks = if network == "bridge" {
                 r#"{"bridge":{}}"#
             } else {
@@ -307,7 +325,7 @@ fn main() {
                 return;
             }
             println!(
-                r#"{{"Id":"{id}","Name":{},"Image":"{IMAGE}","RestartCount":0,"State":{process},"HostConfig":{{"LogConfig":{{"Type":"none","Config":{{}}}},"NanoCpus":2000000000,"CpuQuota":0,"CpuPeriod":0,"Memory":1073741824,"PidsLimit":256,"ReadonlyRootfs":true,"Privileged":false,"AutoRemove":false,"Tmpfs":{{"/tmp":"rw,nosuid,nodev,noexec,size=256m,mode=1777","/home/agent":"rw,nosuid,nodev,size=64m,uid=1000,gid=1000,mode=700"}},"NetworkMode":"{network}","CapDrop":["ALL"],"SecurityOpt":["no-new-privileges"],"RestartPolicy":{{"Name":"no"}}}},"Config":{{"Tty":false,"OpenStdin":{open_stdin},"StdinOnce":{open_stdin},"User":"1000:1000","WorkingDir":"/workspace","Entrypoint":[{}],"Cmd":[{cmd}],"Labels":{labels},"Env":["PRIVATE=not-a-public-observation"]}},"Mounts":[{{"Type":"volume","Name":{},"Destination":"/workspace","RW":true}}],"NetworkSettings":{{"Networks":{networks}}}}}"#,
+                r#"{{"Id":"{id}","Name":{},"Image":"{IMAGE}","RestartCount":0,"State":{process},"HostConfig":{{"LogConfig":{{"Type":"none","Config":{{}}}},"NanoCpus":2000000000,"CpuQuota":0,"CpuPeriod":0,"Memory":1073741824,"PidsLimit":256,"ReadonlyRootfs":true,"Privileged":false,"AutoRemove":false,"Tmpfs":{{"/tmp":"rw,nosuid,nodev,noexec,size=256m,mode=1777","/home/agent":"rw,nosuid,nodev,size=64m,uid=1000,gid=1000,mode=700"}},"NetworkMode":"{network}","CapDrop":["ALL"],"SecurityOpt":["no-new-privileges"],"RestartPolicy":{{"Name":"no"}}}},"Config":{{"Tty":false,"OpenStdin":{open_stdin},"StdinOnce":{open_stdin},"User":"1000:1000","WorkingDir":"/workspace","Entrypoint":[{}],"Cmd":[{cmd}],"Labels":{labels},"Env":["PRIVATE=not-a-public-observation"]}},"Mounts":[{{"Type":"volume","Name":{},"Destination":"/workspace","RW":{workspace_rw}}}],"NetworkSettings":{{"Networks":{networks}}}}}"#,
                 q(&format!("/{name}")),
                 q(&entry),
                 q(&volume)

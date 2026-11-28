@@ -449,6 +449,11 @@ pub(crate) struct NamedImportVerificationCreated {
 }
 
 impl NamedImportVerificationCreated {
+    #[cfg(test)]
+    pub(crate) fn snapshot_for_test(&self) -> &OwnedContainerSnapshot {
+        &self.owned
+    }
+
     pub(crate) fn into_writer_parts(
         self,
     ) -> (Uuid, String, RuntimeAuthority, OwnedContainerSnapshot) {

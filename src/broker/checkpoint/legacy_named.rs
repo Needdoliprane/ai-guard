@@ -1544,8 +1544,14 @@ mod tests {
         Ok(head_after_replay)
     }
 
+    mod verification_created_writer;
+
     #[tokio::test]
     async fn explicit_named_admission_requires_an_immutable_archive_digest() -> anyhow::Result<()> {
+        named_admission_fixture(false).await
+    }
+
+    async fn named_admission_fixture(verification_created_ack: bool) -> anyhow::Result<()> {
         let temporary = tempfile::Builder::new()
             .permissions(std::fs::Permissions::from_mode(0o700))
             .tempdir()?;
@@ -2141,6 +2147,18 @@ mod tests {
                 .await?;
             Ok(writer)
         };
+        if verification_created_ack {
+            return verification_created_writer::exercise(
+                &root,
+                start_admitted_writer(verification_created_writer::JOURNAL).await?,
+                &plan,
+                &digest,
+                arm_result,
+                claim,
+                claim_receipt,
+            )
+            .await;
+        }
         let mut cold_stop_case = None;
         for (stop_first, record_claim) in [(true, false), (false, false), (false, true)] {
             let namespace = format!("import-{stop_first}-{record_claim}");
