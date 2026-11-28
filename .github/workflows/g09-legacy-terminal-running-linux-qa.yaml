@@ -1,0 +1,129 @@
+name: G09 Legacy terminal Running worker Linux QA
+
+on:
+  push:
+    branches: [codex/g09-legacy-terminal-running-linux-qa-20261128]
+    paths: [.github/workflows/g09-legacy-terminal-running-linux-qa.yaml]
+
+permissions:
+  contents: read
+
+jobs:
+  legacy-terminal-running:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      SOURCE_SHA: 9e4d56f858faa233e294f8d696bdfa922a451ce5
+      SOURCE_TREE: 939a17fd8b88aac089ff306e84f7ccd59f92ec8d
+      TEST_BLOB: 81ae798c8b3f26c0bf076b8c574ed2de5d8ac1b5
+      RUNNER_BROKER_BLOB: 350377d89bcf9c703a484b7111c8abe630b23dba
+      EXECUTOR_BLOB: c35d784aba1d27e293364acd32f8a455fa6092bc
+      RECOVERY_FIXTURE_BLOB: d92a48f9cae66f8c69aa648dab20d268509f23b3
+      RECOVERY_TESTS_BLOB: e69e7eaee9c4e14b4dd6a233e00a5d333f05786f
+      JOURNAL_BLOB: 0bd7c5c6cba8916b9b6f24c57a45bd04e6331098
+      JOURNAL_TESTS_BLOB: bea08332e5d15c6e26f70b2b83832692c720aef3
+      CARGO_BUILD_JOBS: '1'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      CARGO_TERM_COLOR: never
+      RUST_MIN_STACK: '8388608'
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          persist-credentials: false
+
+      - name: Build one libtest and read the exact Running worker
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          # Uses private SQLite state and an in-process loopback control fixture.
+          # Runtime facts are synthetic; no container engine or provider is started.
+          selectors=(
+            broker::service::server::legacy_worker_terminal::tests::legacy_terminal_target_reads_the_exact_running_worker_without_effects
+          )
+
+          report_not_run() {
+            local selector
+            for selector in "${selectors[@]}"; do
+              printf 'test=%s status=NOT_RUN\n' "$selector"
+            done
+          }
+
+          if [[ "${GITHUB_REF:-}" != refs/heads/codex/g09-legacy-terminal-running-linux-qa-20261128 ||
+                "$(git rev-parse HEAD)" != "$SOURCE_SHA" ||
+                "$(git rev-parse 'HEAD^{tree}')" != "$SOURCE_TREE" ||
+                "$(git rev-parse HEAD:src/broker/service/legacy_worker_terminal_tests.rs)" != "$TEST_BLOB" ||
+                "$(git rev-parse HEAD:src/runner/broker.rs)" != "$RUNNER_BROKER_BLOB" ||
+                "$(git rev-parse HEAD:src/runner/broker/executor.rs)" != "$EXECUTOR_BLOB" ||
+                "$(git rev-parse HEAD:src/runner/broker/executor/cancelled_recovery_fixture.rs)" != "$RECOVERY_FIXTURE_BLOB" ||
+                "$(git rev-parse HEAD:src/runner/broker/executor/cancelled_recovery_tests.rs)" != "$RECOVERY_TESTS_BLOB" ||
+                "$(git rev-parse HEAD:src/runner/broker/executor/journal.rs)" != "$JOURNAL_BLOB" ||
+                "$(git rev-parse HEAD:src/runner/broker/executor/journal_tests.rs)" != "$JOURNAL_TESTS_BLOB" ]]; then
+            printf 'source=FAIL\n'
+            report_not_run
+            exit 1
+          fi
+          printf 'source=PASS\nsource_sha=%s\nsource_tree=%s\ntest_blob=%s\nrunner_broker_blob=%s\nexecutor_blob=%s\nrecovery_fixture_blob=%s\nrecovery_tests_blob=%s\njournal_blob=%s\njournal_tests_blob=%s\n' \
+            "$SOURCE_SHA" "$SOURCE_TREE" "$TEST_BLOB" "$RUNNER_BROKER_BLOB" "$EXECUTOR_BLOB" "$RECOVERY_FIXTURE_BLOB" "$RECOVERY_TESTS_BLOB" "$JOURNAL_BLOB" "$JOURNAL_TESTS_BLOB"
+          export AI_GUARD_BUILD_REVISION="$SOURCE_SHA"
+
+          scratch=$(mktemp -d /tmp/aig-g09-legacy-running.XXXXXX)
+          trap 'rm -rf -- "$scratch"' EXIT
+          export TMPDIR="$scratch"
+          export CARGO_TARGET_DIR="$scratch/target"
+          build_json="$scratch/build.jsonl"
+
+          if ! cargo fetch --locked >"$scratch/fetch.log" 2>&1; then
+            printf 'fetch=FAIL\nbuild=NOT_RUN\n'
+            report_not_run
+            exit 1
+          fi
+          printf 'fetch=PASS\n'
+
+          if cargo test --locked --offline -j1 --no-default-features --lib --no-run \
+              --message-format=json >"$build_json" 2>"$scratch/build.stderr"; then
+            printf 'build=PASS\n'
+          else
+            rc=$?
+            printf 'build=FAIL\nbuild_exit=%s\n' "$rc"
+            report_not_run
+            exit 1
+          fi
+
+          if ! libtest=$(jq -ers '[.[] | select(.reason == "compiler-artifact"
+              and .target.name == "agentsandbox" and .target.kind == ["lib"]
+              and .profile.test == true and (.executable | type) == "string") | .executable]
+              | unique | select(length == 1) | .[0]' "$build_json" 2>/dev/null) ||
+              [[ "$libtest" != "$CARGO_TARGET_DIR"/debug/deps/agentsandbox-* ||
+                 ! -f "$libtest" || ! -x "$libtest" || -L "$libtest" ]]; then
+            printf 'libtest=FAIL\n'
+            report_not_run
+            exit 1
+          fi
+          checksum=$(sha256sum -- "$libtest")
+          libtest_sha=${checksum%% *}
+          if [[ ! "$libtest_sha" =~ ^[0-9a-f]{64}$ ]]; then
+            printf 'libtest=FAIL\n'
+            report_not_run
+            exit 1
+          fi
+          printf 'libtest=PASS\nlibtest_sha256=%s\n' "$libtest_sha"
+
+          selector=${selectors[0]}
+          log="$scratch/test.log"
+          test_exit=0
+          "$libtest" --exact "$selector" --test-threads=1 --color never >"$log" 2>&1 || test_exit=$?
+          if [[ "$test_exit" == 0 ]] &&
+              [[ "$(grep -Fxc 'running 1 test' "$log" || true)" == 1 ]] &&
+              [[ "$(grep -Fxc "test $selector ... ok" "$log" || true)" == 1 ]] &&
+              [[ "$(grep -Ec '^test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; [0-9]+ filtered out; finished in [0-9]+([.][0-9]+)?s$' "$log" || true)" == 1 ]]; then
+            printf 'test=%s status=PASS\ntest_exit=0\ntest_pass_count=1\ntest_fail_count=0\n' "$selector"
+          else
+            printf 'test=%s status=FAIL\ntest_exit=%s\n' "$selector" "$test_exit"
+            grep -Eo 'panicked at src/[A-Za-z0-9_./-]+[.]rs:[0-9]+:[0-9]+' "$log" || true
+            exit 1
+          fi
