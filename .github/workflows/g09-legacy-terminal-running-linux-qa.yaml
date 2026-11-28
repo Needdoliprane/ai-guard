@@ -124,6 +124,9 @@ jobs:
             printf 'test=%s status=PASS\ntest_exit=0\ntest_pass_count=1\ntest_fail_count=0\n' "$selector"
           else
             printf 'test=%s status=FAIL\ntest_exit=%s\n' "$selector" "$test_exit"
-            grep -Eo 'panicked at src/[A-Za-z0-9_./-]+[.]rs:[0-9]+:[0-9]+' "$log" || true
+            grep -m 1 -Eo 'panicked at src/[A-Za-z0-9_./-]+[.]rs:[0-9]+:[0-9]+' "$log" || true
+            if grep -q '^Error: ' "$log"; then
+              printf 'libtest_result_error=true\n'
+            fi
             exit 1
           fi
