@@ -86,8 +86,11 @@ pub(crate) async fn run(args: PrepareMysqlOwnedArgs) -> Result<()> {
     let json = if args.verify_chain {
         let receipt = verify_owned_audit_chain(endpoint, credentials, request)
             .await
-            .map_err(|_| {
-                anyhow!("MySQL owned audit chain verification failed; preserve the target")
+            .map_err(|error| {
+                owned_operation_error(
+                    error,
+                    "MySQL owned audit chain verification failed; preserve the target and check its exact configuration and state",
+                )
             })?;
         serde_json::to_string(&receipt).context("cannot encode the verified chain receipt")?
     } else {
@@ -97,14 +100,9 @@ pub(crate) async fn run(args: PrepareMysqlOwnedArgs) -> Result<()> {
             publish_owned_fresh_source(endpoint, credentials, request).await
         }
         .map_err(|error| {
-            if let Some(refusal) = error.downcast_ref::<MysqlOwnedPreparationRefusal>() {
-                return (*refusal).into();
-            }
-            if let Some(refusal) = error.downcast_ref::<MysqlProbeError>() {
-                return (*refusal).into();
-            }
-            anyhow!(
-                "MySQL owned publication could not be verified; preserve the target and check its exact configuration and state"
+            owned_operation_error(
+                error,
+                "MySQL owned publication could not be verified; preserve the target and check its exact configuration and state",
             )
         })?;
         serde_json::to_string(&receipt).context("cannot encode the verified receipt")?
@@ -112,5 +110,47 @@ pub(crate) async fn run(args: PrepareMysqlOwnedArgs) -> Result<()> {
     let mut stdout = io::stdout().lock();
     writeln!(stdout, "{json}")
         .and_then(|()| stdout.flush())
-        .context("MySQL publication verified but the receipt could not be written")
+        .context(if args.verify_chain {
+            "MySQL audit chain verified but the receipt could not be written"
+        } else {
+            "MySQL publication verified but the receipt could not be written"
+        })
+}
+
+fn owned_operation_error(error: anyhow::Error, fallback: &'static str) -> anyhow::Error {
+    if let Some(refusal) = error.downcast_ref::<MysqlOwnedPreparationRefusal>() {
+        return (*refusal).into();
+    }
+    if let Some(refusal) = error.downcast_ref::<MysqlProbeError>() {
+        return (*refusal).into();
+    }
+    anyhow!(fallback)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn owned_operation_error_preserves_only_safe_diagnostics() {
+        let fallback = "verification failed";
+        let private_marker = "private endpoint marker";
+        let probe = anyhow!(MysqlProbeError::TimedOut).context(private_marker);
+        let preparation = anyhow!(MysqlOwnedPreparationRefusal::CatalogVisibilityUnconfirmed)
+            .context(private_marker);
+
+        for (source, expected) in [
+            (probe, MysqlProbeError::TimedOut.to_string()),
+            (
+                preparation,
+                MysqlOwnedPreparationRefusal::CatalogVisibilityUnconfirmed.to_string(),
+            ),
+            (anyhow!(private_marker), fallback.to_owned()),
+        ] {
+            assert_eq!(
+                format!("{:#}", owned_operation_error(source, fallback)),
+                expected
+            );
+        }
+    }
 }

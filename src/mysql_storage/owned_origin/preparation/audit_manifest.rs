@@ -359,6 +359,24 @@ fn inventory_matches(actual: &[(u64, u64, u64, u8)], version: u16) -> bool {
     }
 }
 
+fn expected_columns(version: u16) -> Vec<ExpectedColumn> {
+    expected_in_format(
+        &[&COLUMNS, &workers::COLUMNS, &supervision::COLUMNS],
+        &egress::COLUMNS,
+        version,
+        |row| row.0,
+    )
+}
+
+fn expected_table_names(version: u16) -> Vec<&'static str> {
+    let mut tables: Vec<_> = expected_columns(version)
+        .into_iter()
+        .map(|column| column.0)
+        .collect();
+    tables.dedup(); // expected_columns groups columns by table name.
+    tables
+}
+
 fn columns_match(columns: &[Column], version: u16) -> bool {
     columns
         .iter()
@@ -371,12 +389,7 @@ fn columns_match(columns: &[Column], version: u16) -> bool {
                 *shape,
             )
         })
-        .eq(expected_in_format(
-            &[&COLUMNS, &workers::COLUMNS, &supervision::COLUMNS],
-            &egress::COLUMNS,
-            version,
-            |row| row.0,
-        ))
+        .eq(expected_columns(version))
         && columns.iter().all(|(table, column, _, _, _, expression)| {
             generation_matches(table, column, expression)
         })
@@ -711,6 +724,18 @@ pub(super) async fn require_empty_projections(
     Ok(())
 }
 
+/// Open every table in the selected manifest in one statement, before catalog
+/// inspection. The transaction retains their metadata locks through replay.
+/// The inventory observes unrelated objects at query time. Only cooperating
+/// DDL honors the schema lock when creating objects under new names.
+pub(super) async fn pin_history_tables(tx: &mut Transaction<'_>, version: u16) -> Result<()> {
+    let tables = expected_table_names(version).join(", ");
+    tx.query_drop(format!("SELECT 1 FROM {tables} LIMIT 0"))
+        .await
+        .map_err(driver_error)?;
+    Ok(())
+}
+
 /// Verify the published manifest on the caller's locked transaction. The seed
 /// rows are present, so emptiness is not required; the physical structure,
 /// catalog visibility and durable origin must still match the selected format.
@@ -828,6 +853,28 @@ async fn read_foreign_keys(connection: &mut impl Queryable) -> Result<Vec<Foreig
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn owned_history_table_names_match_each_installed_format() {
+        for version in [14, 15] {
+            let ddl = [
+                include_str!("../../../../schema/mysql/audit-v1.sql"),
+                include_str!("../../../../schema/mysql/decisions-v1.sql"),
+                include_str!("../../../../schema/mysql/review-owned-v1.sql"),
+            ]
+            .into_iter()
+            .chain(workers::ddl().unwrap())
+            .chain(supervision::ddl().unwrap())
+            .chain(egress::ddl(version).unwrap());
+            let mut installed: Vec<_> = ddl
+                .flat_map(str::lines)
+                .filter_map(|line| line.strip_prefix("CREATE TABLE "))
+                .map(|definition| definition.split_ascii_whitespace().next().unwrap())
+                .collect();
+            installed.sort_unstable();
+            assert_eq!(expected_table_names(version), installed);
+        }
+    }
 
     #[test]
     fn owned_common_inventory_requires_lifecycle_and_supervision_in_both_formats() {

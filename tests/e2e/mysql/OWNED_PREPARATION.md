@@ -229,13 +229,16 @@ agentsandbox prepare-mysql-owned \
   --source-id "${QA_MYSQL_SOURCE_ID:?}" --verify-chain
 ```
 
-Cette lecture seule vérifie le manifeste owned, l’ancre exacte et la chaîne
-d’audit dans un même instantané. Elle ne vérifie pas les projections et ne
-donne aucune admission d’écriture au gateway. `--verify-chain` et
-`--verify-only` sont exclusifs; sans l’un ou l’autre, la préparation fraîche
-existante reste le comportement par défaut. Le reçu distingue ce mode par
-`verification_mode: owned_audit_chain`. Cette nouvelle option n’a pas encore
-de preuve d’exécution physique.
+Cette lecture seule compare le manifeste owned, l’ancre exacte et la chaîne
+d’audit dans un même instantané. Coordonner les opérations d’administration
+du schéma avec le verrou de la cible. Pour les objets créés sous d’autres noms
+hors de cette coordination, le contrôle porte sur l’inventaire observé.
+Le reçu `verification_mode: owned_audit_chain` couvre uniquement ces
+vérifications. Les projections et l’admission d’écriture du gateway gardent
+leurs contrôles propres. `--verify-chain` et `--verify-only` sont exclusifs.
+Sans option, la commande conserve le mode de préparation fraîche.
+La vérification a un budget de huit secondes. Une expiration ne produit aucun
+reçu. La recette sur une instance MySQL réelle reste à exécuter.
 
 ## Recettes physiques
 

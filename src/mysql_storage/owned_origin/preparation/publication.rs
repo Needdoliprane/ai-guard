@@ -160,6 +160,9 @@ async fn verify_snapshot(
         .await
         .map_err(driver_error)?;
     let verified = async {
+        if matches!(range, AuditRange::History) {
+            audit_manifest::pin_history_tables(&mut tx, version).await?;
+        }
         audit_manifest::verify_structure(&mut tx, lock, version).await?;
         let head = read_published_binding(&mut tx, version, &request.tenant_id, &namespace).await?;
         match range {
@@ -197,7 +200,7 @@ async fn replay_anchored_chain(
         )
         .await
         .map_err(driver_error)?;
-    let checked = async {
+    let replayed = async {
         let missing_origin = "MySQL owned publication chain length mismatch";
         let genesis = result
             .next()
@@ -214,13 +217,14 @@ async fn replay_anchored_chain(
         while let Some(row) = result.next().await.map_err(driver_error)? {
             head = verify_owned_tail_row(head, decode_row(row)?, bound)?;
         }
-        require_owned_head(&head, bound)
+        Ok::<_, anyhow::Error>(head)
     }
     .await;
+    // Finish the cursor even on a row error, preserving that first failure.
     let drained = result.drop_result().await.map_err(driver_error);
-    checked?;
+    let head = replayed?;
     drained?;
-    Ok(())
+    require_owned_head(&head, bound)
 }
 
 async fn require_durable_writable(tx: &mut Transaction<'_>) -> Result<()> {

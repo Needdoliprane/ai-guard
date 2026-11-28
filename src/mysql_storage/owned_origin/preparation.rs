@@ -187,6 +187,8 @@ pub async fn verify_owned_fresh_source(
 /// Inspect an already published owned source under the physical target lock.
 /// Compare the exact creation request and stream every event in one read-only
 /// snapshot. The caller still needs separate projection and epoch proofs.
+/// Coordinate schema administration with the target lock. The catalog observes
+/// unrelated objects created outside that lock at the time of inspection.
 pub async fn verify_owned_audit_chain(
     endpoint: MysqlEndpoint<'_>,
     credentials: MysqlCredentials<'_>,
