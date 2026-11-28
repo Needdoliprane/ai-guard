@@ -5,7 +5,10 @@ mod egress_ack_tests;
 
 use super::super::*;
 use crate::{
-    broker::journal::{JournalLimitsV1, recovery::StopRecoveryReaderV1},
+    broker::{
+        enforcer::retirement::test_support::OriginalUnusedFixture,
+        journal::{JournalLimitsV1, recovery::StopRecoveryReaderV1},
+    },
     control::*,
     runtime::{ContainerHandle, ManagedRuntime, OwnedContainerSnapshot, RuntimeAuthority},
 };
@@ -23,6 +26,7 @@ pub(super) enum Case {
     TerminalCleanupRecovery,
     TerminalCleanupWithoutScan,
     StillRunning,
+    Full3WorkerClaim,
     UnknownContainer,
     ChangedCid,
     ChangedImage,
@@ -87,6 +91,7 @@ impl RecoveryFixture {
         service_layout: bool,
         scope_override: Option<(Uuid, String)>,
     ) -> Self {
+        let full3_worker_claim = matches!(case, Case::Full3WorkerClaim);
         eprintln!("cancelled_recovery_fixture phase=seed_begin");
         // Domain proof with writer_timeout=60s; production writer_timeout=10s is NOT qualified.
         eprintln!("cancelled_recovery_fixture budget writer_timeout_seconds=60 domain_only=true");
@@ -315,9 +320,10 @@ impl RecoveryFixture {
             Case::TerminalCreatedOwned
                 | Case::TerminalCleanupRecovery
                 | Case::TerminalCleanupWithoutScan
+                | Case::Full3WorkerClaim
         ) {
-            // Production retains the initial Created snapshot. The later
-            // Running transition below still supplies central StartedAt proof.
+            // The initial snapshot is Created. Cases continuing past claim
+            // record their synthetic Running observation separately.
             observed.process.status = Some("created".into());
             observed.process.running = Some(false);
             observed.process.started_at = None;
@@ -357,42 +363,58 @@ impl RecoveryFixture {
         else {
             panic!("fixture arm receipt missing")
         };
-        handle
-            .block_on(execution.rpc(Operation::WorkerClaim {
-                request: ArmedStartClaimV1 {
-                    version: 1,
-                    operation_id: Uuid::new_v4().to_string(),
-                    worker_id: worker.worker_id.clone(),
-                    attempt_id: worker.attempt.attempt_id.clone(),
-                    expected_revision: worker.revision,
-                    emitter_id: Uuid::new_v4().to_string(),
-                    arm_receipt: armed.receipt,
-                    clock_check: arm.clock,
-                },
-                response: None,
-            }))
-            .unwrap();
+        let claim = ArmedStartClaimV1 {
+            version: 1,
+            operation_id: Uuid::new_v4().to_string(),
+            worker_id: worker.worker_id.clone(),
+            attempt_id: worker.attempt.attempt_id.clone(),
+            expected_revision: worker.revision,
+            emitter_id: Uuid::new_v4().to_string(),
+            arm_receipt: armed.receipt,
+            clock_check: arm.clock.clone(),
+        };
+        if full3_worker_claim {
+            handle
+                .block_on(boxed_execution_phase(|| {
+                    seed_full3_worker_claim(&execution, &arm, &owned, &authority, claim)
+                }))
+                .expect("Full3 Worker binding and claim setup");
+        } else {
+            handle
+                .block_on(execution.rpc(Operation::WorkerClaim {
+                    request: claim,
+                    response: None,
+                }))
+                .unwrap();
+        }
         eprintln!("cancelled_recovery_fixture phase=arm_claim_ready");
-        let running = handle
-            .block_on(execution.mutate(WorkerTransitionV1::Observe {
-                observation: RuntimeObservationV1 {
-                    inspection,
-                    observed_at: STARTED.into(),
-                    status: RuntimeStatusV1::Running,
-                    running: Some(true),
-                    started_at: Some(STARTED.into()),
-                    finished_at: None,
-                    exit_code: None,
-                    oom_killed: Some(false),
-                    restart_count: Some(0),
-                },
-            }))
-            .unwrap();
-        assert_eq!(running.state, WorkerStateV1::Running);
-        assert!(running.quota_held);
-        eprintln!("cancelled_recovery_fixture phase=running_ready");
+        let running = if full3_worker_claim {
+            None
+        } else {
+            let running = handle
+                .block_on(execution.mutate(WorkerTransitionV1::Observe {
+                    observation: RuntimeObservationV1 {
+                        inspection,
+                        observed_at: STARTED.into(),
+                        status: RuntimeStatusV1::Running,
+                        running: Some(true),
+                        started_at: Some(STARTED.into()),
+                        finished_at: None,
+                        exit_code: None,
+                        oom_killed: Some(false),
+                        restart_count: Some(0),
+                    },
+                }))
+                .unwrap();
+            assert_eq!(running.state, WorkerStateV1::Running);
+            assert!(running.quota_held);
+            eprintln!("cancelled_recovery_fixture phase=running_ready");
+            Some(running)
+        };
         let cancel = Uuid::new_v4();
-        write_observation_fixture(base.root.path(), &inspect, case);
+        if !full3_worker_claim {
+            write_observation_fixture(base.root.path(), &inspect, case);
+        }
         if matches!(
             case,
             Case::TerminalCleanupRecovery | Case::TerminalCleanupWithoutScan
@@ -407,7 +429,8 @@ impl RecoveryFixture {
                     execution.save_observed_result(&terminal)
                 }))
                 .unwrap();
-            let observation = managed::observation_dto(&running, &terminal).unwrap();
+            let running = running.as_ref().expect("cleanup fixture Running Worker");
+            let observation = managed::observation_dto(running, &terminal).unwrap();
             handle
                 .block_on(boxed_execution_phase(|| {
                     execution.mutate(WorkerTransitionV1::Observe { observation })
@@ -443,7 +466,9 @@ impl RecoveryFixture {
             assert!(base.store.worker_usage().unwrap().is_empty());
         }
         drop(execution);
-        fs::write(base.root.path().join("calls"), b"").unwrap();
+        if !full3_worker_claim {
+            fs::write(base.root.path().join("calls"), b"").unwrap();
+        }
         Self {
             base,
             _peer: peer,
@@ -1157,6 +1182,181 @@ pub(crate) async fn running_seed_for_cold_terminal_test() -> RunningColdRecovery
     })
     .await
     .expect("cold Running recovery seed task must join")
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn full3_worker_claim_and_stop_survive_journal_reopen() {
+    use crate::broker::journal::canonical;
+
+    let driver = tokio::runtime::Handle::current();
+    tokio::task::spawn_blocking(move || {
+        let fixture = RecoveryFixture::seed(Case::Full3WorkerClaim, &driver, true, None);
+        let job = fixture.job();
+        let checkpoint = job.broker_checkpoint_v5().expect("confirmed V5 checkpoint");
+        let [binding] = checkpoint.bindings() else {
+            panic!("one native Full3 Worker binding");
+        };
+        let operations = checkpoint
+            .outbox()
+            .lifecycle()
+            .broker()
+            .supervision()
+            .operations();
+        let Some(Operation::WorkerClaim {
+            request: claim,
+            response: Some(acknowledged),
+        }) = operations.last()
+        else {
+            panic!("the last supervision operation is an acknowledged Worker claim");
+        };
+        let scope = job.scope().clone();
+        let operation = job.operation_id();
+        let head = job.head().clone();
+        let cancel = fixture.cancel_id();
+        let before = fixture.worker();
+        assert!(before.quota_held);
+        assert_eq!(before.state, WorkerStateV1::StartIssued);
+        assert_eq!(before.observed_started_at, None);
+        assert!(canonical(&before).unwrap() == canonical(&acknowledged.worker).unwrap());
+        assert_eq!(acknowledged.disposition, Some(ClaimDispositionV1::EmitOnce));
+        assert_eq!(acknowledged.receipt.operation_id, claim.operation_id);
+        assert_eq!(acknowledged.receipt.input_hash, claim.input_hash().unwrap());
+        assert!(acknowledged.receipt.audit_seq > claim.arm_receipt.audit_seq);
+        let binding_bytes = canonical(binding).unwrap();
+        let arm_receipt_bytes = canonical(&claim.arm_receipt).unwrap();
+        let (arm, owned) = operations
+            .iter()
+            .find_map(|operation| match operation {
+                Operation::Arm {
+                    request,
+                    owned,
+                    response: Some(_),
+                    ..
+                } if request.operation_id == claim.arm_receipt.arm_id => Some((request, owned)),
+                _ => None,
+            })
+            .expect("acknowledged Arm for the confirmed claim");
+        let target_bytes = canonical(&(arm, owned)).unwrap();
+        drop(job);
+        let calls = fixture.runtime_calls();
+        assert!(!calls.is_empty());
+        assert!(
+            calls.iter().all(|call| {
+                call == "info" || call == "image inspect" || call.starts_with("inspect ")
+            }),
+            "only the synthetic fixture's original inspection ran"
+        );
+        let journal_root = fixture
+            .base
+            .root
+            .path()
+            .join("journals")
+            .join(scope.profile_id());
+        let base = close_cold_seed_owners(fixture, &driver, &journal_root, &scope);
+        let profile = Directory::open_existing(&journal_root).unwrap();
+        let report = StopRecoveryReaderV1::open_existing(
+            &profile,
+            scope.clone(),
+            &FsExclusions::new(),
+            JournalLimitsV1::default(),
+            ControlSecrets::new(Vec::new()).unwrap(),
+        )
+        .unwrap()
+        .unwrap()
+        .scan();
+        assert!(!report.incomplete());
+        assert!(canonical(report.scope()).unwrap() == canonical(&scope).unwrap());
+        let [recovered] = report.jobs() else {
+            panic!("one recovered job");
+        };
+        assert_eq!(recovered.operation_id(), operation);
+        // The same verified head commits the WorkerClaim ACK and the later STOP.
+        assert_eq!(recovered.head(), &head);
+        let mut worker_stops = recovered
+            .stops()
+            .iter()
+            .filter(|target| matches!(&target.arm().subject, ArmSubjectV1::Worker));
+        let target = worker_stops.next().expect("recovered Worker Arm");
+        assert!(worker_stops.next().is_none());
+        assert_eq!(target.cancel_after_arm(), Some(cancel));
+        assert!(canonical(target.receipt()).unwrap() == arm_receipt_bytes);
+        assert!(canonical(target.full3_registration_binding().unwrap()).unwrap() == binding_bytes);
+        assert!(canonical(&(target.arm(), target.owned())).unwrap() == target_bytes);
+        assert_eq!(
+            target.owned().handle.id(),
+            target.arm().inspection.container_id
+        );
+        assert_eq!(target.owned().observation.process.started_at, None);
+        assert!(base.store.worker_usage().unwrap().is_empty());
+        let current = base.store.worker(&before.worker_id).unwrap().unwrap();
+        assert!(canonical(&current).unwrap() == canonical(&before).unwrap());
+    })
+    .await
+    .expect("Full3 claim seed and cold journal read must join");
+}
+
+async fn seed_full3_worker_claim(
+    execution: &Execution<'_>,
+    arm: &ArmV1,
+    owned: &OwnedContainerSnapshot,
+    authority: &RuntimeAuthority,
+    mut claim: ArmedStartClaimV1,
+) -> Result<()> {
+    let scope = execution.context.scope();
+    let registration = RegistrationV1::new(
+        hex::encode(Sha256::digest(scope.gateway_origin().as_bytes())),
+        scope.tenant_id().into(),
+        arm.clone(),
+        claim.arm_receipt.clone(),
+        authority.clone(),
+        owned.clone(),
+    )?;
+    let registration_hash = registration.digest()?;
+    let (native, client, slot) = OriginalUnusedFixture::register_with_generation(
+        scope.installation_id(),
+        registration,
+        execution.context.cancel_generation().clone(),
+    )
+    .await?;
+    let claimed = boxed_execution_phase(|| async {
+        let binding = slot.full3_registration_binding()?;
+        ensure!(
+            binding.arm_id() == Uuid::parse_str(&arm.operation_id)?
+                && binding.registration_hash().as_str() == registration_hash
+                && binding.original_epoch() == client.epoch()
+                && binding.ledger().installation_id() == &scope.installation_id(),
+            "Full3 Worker registration returned a different binding"
+        );
+        let (job, _) = execution.load().await?;
+        execution
+            .executor
+            .writer
+            .bind_full3_registration(execution.operation, job.head().clone(), binding)
+            .await?;
+        let reservation = slot.reserve_claim(execution.generation)?;
+        slot.consume_claim_reservation(reservation, arm, execution.generation)?;
+        claim.clock_check = NativeHostClock::new()?.sample()?;
+        let (operation, fresh) = execution
+            .rpc_checked(
+                Operation::WorkerClaim {
+                    request: claim,
+                    response: None,
+                },
+                Some(&slot),
+            )
+            .await?;
+        ensure!(
+            fresh && super::super::emits_once(&operation),
+            "Full3 Worker claim did not obtain the first SQLite acknowledgement"
+        );
+        // The test stops at the durable claim, before Prepare or any Start.
+        Ok(())
+    })
+    .await;
+    drop(slot);
+    drop(client);
+    native.finish().await;
+    claimed
 }
 
 fn close_cold_seed_owners(
