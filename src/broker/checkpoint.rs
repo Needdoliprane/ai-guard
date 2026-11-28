@@ -13,6 +13,7 @@ use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 use std::{collections::HashSet, fmt};
 use uuid::Uuid;
 mod legacy_named;
+pub(crate) use legacy_named::import_verification_spec_hash;
 mod validation;
 #[cfg(test)]
 pub(crate) use legacy_named::LegacyNamedAdmissionCheckpoint as LegacyNamedAdmissionCheckpointV1;

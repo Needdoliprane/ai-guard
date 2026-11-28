@@ -230,7 +230,9 @@ struct LegacyNamedImportAuthorityV1 {
     binding_hash: String,
 }
 
-fn import_verification_spec_hash(policy: &HelperExecutionPolicyV1) -> JournalResult<String> {
+pub(crate) fn import_verification_spec_hash(
+    policy: &HelperExecutionPolicyV1,
+) -> JournalResult<String> {
     ensure(policy.purpose == HelperPurposeV1::ImportVerification)?;
     checked(content_hash(
         "ai-guard:legacy-named-import-verification-readonly-spec:v1",

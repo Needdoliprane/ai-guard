@@ -440,6 +440,23 @@ impl ContainerSpec {
         );
         Ok(())
     }
+    pub(crate) fn is_read_only_workspace(&self) -> bool {
+        self.read_only_workspace
+    }
+    pub(crate) fn has_managed_names(&self, name: &str, volume: &str) -> bool {
+        self.managed_names
+            .as_ref()
+            .is_some_and(|saved| saved.0 == name && saved.1 == volume)
+    }
+    pub(crate) fn has_no_runtime_credentials_or_egress(&self) -> bool {
+        self.secret_env_file.is_none()
+            && self.egress_proxy_port.is_none()
+            && self.held_bootstrap.is_none()
+            && self.terminal_secrets.0.is_empty()
+    }
+    pub(crate) fn security_preset(&self) -> crate::control::SecurityPresetV1 {
+        self.security_preset
+    }
     /// Restrict a named ImportVerification helper to reading its retained
     /// workspace volume. This does not grant permission to create or start it.
     pub(crate) fn with_read_only_workspace_volume(mut self) -> Result<Self> {

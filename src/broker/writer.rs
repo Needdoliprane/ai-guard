@@ -48,7 +48,7 @@ mod legacy_named_admission;
     unused_imports,
     reason = "the named Presence caller is composed separately"
 )]
-pub(in crate::broker) use legacy_named_admission::{
+pub(crate) use legacy_named_admission::{
     AuthorizedLegacyNamedImportCreate, NamedImportArmWriteFailure, RecordedLegacyNamedImportArm,
     RecordedLegacyNamedImportVerificationPlan,
 };

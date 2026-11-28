@@ -1738,6 +1738,16 @@ impl ManagedRuntime {
         spawn_guard: Option<GenerationSpawnGuard>,
     ) -> Result<ContainerHandle> {
         spec.ensure_generic_create_start_allowed()?;
+        self.create_owned_handle_inner(spec, bootstrap_stdin, spawn_guard)
+            .await
+    }
+
+    async fn create_owned_handle_inner(
+        &self,
+        spec: &ContainerSpec,
+        bootstrap_stdin: bool,
+        spawn_guard: Option<GenerationSpawnGuard>,
+    ) -> Result<ContainerHandle> {
         spec.require_current_creation_policy()?;
         ensure!(
             spec.managed_names.is_some(),
@@ -1825,6 +1835,149 @@ impl ManagedRuntime {
             handle,
             observation,
         })
+    }
+
+    /// Consume the Writer's one-shot authorization for a named, read-only
+    /// ImportVerification Create. This boundary never starts the created child.
+    pub(crate) async fn create_owned_named_import_verification_for_generation(
+        &self,
+        spec: &ContainerSpec,
+        parent_operation: Uuid,
+        policy: &crate::control::HelperExecutionPolicyV1,
+        authorization: crate::broker::writer::AuthorizedLegacyNamedImportCreate,
+        cancel: &CancelGeneration,
+        expected: u64,
+    ) -> Result<OwnedContainerSnapshot> {
+        authorization.validate_runtime_request(parent_operation, policy, spec, &self.binding)?;
+        ensure!(
+            spec.security_preset == crate::control::SecurityPresetV1::FixedSandboxV2
+                && spec
+                    .image
+                    .strip_prefix("sha256:")
+                    .is_some_and(valid_immutable_id)
+                && self.binding.docker_launch_profile.is_none(),
+            "named ImportVerification requires its exact immutable confined helper spec"
+        );
+        let mut scoped = self.clone();
+        scoped.runtime = self.runtime.observed_operation(spec.operation_id());
+        scoped.verify_authority().await?;
+        scoped
+            .verify_named_import_verification_workspace(policy)
+            .await?;
+        scoped
+            .verify_retained_import_helper(
+                authorization.import_policy(),
+                authorization.import_snapshot(),
+            )
+            .await?;
+        let handle = scoped
+            .create_owned_handle_inner(
+                spec,
+                false,
+                Some(GenerationSpawnGuard {
+                    generation: cancel.clone(),
+                    expected,
+                }),
+            )
+            .await?;
+        let observation = scoped
+            .inspect_created(spec, handle.id(), None, true)
+            .await?;
+        ensure!(
+            observation.configuration_fingerprint.is_some(),
+            "created named ImportVerification lacks a configuration fingerprint"
+        );
+        Ok(OwnedContainerSnapshot {
+            handle,
+            observation,
+        })
+    }
+
+    async fn verify_named_import_verification_workspace(
+        &self,
+        policy: &crate::control::HelperExecutionPolicyV1,
+    ) -> Result<()> {
+        let namespace = policy
+            .stable_name
+            .strip_prefix("aig-")
+            .and_then(|rest| rest.split('-').next())
+            .filter(|value| !value.is_empty())
+            .context("named ImportVerification has no canonical workspace namespace")?;
+        let expected = [
+            ("agentsandbox.authority", policy.authority_id.as_str()),
+            ("agentsandbox.worker", policy.parent_worker_id.as_str()),
+            ("agentsandbox.namespace", namespace),
+        ];
+        let output = self
+            .cli(
+                &[
+                    "volume".into(),
+                    "inspect".into(),
+                    "--format".into(),
+                    "{{json .}}".into(),
+                    policy.volume_name.clone(),
+                ],
+                Duration::from_secs(10),
+            )
+            .await?;
+        ensure!(
+            !output.truncated,
+            "named ImportVerification workspace inspection exceeds its bound"
+        );
+        let volume: WorkspaceVolume = serde_json::from_slice(&output.bytes)
+            .context("named ImportVerification workspace inspection is invalid")?;
+        ensure!(
+            volume.name == policy.volume_name
+                && volume.driver == "local"
+                && volume.scope == "local"
+                && volume
+                    .options
+                    .as_ref()
+                    .is_none_or(std::collections::BTreeMap::is_empty)
+                && volume.labels.len() == expected.len()
+                && expected
+                    .iter()
+                    .all(|(key, value)| volume.labels.get(*key).map(String::as_str) == Some(*value)),
+            "named ImportVerification requires the exact existing control-owned workspace volume"
+        );
+        Ok(())
+    }
+
+    async fn verify_retained_import_helper(
+        &self,
+        policy: &crate::control::HelperExecutionPolicyV1,
+        retained: &OwnedContainerSnapshot,
+    ) -> Result<()> {
+        ensure!(
+            policy.purpose == crate::control::HelperPurposeV1::Import
+                && policy.runtime_kind
+                    == match self.binding.kind {
+                        RuntimeKind::Docker => crate::control::RuntimeKindV1::Docker,
+                        RuntimeKind::Podman => crate::control::RuntimeKindV1::Podman,
+                    }
+                && retained.handle.operation_id() == policy.helper_id.parse::<Uuid>()?
+                && retained.handle.session_id() == policy.session_id.parse::<Uuid>()?
+                && retained.handle.authority_fingerprint() == self.binding.fingerprint()
+                && policy.authority_id == self.binding.authority_id.to_string(),
+            "the exact named Import helper is not retained under this runtime authority"
+        );
+        let import_spec = crate::runner::broker::broker_helper_spec(policy)?;
+        let facts = self.inspect_facts(retained.handle.id()).await?;
+        let observation = parse_container_observation_version(
+            &facts.bytes,
+            self.binding.kind,
+            retained.handle.fingerprint_version(),
+        )?;
+        ensure!(
+            observation.id.as_deref() == Some(retained.handle.id()),
+            "the retained named Import helper identity changed before verification Create"
+        );
+        validate_authorized_identity(&import_spec, &observation)?;
+        retained
+            .observation
+            .validate_identity_allocation(&observation)?;
+        validate_configuration_for(&import_spec, &facts.bytes, self.binding.kind, None)?;
+        Ok(())
     }
 
     async fn inspect_created(
@@ -3773,4 +3926,116 @@ fn parse_memory_size(value: &str) -> Option<u64> {
         _ => (value, 1),
     };
     digits.parse::<u64>().ok()?.checked_mul(multiplier)
+}
+
+#[cfg(all(test, unix))]
+mod named_import_verification_volume_tests {
+    use super::*;
+    use crate::{control::*, model::CommandSpec};
+    use std::{fs, os::unix::fs::PermissionsExt};
+
+    fn policy() -> HelperExecutionPolicyV1 {
+        let helper_id = Uuid::from_u128(4);
+        HelperExecutionPolicyV1 {
+            version: 1,
+            parent_worker_id: Uuid::from_u128(1).to_string(),
+            parent_attempt_id: Uuid::from_u128(2).to_string(),
+            parent_spec_hash: "a".repeat(64),
+            session_id: Uuid::from_u128(3).to_string(),
+            workspace_manifest_digest: "b".repeat(64),
+            helper_id: helper_id.to_string(),
+            purpose: HelperPurposeV1::ImportVerification,
+            authority_id: Uuid::from_u128(5).to_string(),
+            runtime_kind: RuntimeKindV1::Docker,
+            image_id: format!("sha256:{}", "c".repeat(64)),
+            stable_name: format!("aig-ns-worker-h-{}", helper_id.simple()),
+            volume_name: "aig-ns-work".into(),
+            command: CommandSpec {
+                argv: vec![
+                    "/bin/tar".into(),
+                    "--create".into(),
+                    "--file=-".into(),
+                    "--directory=/workspace".into(),
+                    ".".into(),
+                ],
+                cwd: "/workspace".into(),
+            },
+            network: NetworkV1::None,
+            security_preset: SecurityPresetV1::FixedSandboxV2,
+            cpu_millis: 2000,
+            memory_bytes: 1_073_741_824,
+            pids_limit: 256,
+            timeout_seconds: 120,
+            restart_policy: RestartPolicyV1::No,
+            credential_binding_id: None,
+            credential_names: Vec::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn mismatched_existing_workspace_stops_before_any_runtime_create() {
+        let temporary = tempfile::Builder::new()
+            .permissions(fs::Permissions::from_mode(0o700))
+            .tempdir()
+            .unwrap();
+        let root = temporary.path().canonicalize().unwrap();
+        let source = root.join("engine.rs");
+        let program = root.join("engine");
+        fs::write(
+            &source,
+            include_str!("../../tests/runtime_fixtures/managed.rs"),
+        )
+        .unwrap();
+        let compiler = std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
+        let compiled = tokio::time::timeout(
+            Duration::from_secs(30),
+            Command::new(compiler)
+                .args(["--edition=2024", "--crate-name", "named_volume_fixture"])
+                .arg(&source)
+                .arg("-o")
+                .arg(&program)
+                .kill_on_drop(true)
+                .output(),
+        )
+        .await
+        .expect("the local Rust CLI fixture compiles within its harness budget")
+        .unwrap();
+        assert!(
+            compiled.status.success(),
+            "{}",
+            String::from_utf8_lossy(&compiled.stderr)
+        );
+        let metadata = program.with_extension("fixture");
+        fs::create_dir(&metadata).unwrap();
+        fs::write(
+            metadata.join("AI_GUARD_MANAGED_ROOT"),
+            root.as_os_str().as_encoded_bytes(),
+        )
+        .unwrap();
+        fs::write(metadata.join("AI_GUARD_MANAGED_CHILD"), b"success").unwrap();
+
+        let runtime = Runtime::with_program(RuntimeKind::Docker, &program).unwrap();
+        let managed = ManagedRuntime::connect_docker_with_runtime(
+            Uuid::from_u128(5),
+            "unix:///fixture/docker.sock",
+            runtime,
+        )
+        .await
+        .unwrap();
+        managed.verify_authority().await.unwrap();
+        let error = managed
+            .verify_named_import_verification_workspace(&policy())
+            .await
+            .expect_err("a foreign/missing workspace volume must not be adopted");
+        assert!(
+            error
+                .to_string()
+                .contains("exact existing control-owned workspace volume")
+        );
+        let log = fs::read_to_string(root.join("log")).unwrap();
+        assert!(log.lines().any(|line| line.starts_with("volume inspect ")));
+        assert!(!log.lines().any(|line| line.starts_with("volume create ")));
+        assert!(!log.lines().any(|line| line.starts_with("create ")));
+        assert!(!log.lines().any(|line| line.starts_with("start ")));
+    }
 }

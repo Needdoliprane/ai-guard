@@ -106,15 +106,94 @@ impl RecordedLegacyNamedImportVerificationPlan {
 /// One-shot authority for the caller's immediate local Create effect. It is
 /// deliberately non-Clone and cannot be reconstructed from retained journal
 /// state; the caller must keep its generation local to the effect path.
-pub(in crate::broker) struct AuthorizedLegacyNamedImportCreate {
+pub(crate) struct AuthorizedLegacyNamedImportCreate {
     operation_id: Uuid,
+    helper_id: Uuid,
+    policy_hash: String,
+    readonly_spec_hash: String,
+    import_policy: crate::control::HelperExecutionPolicyV1,
+    import_snapshot: OwnedContainerSnapshot,
+    authority: RuntimeAuthority,
     confirmed_head: RevisionRefV1,
     facts_hash: String,
 }
 
 impl AuthorizedLegacyNamedImportCreate {
-    pub(in crate::broker) fn operation_id(&self) -> Uuid {
+    pub(crate) fn operation_id(&self) -> Uuid {
         self.operation_id
+    }
+
+    pub(crate) fn import_policy(&self) -> &crate::control::HelperExecutionPolicyV1 {
+        &self.import_policy
+    }
+
+    pub(crate) fn import_snapshot(&self) -> &OwnedContainerSnapshot {
+        &self.import_snapshot
+    }
+
+    pub(crate) fn validate_runtime_request(
+        &self,
+        parent_operation: Uuid,
+        policy: &crate::control::HelperExecutionPolicyV1,
+        spec: &crate::runtime::ContainerSpec,
+        authority: &RuntimeAuthority,
+    ) -> anyhow::Result<()> {
+        policy.validate()?;
+        self.import_policy.validate()?;
+        anyhow::ensure!(
+            policy.purpose == crate::control::HelperPurposeV1::ImportVerification
+                && policy.helper_id.parse::<Uuid>()? == self.helper_id
+                && policy.spec_hash()? == self.policy_hash
+                && crate::broker::checkpoint::import_verification_spec_hash(policy)?
+                    == self.readonly_spec_hash
+                && self.import_policy.purpose == crate::control::HelperPurposeV1::Import
+                && self.import_policy.helper_id.parse::<Uuid>()?
+                    == self.import_snapshot.handle.operation_id()
+                && self.import_policy.helper_id.parse::<Uuid>()? != self.helper_id
+                && self.import_policy.session_id == policy.session_id
+                && self.import_policy.volume_name == policy.volume_name
+                && self.import_policy.parent_worker_id == policy.parent_worker_id
+                && self.import_policy.parent_attempt_id == policy.parent_attempt_id
+                && self.import_policy.parent_spec_hash == policy.parent_spec_hash
+                && self.import_policy.workspace_manifest_digest == policy.workspace_manifest_digest
+                && self.import_policy.authority_id == policy.authority_id
+                && self.import_snapshot.handle.session_id()
+                    == self.import_policy.session_id.parse::<Uuid>()?
+                && self.import_snapshot.handle.authority_fingerprint() == authority.fingerprint()
+                && parent_operation == self.operation_id
+                && parent_operation != self.helper_id
+                && spec.operation_id() == self.helper_id
+                && spec.session == policy.session_id.parse::<Uuid>()?
+                && matches!(
+                    spec.purpose,
+                    crate::runtime::ContainerPurpose::ImportVerification
+                )
+                && spec.network == crate::runtime::NetworkMode::None
+                && spec.image == policy.image_id
+                && spec.argv == policy.command.argv
+                && spec.is_read_only_workspace()
+                && spec.has_managed_names(&policy.stable_name, &policy.volume_name)
+                && spec.has_no_runtime_credentials_or_egress()
+                && spec.security_preset() == policy.security_preset
+                && self.authority == *authority
+                && authority.authority_id.to_string() == policy.authority_id
+                && matches!(
+                    (authority.kind, policy.runtime_kind),
+                    (
+                        crate::runtime::RuntimeKind::Docker,
+                        crate::control::RuntimeKindV1::Docker
+                    ) | (
+                        crate::runtime::RuntimeKind::Podman,
+                        crate::control::RuntimeKindV1::Podman
+                    )
+                ),
+            "named ImportVerification Create capability does not match its durable plan"
+        );
+        anyhow::ensure!(
+            self.confirmed_head.revision() > 0 && self.facts_hash.len() == 64,
+            "named ImportVerification Create capability is malformed"
+        );
+        Ok(())
     }
 
     pub(in crate::broker) fn confirmed_head(&self) -> &RevisionRefV1 {
@@ -681,8 +760,30 @@ impl WriterClient {
                         "legacy-named-import-verification-create-token-v1",
                         &canonical(saved)?,
                     );
+                    let policy = retained
+                        .import_verification_plan()
+                        .ok_or(JournalError::Corrupt)?
+                        .preparation()
+                        .policy();
+                    let helper_id =
+                        Uuid::parse_str(&policy.helper_id).map_err(|_| JournalError::Corrupt)?;
                     return Ok(Some(AuthorizedLegacyNamedImportCreate {
                         operation_id: plan.operation_id,
+                        helper_id,
+                        policy_hash: policy.spec_hash().map_err(|_| JournalError::Corrupt)?,
+                        readonly_spec_hash:
+                            super::super::checkpoint::import_verification_spec_hash(policy)?,
+                        import_policy: retained
+                            .import_creation()
+                            .ok_or(JournalError::Corrupt)?
+                            .policy()
+                            .clone(),
+                        import_snapshot: retained
+                            .import_creation()
+                            .and_then(HelperPreparationV1::owned)
+                            .ok_or(JournalError::Corrupt)?
+                            .clone(),
+                        authority: binding.clone(),
                         confirmed_head: receipt.head().clone(),
                         facts_hash,
                     }));
