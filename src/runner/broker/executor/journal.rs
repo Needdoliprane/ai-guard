@@ -912,5 +912,6 @@ mod tests;
 
 #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 pub(crate) use tests::{
-    ColdRecoverySeed, terminal_cleanup_jobs_for_test, terminal_pending_seed_for_cold_audit_test,
+    ColdRecoverySeed, running_seed_for_cold_terminal_test, terminal_cleanup_jobs_for_test,
+    terminal_pending_seed_for_cold_audit_test,
 };

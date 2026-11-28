@@ -6,10 +6,14 @@ use crate::{
         checkpoint::SupervisionOperationV1,
         journal::{StopJournal, recovery::legacy_worker_terminal::LegacyWorkerTerminalEvidenceV1},
     },
-    control::{RuntimeStatusV1, WorkerStateV1, WorkerTransitionV1, WorkerV1},
-    runner::broker::{ColdRecoverySeed, terminal_pending_seed_for_cold_audit_test},
+    control::{QuotaPolicyV1, RuntimeStatusV1, WorkerStateV1, WorkerTransitionV1, WorkerV1},
+    runner::broker::{
+        ColdRecoverySeed, running_seed_for_cold_terminal_test,
+        terminal_pending_seed_for_cold_audit_test,
+    },
 };
-use std::{fs::OpenOptions, io::Write, os::unix::fs::OpenOptionsExt};
+use anyhow::Context;
+use std::{fs::OpenOptions, io::Write, os::unix::fs::OpenOptionsExt, path::Path};
 
 #[tokio::test]
 async fn legacy_terminal_target_requires_the_same_current_running_worker() -> Result<()> {
@@ -38,7 +42,7 @@ async fn legacy_terminal_target_requires_the_same_current_running_worker() -> Re
         Err(BrokerErrorCodeV1::NeedsReconciliation)
     );
 
-    let service = read_only_service(&seed, &proof)?;
+    let service = read_only_service(seed.root(), seed.config(), &proof)?;
     let profile = service.registry.profile(seed.scope().profile_id())?;
     require_archived_invocation(profile, &proof)?;
     let mut other_program = profile.clone();
@@ -70,15 +74,95 @@ async fn legacy_terminal_target_requires_the_same_current_running_worker() -> Re
     Ok(())
 }
 
-fn retained_running(seed: &ColdRecoverySeed) -> Result<(LegacyWorkerTerminalEvidenceV1, WorkerV1)> {
-    let root = Directory::open_existing(seed.journal_root())?;
-    let journal = Journal::open(
+#[tokio::test]
+async fn legacy_terminal_target_reads_the_exact_running_worker_without_effects() -> Result<()> {
+    let seed = running_seed_for_cold_terminal_test().await;
+    let journal = open_recovery_journal(&seed.journal_root, seed.scope())?;
+    let stops = StopJournal::from_full(&journal);
+    let proof = stops.legacy_worker_terminal_evidence(seed.operation_id, seed.cancel_id)?;
+    assert_eq!(proof.head(), proof.cancel_receipt().head());
+    let service = read_only_service(seed.root(), seed.config(), &proof)?;
+    let head = proof.head().clone();
+    let expected = observation_target_facts(&proof)?;
+
+    let store = seed.store();
+    let worker = store
+        .worker(&seed.worker_id)?
+        .context("current Running Worker missing")?;
+    assert_eq!(worker.state, WorkerStateV1::Running);
+    assert!(worker.quota_held);
+    assert_eq!(worker.admission_operation_id, seed.operation_id.to_string());
+    let core_head = store.head()?;
+    let quota = store.worker_quota(&QuotaPolicyV1::default())?;
+    assert_eq!(quota.held_workers, 1);
+    assert_eq!(quota.held_cpu_millis, u64::from(worker.launch.cpu_millis));
+    assert_eq!(quota.held_memory_bytes, worker.launch.memory_bytes);
+    assert!(store.worker_usage()?.is_empty());
+    let reads = seed.worker_get_count();
+    let posts = seed.post_count();
+    let calls = std::fs::read(seed.root().join("calls"))?;
+
+    let validated = service.validate_legacy_worker_terminal(proof).await?;
+    let actual = validated.evidence();
+    assert_eq!(actual.operation_id(), seed.operation_id);
+    assert_eq!(actual.cancel_receipt().command_id(), seed.cancel_id);
+    assert!(
+        observation_target_facts(actual)? == expected,
+        "the authenticated read must retain the original scope, STOP, Arm, claim, authority and Worker"
+    );
+    assert!(canonical(actual.worker())? == canonical(&worker)?);
+    assert_eq!(seed.worker_get_count(), reads + 1);
+    assert_eq!(seed.post_count(), posts);
+    assert_eq!(store.head()?, core_head);
+    assert!(
+        canonical(&store.worker_quota(&QuotaPolicyV1::default())?)? == canonical(&quota)?,
+        "a read preserves the exact allocation held for this Worker"
+    );
+    assert!(store.worker_usage()?.is_empty());
+    assert!(
+        canonical(
+            &store
+                .worker(&seed.worker_id)?
+                .context("Worker disappeared after GET")?
+        )? == canonical(&worker)?
+    );
+    let after = stops
+        .recovery_status(seed.operation_id)?
+        .context("journal disappeared after GET")?;
+    assert_eq!(after.head(), &head);
+    assert!(service.fenced.load(Ordering::Acquire));
+    assert!(std::fs::read(seed.root().join("calls"))? == calls);
+    Ok(())
+}
+
+fn observation_target_facts(proof: &LegacyWorkerTerminalEvidenceV1) -> Result<Vec<u8>> {
+    let stop = proof.cancel_receipt();
+    Ok(canonical(&(
+        proof.scope(),
+        proof.head(),
+        stop.command_id(),
+        stop.input_hash(),
+        stop.head(),
+        proof.arm(),
+        proof.claim(),
+        proof.target(),
+        proof.worker(),
+    ))?)
+}
+
+fn open_recovery_journal(root: &Path, scope: &JournalScopeV1) -> Result<Journal> {
+    let root = Directory::open_existing(root)?;
+    Ok(Journal::open(
         &root,
-        seed.scope().clone(),
+        scope.clone(),
         &FsExclusions::new(),
         JournalLimitsV1::default(),
         ControlSecrets::new(Vec::new())?,
-    )?;
+    )?)
+}
+
+fn retained_running(seed: &ColdRecoverySeed) -> Result<(LegacyWorkerTerminalEvidenceV1, WorkerV1)> {
+    let journal = open_recovery_journal(seed.journal_root(), seed.scope())?;
     let job = journal.load(seed.operation_id())?.unwrap();
     let running = job
         .broker_checkpoint_v2()
@@ -104,14 +188,13 @@ fn retained_running(seed: &ColdRecoverySeed) -> Result<(LegacyWorkerTerminalEvid
 }
 
 fn read_only_service(
-    seed: &ColdRecoverySeed,
+    root: &Path,
+    config: &Path,
     proof: &LegacyWorkerTerminalEvidenceV1,
 ) -> Result<Service> {
     let (authority, _) = proof.target();
     let invocation = authority.invocation.as_ref().unwrap();
-    let root = seed.root();
-    let config = seed.config();
-    let scope = seed.scope();
+    let scope = proof.scope();
     let registry_path = config.join("terminal-reader-registry.json");
     let mut file = OpenOptions::new()
         .write(true)

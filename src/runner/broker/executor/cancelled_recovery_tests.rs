@@ -5,7 +5,8 @@ use fixture::{Case, RecoveryFixture};
 mod fixture;
 
 pub(crate) use fixture::{
-    ColdRecoverySeed, terminal_cleanup_jobs_for_test, terminal_pending_seed_for_cold_audit_test,
+    ColdRecoverySeed, running_seed_for_cold_terminal_test, terminal_cleanup_jobs_for_test,
+    terminal_pending_seed_for_cold_audit_test,
 };
 
 #[test]

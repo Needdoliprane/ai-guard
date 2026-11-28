@@ -33,7 +33,8 @@ use crate::{
     runtime::{Runtime, RuntimeKind},
 };
 pub(crate) use cancelled_recovery_tests::{
-    ColdRecoverySeed, terminal_cleanup_jobs_for_test, terminal_pending_seed_for_cold_audit_test,
+    ColdRecoverySeed, running_seed_for_cold_terminal_test, terminal_cleanup_jobs_for_test,
+    terminal_pending_seed_for_cold_audit_test,
 };
 use serde_json::{Value, json};
 use std::{
@@ -75,6 +76,8 @@ struct Fixture {
     config: Directory,
     requests: Arc<AtomicUsize>,
     worker_requests: Arc<AtomicUsize>,
+    worker_gets: Arc<AtomicUsize>,
+    posts: Arc<AtomicUsize>,
     arm_requests: Arc<AtomicUsize>,
     drop_next_worker_transition_response: Arc<AtomicBool>,
     audit_response_gate: Arc<StdMutex<Option<(oneshot::Sender<()>, oneshot::Receiver<()>)>>>,
@@ -189,6 +192,10 @@ impl Fixture {
         let observed = Arc::clone(&requests);
         let worker_requests = Arc::new(AtomicUsize::new(0));
         let observed_worker_requests = Arc::clone(&worker_requests);
+        let worker_gets = Arc::new(AtomicUsize::new(0));
+        let observed_worker_gets = Arc::clone(&worker_gets);
+        let posts = Arc::new(AtomicUsize::new(0));
+        let observed_posts = Arc::clone(&posts);
         let arm_requests = Arc::new(AtomicUsize::new(0));
         let observed_arm_requests = Arc::clone(&arm_requests);
         let drop_next_worker_transition_response = Arc::new(AtomicBool::new(false));
@@ -211,11 +218,25 @@ impl Fixture {
             move |request: axum::extract::Request, next: axum::middleware::Next| {
                 let observed = Arc::clone(&observed);
                 let observed_worker_requests = Arc::clone(&observed_worker_requests);
+                let worker_gets = Arc::clone(&observed_worker_gets);
+                let posts = Arc::clone(&observed_posts);
                 let observed_arm_requests = Arc::clone(&observed_arm_requests);
                 let observed_fault = Arc::clone(&observed_fault);
                 let observed_audit_response_gate = Arc::clone(&observed_audit_response_gate);
                 let observed_egress_opening_gate = Arc::clone(&observed_egress_opening_gate);
                 async move {
+                    if request.method() == axum::http::Method::GET
+                        && request
+                            .uri()
+                            .path()
+                            .strip_prefix("/api/v1/workers/")
+                            .is_some_and(|id| Uuid::parse_str(id).is_ok())
+                    {
+                        worker_gets.fetch_add(1, Ordering::SeqCst);
+                    }
+                    if request.method() == axum::http::Method::POST {
+                        posts.fetch_add(1, Ordering::SeqCst);
+                    }
                     let egress_opening = request.method() == axum::http::Method::POST
                         && request.uri().path() == "/api/v1/egress/channel-openings";
                     let decision = request.uri().path() == "/control/api/decide";
@@ -353,6 +374,8 @@ impl Fixture {
             config,
             requests,
             worker_requests,
+            worker_gets,
+            posts,
             arm_requests,
             drop_next_worker_transition_response,
             audit_response_gate,

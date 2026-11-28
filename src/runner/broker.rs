@@ -36,7 +36,8 @@ mod executor;
 pub(crate) use executor::{BatchExecutor, BatchOutcome, deliver_cancellation};
 #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 pub(crate) use executor::{
-    ColdRecoverySeed, terminal_cleanup_jobs_for_test, terminal_pending_seed_for_cold_audit_test,
+    ColdRecoverySeed, running_seed_for_cold_terminal_test, terminal_cleanup_jobs_for_test,
+    terminal_pending_seed_for_cold_audit_test,
 };
 
 pub(crate) async fn create_import_volume(

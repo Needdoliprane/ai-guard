@@ -1050,51 +1050,7 @@ async fn terminal_pending_seed_with_scope(
             && publication.result_outbox[0].1.is_none();
         drop(base);
 
-        // First close the empty native enforcer owner, then all executor-held
-        // writer clones, and finally the fixture's Journal and last Writer
-        // client. The actual gateway/SQLite control plane stays live at the
-        // exact original origin and identity.
-        let RecoveryFixture {
-            _peer,
-            executor,
-            base: mut retained_base,
-            ..
-        } = fixture;
-        driver.block_on(_peer.close());
-        eprintln!("cold_recovery_seed phase=native_owner_closed");
-        drop(executor);
-        Arc::get_mut(&mut retained_base)
-            .expect("cold seed must have one fixture owner")
-            .close_journal_owners_for_cold_test();
-        eprintln!("cold_recovery_seed phase=full_journal_owners_dropped");
-
-        let profile = Directory::open_existing(&journal_root).unwrap();
-        let deadline = std::time::Instant::now() + Duration::from_secs(60);
-        loop {
-            match StopRecoveryReaderV1::open_existing(
-                &profile,
-                scope.clone(),
-                &FsExclusions::new(),
-                JournalLimitsV1::default(),
-                ControlSecrets::new(Vec::new()).unwrap(),
-            ) {
-                Ok(Some(reader)) => {
-                    drop(reader);
-                    break;
-                }
-                Ok(None) => panic!("cold journal profile disappeared"),
-                Err(crate::broker::journal::JournalError::Busy) => {
-                    assert!(
-                        std::time::Instant::now() < deadline,
-                        "writer lease did not release within the bounded cold-close wait"
-                    );
-                    std::thread::sleep(Duration::from_millis(20));
-                }
-                Err(error) => panic!("cold StopRecoveryReader reopen failed: {error}"),
-            }
-        }
-
-        eprintln!("cold_recovery_seed phase=stop_reader_reopened");
+        let retained_base = close_cold_seed_owners(fixture, &driver, &journal_root, &scope);
         ColdRecoverySeed {
             base: retained_base,
             root,
@@ -1124,6 +1080,122 @@ async fn terminal_pending_seed_with_scope(
     })
     .await
     .expect("cold recovery seed task must join")
+}
+
+/// The original loopback Store and its confirmed Running/Cancel prefix,
+/// held before the terminal mutation sequence of the cold audit seed.
+pub(crate) struct RunningColdRecoverySeed {
+    base: Arc<Fixture>,
+    pub(crate) journal_root: std::path::PathBuf,
+    pub(crate) operation_id: Uuid,
+    pub(crate) cancel_id: Uuid,
+    pub(crate) worker_id: String,
+}
+
+impl RunningColdRecoverySeed {
+    pub(crate) fn root(&self) -> &Path {
+        self.base.root.path()
+    }
+
+    pub(crate) fn config(&self) -> &Path {
+        self.base.config.path()
+    }
+
+    pub(crate) fn scope(&self) -> &JournalScopeV1 {
+        &self.base.scope
+    }
+
+    pub(crate) fn store(&self) -> &crate::audit::Store {
+        &self.base.store
+    }
+
+    pub(crate) fn worker_get_count(&self) -> usize {
+        self.base.worker_gets.load(Ordering::SeqCst)
+    }
+
+    pub(crate) fn post_count(&self) -> usize {
+        self.base.posts.load(Ordering::SeqCst)
+    }
+}
+
+pub(crate) async fn running_seed_for_cold_terminal_test() -> RunningColdRecoverySeed {
+    let driver = tokio::runtime::Handle::current();
+    tokio::task::spawn_blocking(move || {
+        let fixture = RecoveryFixture::seed(Case::StillRunning, &driver, true, None);
+        let worker = fixture.worker();
+        assert_eq!(worker.state, WorkerStateV1::Running);
+        assert!(worker.quota_held && fixture.cancel_present());
+        let operation_id = fixture.operation;
+        let cancel_id = fixture.cancel_id();
+        let scope = fixture.base.scope.clone();
+        let journal_root = fixture
+            .base
+            .root
+            .path()
+            .join("journals")
+            .join(scope.profile_id());
+        let base = close_cold_seed_owners(fixture, &driver, &journal_root, &scope);
+        RunningColdRecoverySeed {
+            base,
+            journal_root,
+            operation_id,
+            cancel_id,
+            worker_id: worker.worker_id,
+        }
+    })
+    .await
+    .expect("cold Running recovery seed task must join")
+}
+
+fn close_cold_seed_owners(
+    fixture: RecoveryFixture,
+    driver: &tokio::runtime::Handle,
+    journal_root: &Path,
+    scope: &JournalScopeV1,
+) -> Arc<Fixture> {
+    // Retain the actual loopback gateway and release the full journal lease.
+    let RecoveryFixture {
+        _peer,
+        executor,
+        base: mut retained_base,
+        ..
+    } = fixture;
+    driver.block_on(_peer.close());
+    eprintln!("cold_recovery_seed phase=native_owner_closed");
+    drop(executor);
+    Arc::get_mut(&mut retained_base)
+        .expect("cold seed must have one fixture owner")
+        .close_journal_owners_for_cold_test();
+    eprintln!("cold_recovery_seed phase=full_journal_owners_dropped");
+
+    let profile = Directory::open_existing(journal_root).unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    loop {
+        match StopRecoveryReaderV1::open_existing(
+            &profile,
+            scope.clone(),
+            &FsExclusions::new(),
+            JournalLimitsV1::default(),
+            ControlSecrets::new(Vec::new()).unwrap(),
+        ) {
+            Ok(Some(reader)) => {
+                drop(reader);
+                break;
+            }
+            Ok(None) => panic!("cold journal profile disappeared"),
+            Err(crate::broker::journal::JournalError::Busy) => {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "writer lease did not release within the bounded cold-close wait"
+                );
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Err(error) => panic!("cold StopRecoveryReader reopen failed: {error}"),
+        }
+    }
+
+    eprintln!("cold_recovery_seed phase=stop_reader_reopened");
+    retained_base
 }
 
 fn inspection(
