@@ -51,6 +51,13 @@ mod legacy_named_admission;
 pub(crate) use legacy_named_admission::AuthorizedLegacyNamedImportCreate;
 #[allow(
     unused_imports,
+    reason = "the verification Arm caller is composed separately"
+)]
+pub(in crate::broker) use legacy_named_admission::{
+    LegacyNamedImportVerificationArmWrite, RecordedLegacyNamedImportVerificationArm,
+};
+#[allow(
+    unused_imports,
     reason = "the named Presence caller is composed separately"
 )]
 pub(in crate::broker) use legacy_named_admission::{

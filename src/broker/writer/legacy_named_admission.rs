@@ -21,12 +21,13 @@ use crate::{
         session_control::{
             LegacyConfirmedPlanV1, LegacyNamedAdmissionReceiptV1, LegacyNamedImportArmRequestV1,
             LegacyNamedImportClaimRequestV1, LegacyNamedImportObservationPhaseV1,
-            LegacyNamedImportObservationRequestV1, LegacyNamedInitialDecisionV1,
-            LegacyNamedSupervisedAdmissionV1,
+            LegacyNamedImportObservationRequestV1, LegacyNamedImportVerificationArmRequestV2,
+            LegacyNamedInitialDecisionV1, LegacyNamedSupervisedAdmissionV1,
         },
     },
     runtime::{NamedImportVerificationCreated, OwnedContainerSnapshot, RuntimeAuthority},
 };
+use std::task::Poll;
 use uuid::Uuid;
 
 const ACK_CAS_ATTEMPTS: usize = 16;
@@ -72,6 +73,42 @@ impl RecordedLegacyNamedImportArm {
 
     pub(in crate::broker) fn birth(&self) -> &RevisionRefV1 {
         &self.birth
+    }
+}
+
+#[allow(
+    dead_code,
+    reason = "the verification Arm caller is composed separately"
+)]
+pub(in crate::broker) enum LegacyNamedImportVerificationArmWrite {
+    Recorded(Box<RecordedLegacyNamedImportVerificationArm>),
+    Replayed(Box<LegacyNamedImportVerificationArmRequestV2>),
+}
+
+/// The confirmed birth of a verification Arm at one exact journal head.
+/// The job retains the request and its Created prefix. Only the live caller
+/// that confirms the first write receives this one-shot acknowledgement.
+#[allow(
+    dead_code,
+    reason = "the verification Arm caller is composed separately"
+)]
+pub(in crate::broker) struct RecordedLegacyNamedImportVerificationArm {
+    job: AcceptedJobV1,
+    generation: CancelGeneration,
+    expected_generation: u64,
+}
+
+#[allow(
+    dead_code,
+    reason = "the verification Arm caller is composed separately"
+)]
+impl RecordedLegacyNamedImportVerificationArm {
+    pub(in crate::broker) fn job(&self) -> &AcceptedJobV1 {
+        &self.job
+    }
+
+    pub(in crate::broker) fn generation(&self) -> (&CancelGeneration, u64) {
+        (&self.generation, self.expected_generation)
     }
 }
 
@@ -867,6 +904,110 @@ impl WriterClient {
             }
         }
         Err(JournalError::Conflict)
+    }
+
+    /// Retain the first verification Arm for the exact accepted job. A fresh
+    /// result confirms the local write only. Replays return the retained body.
+    #[allow(
+        dead_code,
+        reason = "the verification Arm caller is composed separately"
+    )]
+    pub(in crate::broker) async fn record_legacy_named_import_verification_arm(
+        &self,
+        admitted: &AcceptedJobV1,
+        request: LegacyNamedImportVerificationArmRequestV2,
+        binding: &RuntimeAuthority,
+        generation: &CancelGeneration,
+        expected_generation: u64,
+    ) -> Result<LegacyNamedImportVerificationArmWrite, NamedImportArmWriteFailure> {
+        let plan = admitted
+            .intent()
+            .legacy_named_plan()
+            .ok_or(JournalError::Conflict)?;
+        let operation = admitted.operation_id();
+        let scope = canonical(admitted.scope())?;
+        if operation != plan.operation_id || canonical(self.scope())? != scope {
+            return Err(JournalError::Conflict.into());
+        }
+
+        for _ in 0..ACK_CAS_ATTEMPTS {
+            let job = self.load_named_job(plan).await?;
+            if job.intent_hash() != admitted.intent_hash() || canonical(job.scope())? != scope {
+                return Err(JournalError::Conflict.into());
+            }
+            let retained = retained_admission(&job)?;
+            retained
+                .import_verification_arm_facts()?
+                .ok_or(JournalError::Conflict)?
+                .validate_request(&request, binding)?;
+            let body = canonical(&request)?;
+            if let Some(saved) = retained.import_verification_arm_request() {
+                if canonical(saved)? != body {
+                    return Err(JournalError::Conflict.into());
+                }
+                return Ok(LegacyNamedImportVerificationArmWrite::Replayed(Box::new(
+                    saved.clone(),
+                )));
+            }
+
+            let current = super::lifecycle(&job)?;
+            require_open(&current)?;
+            let pending = retained
+                .clone()
+                .with_import_verification_arm(request.clone())?;
+            let next = with_admission(&current, pending)?;
+            let mut advance = Box::pin(self.advance_lifecycle_with_publication(
+                operation,
+                job.head().clone(),
+                next,
+            ));
+            // This first poll reaches the synchronous Writer enqueue. Order
+            // it with STOP, then wait for disk and the reply outside the gate.
+            let first = std::future::poll_fn(|context| {
+                Poll::Ready(generation.with_current_generation(expected_generation, || {
+                    advance.as_mut().poll(context)
+                }))
+            })
+            .await
+            .map_err(|_| JournalError::Interrupted)?;
+            let publication = match first {
+                Poll::Ready(result) => result,
+                Poll::Pending => advance.await,
+            };
+            let receipt = match publication {
+                Ok(receipt) => receipt,
+                Err(LifecycleWriteFailure::BeforePublication(JournalError::Conflict)) => continue,
+                Err(failure) => return Err(failure.into()),
+            };
+
+            return async {
+                let saved = self.load(operation).await?.ok_or(JournalError::Corrupt)?;
+                let confirmed = retained_admission(&saved)?
+                    .import_verification_arm_request()
+                    .ok_or(JournalError::Conflict)?;
+                if saved.head() != receipt.head()
+                    || saved.intent_hash() != admitted.intent_hash()
+                    || canonical(saved.scope())? != scope
+                    || canonical(confirmed)? != body
+                {
+                    return Err(JournalError::Conflict);
+                }
+                generation
+                    .with_current_generation(expected_generation, || {
+                        LegacyNamedImportVerificationArmWrite::Recorded(Box::new(
+                            RecordedLegacyNamedImportVerificationArm {
+                                job: saved,
+                                generation: generation.clone(),
+                                expected_generation,
+                            },
+                        ))
+                    })
+                    .map_err(|_| JournalError::Interrupted)
+            }
+            .await
+            .map_err(NamedImportArmWriteFailure::ReloadAfterPublication);
+        }
+        Err(JournalError::Conflict.into())
     }
 
     /// Load only the retained intent. This data proves what was planned, not
