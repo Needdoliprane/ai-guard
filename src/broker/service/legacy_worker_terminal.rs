@@ -274,10 +274,11 @@ impl Service {
                 .ok_or(Code::NeedsReconciliation)?;
 
             let material = Arc::clone(&self.material);
+            let retained_profile = profile.clone();
             let credential = self
                 .filesystem(move || {
                     Ok(material
-                        .checked_reconciler(&profile)
+                        .checked_reconciler(&retained_profile)
                         .map_err(|_| Code::Unavailable))
                 })
                 .await??;
@@ -315,6 +316,7 @@ impl Service {
                 .await
                 .map_err(jobs::journal_error)?;
             legacy_terminal_publication_state(&proof, &pending, &current)?;
+            require_archived_invocation(&profile, &proof)?;
             self.require_legacy_terminal_validation_fence()?;
             if budget.remaining().is_zero() {
                 return Err(Code::Unavailable);
