@@ -1,0 +1,130 @@
+name: G04 named verification Arm reconciliation Linux QA
+
+on:
+  push:
+    branches: [codex/g04-named-verification-arm-reconcile-linux-qa-20261128]
+    paths: [.github/workflows/g04-named-verification-arm-reconcile-linux-qa.yaml]
+
+permissions:
+  contents: read
+
+jobs:
+  named-arm-reconciliation:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      SOURCE_SHA: 7ebf20bb088930e74a95fd1dd1fd400d86d07093
+      SOURCE_TREE: e15bb6d7248ea74985d86e98ab4552e3044fa75a
+      CONTROL_BLOB: 08f9cd8697661ab5eb667a8ff70f918109cc319b
+      SUPERVISION_BLOB: 1c0d668f6c2ee1b12686fbf831f928e482f55ae4
+      BOOTSTRAP_TEST_BLOB: 7ffdafba44c3f1c977ff1ea8a600dccf1f1a2e7d
+      VERIFICATION_ARM_BLOB: 196be90a557d55328e46683f198b2d0ffb57715b
+      SESSION_CONTROL_BLOB: e70eb7b91cce817e7a092503ba055797a7b33ac3
+      TRANSPORT_BLOB: c36f090e315509f4d3fe9612dc9d2b940f820e3e
+      CARGO_BUILD_JOBS: '1'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      CARGO_TERM_COLOR: never
+      RUST_MIN_STACK: '8388608'
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          persist-credentials: false
+
+      - name: Verify exact named verification Arm reconciliation
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          # Both selectors use private SQLite state and an in-process HTTP router.
+          # No runtime, provider, model, or external service is started.
+          selectors=(
+            audit::legacy_session_prepare::bootstrap::tests::legacy_named_import_verification_arm_requires_exact_named_terminal_and_authority
+            control_transport::reconciliation_tests::named_import_verification_arm_allows_only_exact_broker_reconciliation
+          )
+
+          report_not_run() {
+            for selector in "${selectors[@]}"; do
+              printf 'test=%s status=NOT_RUN\n' "$selector"
+            done
+          }
+
+          if [[ "${GITHUB_REF:-}" != refs/heads/codex/g04-named-verification-arm-reconcile-linux-qa-20261128 ||
+                "$(git rev-parse HEAD)" != "$SOURCE_SHA" ||
+                "$(git rev-parse 'HEAD^{tree}')" != "$SOURCE_TREE" ||
+                "$(git rev-parse HEAD:src/audit/control.rs)" != "$CONTROL_BLOB" ||
+                "$(git rev-parse HEAD:src/api/supervision.rs)" != "$SUPERVISION_BLOB" ||
+                "$(git rev-parse HEAD:src/audit/legacy_session_prepare/bootstrap/tests.rs)" != "$BOOTSTRAP_TEST_BLOB" ||
+                "$(git rev-parse HEAD:src/audit/legacy_session_prepare/confirmation/admission/verification_arm.rs)" != "$VERIFICATION_ARM_BLOB" ||
+                "$(git rev-parse HEAD:src/control/session_control.rs)" != "$SESSION_CONTROL_BLOB" ||
+                "$(git rev-parse HEAD:src/control_transport.rs)" != "$TRANSPORT_BLOB" ]]; then
+            printf 'source=FAIL\n'
+            report_not_run
+            exit 1
+          fi
+          printf 'source=PASS\nsource_sha=%s\nsource_tree=%s\ncontrol_blob=%s\nsupervision_blob=%s\nbootstrap_test_blob=%s\nverification_arm_blob=%s\nsession_control_blob=%s\ntransport_blob=%s\n' \
+            "$SOURCE_SHA" "$SOURCE_TREE" "$CONTROL_BLOB" "$SUPERVISION_BLOB" "$BOOTSTRAP_TEST_BLOB" "$VERIFICATION_ARM_BLOB" "$SESSION_CONTROL_BLOB" "$TRANSPORT_BLOB"
+          export AI_GUARD_BUILD_REVISION="$SOURCE_SHA"
+
+          scratch=$(mktemp -d /tmp/aig-g04-named-verification-arm.XXXXXX)
+          trap 'rm -rf -- "$scratch"' EXIT
+          export TMPDIR="$scratch"
+          export CARGO_TARGET_DIR="$scratch/target"
+          build_json="$scratch/build.jsonl"
+
+          if ! cargo fetch --locked >"$scratch/fetch.log" 2>&1; then
+            printf 'fetch=FAIL\nbuild=NOT_RUN\n'
+            report_not_run
+            exit 1
+          fi
+          printf 'fetch=PASS\n'
+
+          if cargo test --locked --offline -j1 --no-default-features --lib --no-run \
+              --message-format=json >"$build_json" 2>"$scratch/build.stderr"; then
+            printf 'build=PASS\n'
+          else
+            rc=$?
+            printf 'build=FAIL\nbuild_exit=%s\n' "$rc"
+            report_not_run
+            exit 1
+          fi
+
+          if ! libtest=$(jq -ers '[.[] | select(.reason == "compiler-artifact"
+              and .target.name == "agentsandbox" and .target.kind == ["lib"]
+              and .profile.test == true and (.executable | type) == "string") | .executable]
+              | unique | select(length == 1) | .[0]' "$build_json" 2>/dev/null) ||
+              [[ "$libtest" != "$CARGO_TARGET_DIR"/debug/deps/agentsandbox-* ||
+                 ! -f "$libtest" || ! -x "$libtest" || -L "$libtest" ]]; then
+            printf 'libtest=FAIL\n'
+            report_not_run
+            exit 1
+          fi
+          checksum=$(sha256sum -- "$libtest")
+          libtest_sha=${checksum%% *}
+          if [[ ! "$libtest_sha" =~ ^[0-9a-f]{64}$ ]]; then
+            printf 'libtest=FAIL\n'
+            report_not_run
+            exit 1
+          fi
+          printf 'libtest=PASS\nlibtest_sha256=%s\n' "$libtest_sha"
+
+          index=0
+          for selector in "${selectors[@]}"; do
+            index=$((index + 1))
+            log="$scratch/test-${index}.log"
+            test_exit=0
+            "$libtest" --exact "$selector" --test-threads=1 --color never >"$log" 2>&1 || test_exit=$?
+            if [[ "$test_exit" == 0 ]] &&
+                [[ "$(grep -Fxc "running 1 test" "$log" || true)" == 1 ]] &&
+                [[ "$(grep -Fxc "test $selector ... ok" "$log" || true)" == 1 ]] &&
+                [[ "$(grep -Ec '^test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; [0-9]+ filtered out; finished in [0-9]+([.][0-9]+)?s$' "$log" || true)" == 1 ]]; then
+              printf 'test=%s status=PASS\ntest_exit=0\ntest_pass_count=1\ntest_fail_count=0\n' "$selector"
+            else
+              printf 'test=%s status=FAIL\ntest_exit=%s\n' "$selector" "$test_exit"
+              rg -o 'panicked at src/[A-Za-z0-9_./-]+[.]rs:[0-9]+:[0-9]+' "$log" || true
+              exit 1
+            fi
+          done
