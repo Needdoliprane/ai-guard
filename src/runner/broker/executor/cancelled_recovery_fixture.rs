@@ -1424,7 +1424,15 @@ fn engine_program(root: &Path) -> PathBuf {
     fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).unwrap();
     let source = directory.join("engine.rs");
     fs::write(&source, r#"
-use std::{fs, io::Write};
+use std::{fmt, fs, io::Write};
+
+fn log(calls: &mut fs::File, line: fmt::Arguments<'_>) {
+    // Append the whole record in one write because fixture processes share this log.
+    let record = format!("{line}\n");
+    let written = calls.write(record.as_bytes()).unwrap();
+    assert_eq!(written, record.len());
+}
+
 fn main() {
     let root = std::env::current_exe().unwrap().parent().unwrap().parent().unwrap().to_owned();
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -1435,7 +1443,7 @@ fn main() {
     let mut calls = fs::OpenOptions::new().append(true).create(true).open(root.join("calls")).unwrap();
     match args.first().map(String::as_str) {
         Some("info") => {
-            writeln!(calls,"info").unwrap();
+            log(&mut calls, format_args!("info"));
             let pause = root.join("pause-cleanup-authority");
             if pause.is_file() && fs::read_to_string(root.join("calls")).unwrap()
                 .lines().filter(|line| line.starts_with("inspect ")).count() == 2
@@ -1453,21 +1461,21 @@ fn main() {
         }
         Some("image") if args.len() == 5 && args[1..4] == ["inspect", "--format", "{{.Id}}"]
             && args[4] == format!("sha256:{}", "a".repeat(64)) => {
-            writeln!(calls,"image inspect").unwrap();
+            log(&mut calls, format_args!("image inspect"));
             println!("{}", args[4]);
         }
         Some("inspect") => {
-            writeln!(calls,"inspect {}",args.last().unwrap()).unwrap();
+            log(&mut calls, format_args!("inspect {}", args.last().unwrap()));
             if fs::read_to_string(root.join("missing")).is_ok_and(|v| v == "yes") {std::process::exit(125)}
             print!("{}",fs::read_to_string(root.join("inspect.json")).unwrap());
         }
         Some("rm") if args.len() == 2 && args[1] == "d".repeat(64)
             && root.join("allow-fixture-cleanup").is_file() => {
-            writeln!(calls,"rm {}",args[1]).unwrap();
+            log(&mut calls, format_args!("rm {}", args[1]));
             if fs::read_to_string(root.join("missing")).is_ok_and(|v| v == "yes") {std::process::exit(125)}
             fs::write(root.join("missing"), "yes").unwrap();
         }
-        _ => { writeln!(calls,"{}",args.join(" ")).unwrap(); std::process::exit(125); }
+        _ => { log(&mut calls, format_args!("{}", args.join(" "))); std::process::exit(125); }
     }
 }
 "#).unwrap();
