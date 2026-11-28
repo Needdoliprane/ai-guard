@@ -1,0 +1,124 @@
+name: G09 Legacy terminal Service Linux QA
+
+on:
+  push:
+    branches: [codex/g09-legacy-terminal-service-linux-qa-20261128]
+    paths: [.github/workflows/g09-legacy-terminal-service-linux-qa.yaml]
+
+permissions:
+  contents: read
+
+jobs:
+  legacy-terminal-service:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      SOURCE_SHA: a7222a4ee2b94c699ac7da78912d293699af94fa
+      SOURCE_TREE: 17ff4e34516515911ba4067c125a3247b400bd61
+      SERVICE_MODULE_BLOB: db8513e67b3c7b65c39f6914f18c18057180523d
+      VALIDATION_BLOB: 683c727b07721b660ff847cfcfaf903b81b3387e
+      TEST_BLOB: 81ffcc1dd42d18c74c0049ab43f7a7f308bfd31f
+      PROFILE_BLOB: 5d6ec914c55813253ebef15554ffbfd593e3def2
+      CARGO_BUILD_JOBS: '1'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      CARGO_TERM_COLOR: never
+      RUST_MIN_STACK: '8388608'
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          persist-credentials: false
+
+      - name: Build one libtest and verify the current Legacy worker
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          # The oracle uses a private journal and a loopback control fixture.
+          # Runtime observations are synthetic. No real engine or provider is used.
+          selectors=(
+            broker::service::server::legacy_worker_terminal::tests::legacy_terminal_target_requires_the_same_current_running_worker
+          )
+
+          report_not_run() {
+            for selector in "${selectors[@]}"; do
+              printf 'test=%s status=NOT_RUN\n' "$selector"
+            done
+          }
+
+          if [[ "$(git rev-parse HEAD)" != "$SOURCE_SHA" ||
+                "$(git rev-parse 'HEAD^{tree}')" != "$SOURCE_TREE" ||
+                "$(git rev-parse HEAD:src/broker/service/server.rs)" != "$SERVICE_MODULE_BLOB" ||
+                "$(git rev-parse HEAD:src/broker/service/legacy_worker_terminal.rs)" != "$VALIDATION_BLOB" ||
+                "$(git rev-parse HEAD:src/broker/service/legacy_worker_terminal_tests.rs)" != "$TEST_BLOB" ||
+                "$(git rev-parse HEAD:src/broker/service/profile.rs)" != "$PROFILE_BLOB" ]]; then
+            printf 'source=FAIL\n'
+            report_not_run
+            exit 1
+          fi
+          printf 'source=PASS\nsource_sha=%s\nsource_tree=%s\nservice_module_blob=%s\nvalidation_blob=%s\ntest_blob=%s\nprofile_blob=%s\n' \
+            "$SOURCE_SHA" "$SOURCE_TREE" "$SERVICE_MODULE_BLOB" "$VALIDATION_BLOB" "$TEST_BLOB" "$PROFILE_BLOB"
+          export AI_GUARD_BUILD_REVISION="$SOURCE_SHA"
+
+          scratch=$(mktemp -d /tmp/aig-g09-legacy-terminal-service.XXXXXX)
+          trap 'rm -rf -- "$scratch"' EXIT
+          export TMPDIR="$scratch"
+          export CARGO_TARGET_DIR="$scratch/target"
+          build_json="$scratch/build.jsonl"
+
+          if ! cargo fetch --locked >"$scratch/fetch.log" 2>&1; then
+            printf 'fetch=FAIL\nbuild=NOT_RUN\n'
+            report_not_run
+            exit 1
+          fi
+          printf 'fetch=PASS\n'
+
+          if cargo test --locked --offline -j1 --no-default-features --lib --no-run \
+              --message-format=json >"$build_json" 2>"$scratch/build.stderr"; then
+            printf 'build=PASS\n'
+          else
+            rc=$?
+            printf 'build=FAIL\nbuild_exit=%s\n' "$rc"
+            report_not_run
+            exit 1
+          fi
+
+          if ! libtest=$(jq -ers '[.[] | select(.reason == "compiler-artifact"
+              and .target.name == "agentsandbox" and .target.kind == ["lib"]
+              and .profile.test == true and (.executable | type) == "string") | .executable]
+              | unique | select(length == 1) | .[0]' "$build_json" 2>/dev/null) ||
+              [[ "$libtest" != "$CARGO_TARGET_DIR"/debug/deps/agentsandbox-* ||
+                 ! -f "$libtest" || ! -x "$libtest" || -L "$libtest" ]]; then
+            printf 'libtest=FAIL\n'
+            report_not_run
+            exit 1
+          fi
+          checksum=$(sha256sum -- "$libtest")
+          libtest_sha=${checksum%% *}
+          if [[ ! "$libtest_sha" =~ ^[0-9a-f]{64}$ ]]; then
+            printf 'libtest=FAIL\n'
+            report_not_run
+            exit 1
+          fi
+          printf 'libtest=PASS\nlibtest_sha256=%s\n' "$libtest_sha"
+
+          index=0
+          for selector in "${selectors[@]}"; do
+            index=$((index + 1))
+            log="$scratch/test-${index}.log"
+            test_exit=0
+            "$libtest" --exact "$selector" --test-threads=1 --color never >"$log" 2>&1 || test_exit=$?
+            if [[ "$test_exit" == 0 ]] &&
+                [[ "$(grep -Fxc "running 1 test" "$log" || true)" == 1 ]] &&
+                [[ "$(grep -Fxc "test $selector ... ok" "$log" || true)" == 1 ]] &&
+                [[ "$(grep -Ec '^test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; [0-9]+ filtered out; finished in [0-9]+([.][0-9]+)?s$' "$log" || true)" == 1 ]]; then
+              printf 'test=%s status=PASS\ntest_exit=0\ntest_pass_count=1\ntest_fail_count=0\n' "$selector"
+            else
+              printf 'test=%s status=FAIL\ntest_exit=%s\n' "$selector" "$test_exit"
+              rg -o 'panicked at src/[A-Za-z0-9_./-]+[.]rs:[0-9]+:[0-9]+' "$log" || true
+              exit 1
+            fi
+          done
