@@ -391,6 +391,33 @@ async fn legacy_terminal_publication_distinguishes_exact_parent_from_possible_re
 #[tokio::test]
 async fn legacy_terminal_publication_replays_a_lost_core_reply_with_one_durable_effect()
 -> Result<()> {
+    async fn reopen_writer(
+        service: &mut Service,
+        journal_root: &Path,
+        scope: &JournalScopeV1,
+    ) -> Result<()> {
+        use crate::broker::journal::JournalError;
+
+        service.profiles.remove(scope.profile_id());
+        let reopened = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                match terminal_publication_stops(journal_root, scope) {
+                    Err(error)
+                        if error.downcast_ref::<JournalError>() == Some(&JournalError::Busy) =>
+                    {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                    result => break result,
+                }
+            }
+        })
+        .await??;
+        let jobs = Arc::new(ProfileJobs::new());
+        jobs.writer.set(reopened).expect("one reopened STOP writer");
+        service.profiles.insert(scope.profile_id().to_owned(), jobs);
+        Ok(())
+    }
+
     let seed = running_seed_for_cold_terminal_test().await;
     let operation = seed.operation_id;
     let scope = seed.scope();
@@ -419,12 +446,17 @@ async fn legacy_terminal_publication_replays_a_lost_core_reply_with_one_durable_
     let calls = fs::read(&calls_path)?;
 
     seed.arm_transition_response_cut_for_test();
+    assert!(seed.transition_response_cut_pending_for_test());
     assert!(matches!(
         service
             .publish_legacy_worker_terminal_observation(scope, operation, pending.head())
             .await,
         Err(BrokerErrorCodeV1::NeedsReconciliation)
     ));
+    assert!(
+        !seed.transition_response_cut_pending_for_test(),
+        "the successful transition handler must consume the response cut"
+    );
     assert_eq!(seed.worker_get_count(), reads + 1);
     assert_eq!(seed.post_count(), posts + 1);
     let core_head = store.head()?;
@@ -455,6 +487,8 @@ async fn legacy_terminal_publication_replays_a_lost_core_reply_with_one_durable_
         canonical(pending.request())?
     );
 
+    drop(writer);
+    reopen_writer(&mut service, &seed.journal_root, scope).await?;
     let confirmed = service
         .publish_legacy_worker_terminal_observation(scope, operation, pending.head())
         .await?;
@@ -473,22 +507,7 @@ async fn legacy_terminal_publication_replays_a_lost_core_reply_with_one_durable_
     );
     assert_eq!(canonical(&store.worker_usage()?)?, canonical(&usage)?);
 
-    service.profiles.remove(scope.profile_id());
-    drop(writer);
-    let reopened = tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            match terminal_publication_stops(&seed.journal_root, scope) {
-                Err(error) if error.downcast_ref::<JournalError>() == Some(&JournalError::Busy) => {
-                    tokio::time::sleep(Duration::from_millis(10)).await;
-                }
-                result => break result,
-            }
-        }
-    })
-    .await??;
-    let jobs = Arc::new(ProfileJobs::new());
-    jobs.writer.set(reopened).expect("one reopened STOP writer");
-    service.profiles.insert(scope.profile_id().to_owned(), jobs);
+    reopen_writer(&mut service, &seed.journal_root, scope).await?;
     let cold = service
         .publish_legacy_worker_terminal_observation(scope, operation, pending.head())
         .await?;

@@ -1122,6 +1122,12 @@ impl RunningColdRecoverySeed {
             .drop_next_worker_transition_response
             .store(true, Ordering::SeqCst);
     }
+
+    pub(crate) fn transition_response_cut_pending_for_test(&self) -> bool {
+        self.base
+            .drop_next_worker_transition_response
+            .load(Ordering::SeqCst)
+    }
 }
 
 pub(crate) async fn running_seed_for_cold_terminal_test() -> RunningColdRecoverySeed {
