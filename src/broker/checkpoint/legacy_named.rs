@@ -61,6 +61,12 @@ pub(crate) struct LegacyNamedAdmissionCheckpoint {
         skip_serializing_if = "Option::is_none"
     )]
     import_verification_created: Option<Box<LegacyNamedImportVerificationCreatedV1>>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    import_verification_arm: Option<Box<LegacyNamedImportVerificationArmRequestV2>>,
 }
 
 fn deserialize_present<'de, D, T>(decoder: D) -> Result<Option<T>, D::Error>
@@ -230,11 +236,24 @@ impl LegacyNamedImportVerificationArmFacts<'_> {
         request: &LegacyNamedImportVerificationArmRequestV2,
         runtime: &RuntimeAuthority,
     ) -> JournalResult<()> {
+        self.validate_request_against_prefix(request)?;
+        let authority =
+            LegacyNamedImportAuthorityV1::for_policy(self.preparation.policy(), runtime)?;
+        ensure(
+            authority.binding_hash == self.runtime_binding_hash
+                && authority.handle_fingerprint
+                    == self.created.owned.handle.authority_fingerprint(),
+        )
+    }
+
+    fn validate_request_against_prefix(
+        &self,
+        request: &LegacyNamedImportVerificationArmRequestV2,
+    ) -> JournalResult<()> {
         let arm = &request.arm;
         checked(request.validate())?;
         checked(arm.validate_for_parent(&self.prepared))?;
         let policy = self.preparation.policy();
-        let authority = LegacyNamedImportAuthorityV1::for_policy(policy, runtime)?;
         let owned = &self.created.owned;
         let ArmSubjectV1::Helper {
             helper_id,
@@ -257,9 +276,7 @@ impl LegacyNamedImportVerificationArmFacts<'_> {
                 && arm.configuration_fingerprint_version == owned.handle.fingerprint_version()
                 && owned.observation.configuration_fingerprint.as_deref()
                     == Some(arm.configuration_fingerprint.as_str())
-                && authority.binding_hash == self.runtime_binding_hash
-                && authority.handle_fingerprint == owned.handle.authority_fingerprint()
-                && arm.authority_binding_hash == authority.handle_fingerprint
+                && arm.authority_binding_hash == owned.handle.authority_fingerprint()
                 && equal(permission.as_ref(), self.preparation.permission())?,
         )
     }
@@ -409,6 +426,7 @@ impl LegacyNamedAdmissionCheckpoint {
             import_verification: None,
             import_verification_create: None,
             import_verification_created: None,
+            import_verification_arm: None,
         };
         let namespace = uuid(&value.plan.control_namespace_uuid)?;
         value.validate_shape(namespace)?;
@@ -672,6 +690,31 @@ impl LegacyNamedAdmissionCheckpoint {
             .map(|created| &created.owned)
     }
 
+    pub(in crate::broker) fn import_verification_arm_request(
+        &self,
+    ) -> Option<&LegacyNamedImportVerificationArmRequestV2> {
+        self.import_verification_arm.as_deref()
+    }
+
+    /// Retain the exact pending Arm as checkpoint data. Publication and
+    /// guardian custody require the Writer's live-binding and STOP checks.
+    #[allow(
+        dead_code,
+        reason = "the verification Arm Writer is composed separately"
+    )]
+    pub(in crate::broker) fn with_import_verification_arm(
+        mut self,
+        request: LegacyNamedImportVerificationArmRequestV2,
+    ) -> JournalResult<Self> {
+        if let Some(saved) = self.import_verification_arm_request() {
+            ensure(equal(saved, &request)?)?;
+        } else {
+            self.import_verification_arm = Some(Box::new(request));
+        }
+        self.validate_shape(uuid(&self.plan.control_namespace_uuid)?)?;
+        Ok(self)
+    }
+
     #[allow(
         dead_code,
         reason = "the verification Arm owner is composed separately"
@@ -680,6 +723,15 @@ impl LegacyNamedAdmissionCheckpoint {
         &self,
     ) -> JournalResult<Option<LegacyNamedImportVerificationArmFacts<'_>>> {
         self.validate_shape(uuid(&self.plan.control_namespace_uuid)?)?;
+        self.project_import_verification_arm_facts()
+    }
+
+    // Both callers validate the preceding plan, Create and Created before
+    // projecting. Keeping this independent of validate_shape lets reopening
+    // validate the pending request against exactly those preceding facts.
+    fn project_import_verification_arm_facts(
+        &self,
+    ) -> JournalResult<Option<LegacyNamedImportVerificationArmFacts<'_>>> {
         let Some(created) = self.import_verification_created.as_deref() else {
             return Ok(None);
         };
@@ -996,7 +1048,8 @@ impl LegacyNamedAdmissionCheckpoint {
                     && self.import_observations.is_empty()
                     && self.import_verification.is_none()
                     && self.import_verification_create.is_none()
-                    && self.import_verification_created.is_none(),
+                    && self.import_verification_created.is_none()
+                    && self.import_verification_arm.is_none(),
             )?,
             2 => hash(self.archive_digest().ok_or(JournalError::Conflict)?)?,
             _ => return Err(JournalError::UnsupportedVersion),
@@ -1120,6 +1173,11 @@ impl LegacyNamedAdmissionCheckpoint {
         }
         if let Some(created) = self.import_verification_created.as_deref() {
             self.validate_import_verification_created(created)?;
+        }
+        if let Some(request) = self.import_verification_arm_request() {
+            self.project_import_verification_arm_facts()?
+                .ok_or(JournalError::Conflict)?
+                .validate_request_against_prefix(request)?;
         }
         ensure(canonical(self)?.len() <= MAX_OPERATION_BYTES)
     }
@@ -1334,7 +1392,8 @@ impl LegacyNamedAdmissionCheckpoint {
                     && self.import_claim.is_none()
                     && self.import_verification.is_none()
                     && self.import_verification_create.is_none()
-                    && self.import_verification_created.is_none(),
+                    && self.import_verification_created.is_none()
+                    && self.import_verification_arm.is_none(),
             ),
             Some(old) => {
                 ensure(
@@ -1449,6 +1508,15 @@ impl LegacyNamedAdmissionCheckpoint {
                     (Some(previous), Some(current)) => ensure(equal(previous, current)?),
                     (Some(_), None) => Err(JournalError::Conflict),
                 }?;
+                match (
+                    old.import_verification_arm_request(),
+                    self.import_verification_arm_request(),
+                ) {
+                    (None, None) => Ok(()),
+                    (None, Some(_)) => ensure(old.import_verification_created.is_some()),
+                    (Some(previous), Some(current)) => ensure(equal(previous, current)?),
+                    (Some(_), None) => Err(JournalError::Conflict),
+                }?;
                 match (old.import_arm(), self.import_arm()) {
                     (None, None) => Ok(()),
                     (None, Some(new)) => ensure(
@@ -1542,6 +1610,84 @@ mod tests {
     use serde_json::json;
     use sha2::{Digest, Sha256};
     use std::{os::unix::fs::PermissionsExt, time::Duration};
+
+    fn assert_verification_arm_pending_roundtrip(
+        checkpoint: impl Fn(LegacyNamedAdmissionCheckpoint) -> JournalResult<BrokerCheckpointV2>,
+        created: &LegacyNamedAdmissionCheckpoint,
+        request: &LegacyNamedImportVerificationArmRequestV2,
+    ) -> anyhow::Result<()> {
+        let old_bytes = checkpoint(created.clone())?.canonical_bytes()?;
+        let old = BrokerCheckpointV2::from_bytes(&old_bytes)?;
+        let old_named = old
+            .supervision()
+            .legacy_named_admission()
+            .ok_or(JournalError::Conflict)?;
+        assert!(old_named.import_verification_arm_request().is_none());
+        assert!(
+            serde_json::to_value(old_named)?
+                .get("import_verification_arm")
+                .is_none()
+        );
+        assert_eq!(old.canonical_bytes()?, old_bytes);
+
+        let pending = created
+            .clone()
+            .with_import_verification_arm(request.clone())?;
+        pending.validate_transition(Some(created))?;
+        let mut without_created = created.clone();
+        without_created.import_verification_created = None;
+        assert!(matches!(
+            pending.validate_transition(Some(&without_created)),
+            Err(JournalError::Conflict)
+        ));
+        assert!(matches!(
+            without_created.with_import_verification_arm(request.clone()),
+            Err(JournalError::Conflict)
+        ));
+
+        let bytes = checkpoint(pending)?.canonical_bytes()?;
+        let reopened = BrokerCheckpointV2::from_bytes(&bytes)?;
+        let retained = reopened
+            .supervision()
+            .legacy_named_admission()
+            .ok_or(JournalError::Conflict)?;
+        let saved = retained
+            .import_verification_arm_request()
+            .ok_or(JournalError::Conflict)?;
+        assert_eq!(canonical(saved)?, canonical(request)?);
+        assert_eq!(reopened.canonical_bytes()?, bytes);
+        let replayed = retained
+            .clone()
+            .with_import_verification_arm(request.clone())?;
+        assert_eq!(checkpoint(replayed)?.canonical_bytes()?, bytes);
+
+        let mut shifted = request.clone();
+        let later = shifted
+            .arm
+            .clock
+            .continuous_ns()?
+            .checked_add(1)
+            .ok_or(JournalError::Conflict)?;
+        shifted.arm.clock.continuous_ns_decimal = later.to_string();
+        shifted.arm.deadline_ns_decimal =
+            checked_deadline(later, shifted.arm.timeout_seconds)?.to_string();
+        let alternate = created
+            .clone()
+            .with_import_verification_arm(shifted.clone())?;
+        assert!(matches!(
+            retained.clone().with_import_verification_arm(shifted),
+            Err(JournalError::Conflict)
+        ));
+        assert!(matches!(
+            alternate.validate_transition(Some(retained)),
+            Err(JournalError::Conflict)
+        ));
+        assert!(matches!(
+            created.validate_transition(Some(retained)),
+            Err(JournalError::Conflict)
+        ));
+        Ok(())
+    }
 
     fn import_observation_fixture(
         plan: &LegacyConfirmedPlanV1,
@@ -3720,6 +3866,11 @@ mod tests {
             arm: verification_arm,
         };
         facts.validate_request(&verification_request, &authority)?;
+        assert_verification_arm_pending_roundtrip(
+            &checkpoint,
+            &cold_created,
+            &verification_request,
+        )?;
         assert!(matches!(
             facts.validate_request(&verification_request, &changed_invocation),
             Err(JournalError::Conflict)
@@ -3741,6 +3892,12 @@ mod tests {
         verification_request.validate()?;
         assert!(matches!(
             facts.validate_request(&verification_request, &authority),
+            Err(JournalError::Conflict)
+        ));
+        assert!(matches!(
+            cold_created
+                .clone()
+                .with_import_verification_arm(verification_request),
             Err(JournalError::Conflict)
         ));
         let mut divergent_created = cold_created.clone();
