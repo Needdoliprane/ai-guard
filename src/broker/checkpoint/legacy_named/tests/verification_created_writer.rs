@@ -2,11 +2,23 @@ use super::*;
 use crate::{
     broker::enforcer::check_verification_prospective_facts_for_test,
     broker::writer::LegacyNamedImportVerificationArmWrite,
+    broker::{
+        clock::{HostClock, NativeHostClock, checked_deadline},
+        enforcer::{
+            EnforcerClient, LegacyIpcFixture, LegacyNamedProspectiveBind, NamedImportArmBirthV1,
+            connect_named_legacy_fixture,
+        },
+    },
     runner::broker::{broker_helper_spec, create_import_volume},
     runtime::{ContainerPurpose, ContainerSpec, ManagedRuntime, NetworkMode, Runtime},
 };
 use anyhow::{Context, ensure};
-use std::{fs, path::Path};
+use futures_util::FutureExt;
+use std::{
+    fs,
+    panic::{AssertUnwindSafe, resume_unwind},
+    path::Path,
+};
 use tokio::{process::Command, time::timeout};
 
 pub(super) const JOURNAL: &str = "verification-created-writer";
@@ -14,6 +26,7 @@ pub(super) const JOURNAL: &str = "verification-created-writer";
 pub(super) enum Scenario {
     AckAfterStop,
     ArmWriter { lose_reply: bool },
+    GuardianCheck { after_stop: bool },
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -48,6 +61,22 @@ async fn named_verification_arm_writer_retains_one_birth_and_only_replays_after_
         })?;
     }
     Ok(())
+}
+
+#[tokio::test]
+async fn named_verification_check_keeps_the_original_guardian_slot() -> anyhow::Result<()> {
+    Box::pin(named_admission_fixture(Some(Scenario::GuardianCheck {
+        after_stop: false,
+    })))
+    .await
+}
+
+#[tokio::test]
+async fn named_verification_check_refuses_after_confirmed_stop() -> anyhow::Result<()> {
+    Box::pin(named_admission_fixture(Some(Scenario::GuardianCheck {
+        after_stop: true,
+    })))
+    .await
 }
 
 async fn fixture_runtime(root: &Path, authority: Uuid) -> anyhow::Result<ManagedRuntime> {
@@ -91,9 +120,61 @@ pub(super) async fn exercise(
     writer: WriterClient,
     plan: &LegacyConfirmedPlanV1,
     archive_digest: &str,
-    mut arm: ArmResultV1,
-    (mut claim, mut claim_receipt): (LegacyNamedImportClaimRequestV1, MutationReceiptV1),
+    arm: ArmResultV1,
+    (claim, claim_receipt): (LegacyNamedImportClaimRequestV1, MutationReceiptV1),
     scenario: Scenario,
+) -> anyhow::Result<()> {
+    let guardian = if matches!(scenario, Scenario::GuardianCheck { .. }) {
+        Some(LegacyIpcFixture::start(1, 0).await)
+    } else {
+        None
+    };
+    let exercise = Box::pin(exercise_scenario(
+        root,
+        writer,
+        plan,
+        archive_digest,
+        (arm, claim, claim_receipt),
+        scenario,
+        guardian.as_ref(),
+    ));
+    if guardian.is_none() {
+        return exercise.await;
+    }
+    let outcome = AssertUnwindSafe(async {
+        timeout(Duration::from_secs(100), exercise)
+            .await
+            .context("named verification guardian fixture timed out")?
+    })
+    .catch_unwind()
+    .await;
+    let guardian = guardian.expect("guardian scenario has an IPC fixture");
+    // Join after an assertion panic and preserve the original panic if shutdown also panics.
+    let finished = AssertUnwindSafe(timeout(Duration::from_secs(10), guardian.finish()))
+        .catch_unwind()
+        .await;
+    match outcome {
+        Ok(result) => result?,
+        Err(payload) => resume_unwind(payload),
+    }
+    match finished {
+        Ok(result) => result.context("named verification guardian did not join"),
+        Err(payload) => resume_unwind(payload),
+    }
+}
+
+async fn exercise_scenario(
+    root: &Path,
+    writer: WriterClient,
+    plan: &LegacyConfirmedPlanV1,
+    archive_digest: &str,
+    (mut arm, mut claim, mut claim_receipt): (
+        ArmResultV1,
+        LegacyNamedImportClaimRequestV1,
+        MutationReceiptV1,
+    ),
+    scenario: Scenario,
+    guardian: Option<&LegacyIpcFixture>,
 ) -> anyhow::Result<()> {
     let operation = plan.operation_id;
     let admitted = writer.load(operation).await?.context("named job missing")?;
@@ -137,21 +218,94 @@ pub(super) async fn exercise(
         .configuration_fingerprint
         .clone()
         .context("original Import configuration fingerprint missing")?;
+    if guardian.is_some() {
+        // This case supplies the first Core Arm reply of its fresh fixture
+        // job. Its retained receipt must bind a live native clock sample.
+        arm.replayed = false;
+        let clock = NativeHostClock::new()?.sample()?;
+        arm.arm.deadline_ns_decimal =
+            checked_deadline(clock.continuous_ns()?, arm.arm.timeout_seconds)?.to_string();
+        arm.arm.clock = clock;
+    }
     arm.receipt.input_hash = arm.arm.input_hash()?;
     claim.claim.arm_receipt = arm.receipt.clone();
-    claim_receipt.input_hash = claim.input_hash()?;
     let recorded_arm = writer
         .record_legacy_named_import_arm(plan, archive_digest, arm.arm.clone())
         .await?;
+    let original_exchange = if let Some(guardian) = guardian {
+        Some(
+            Box::pin(async {
+                let client = connect_named_legacy_fixture(guardian).await?;
+                let pending = writer
+                    .load(operation)
+                    .await?
+                    .context("original Import Arm pending head missing")?;
+                let scope = pending.scope();
+                let birth = NamedImportArmBirthV1::from_plan(scope, plan, pending.head())?;
+                let prospective = ProspectiveRegistrationV1::new(
+                    hex::encode(Sha256::digest(scope.gateway_origin().as_bytes())),
+                    scope.tenant_id().to_owned(),
+                    arm.arm.clone(),
+                    binding.clone(),
+                    original.clone(),
+                )?;
+                let reserved = client
+                    .legacy_reserve_named_prospective(
+                        prospective,
+                        &birth,
+                        &generation,
+                        expected_generation,
+                    )
+                    .await
+                    .map_err(|failure| anyhow::anyhow!("original Import Reserve: {failure:?}"))?;
+                let exchange = client
+                    .legacy_begin_named_prospective_arm_exchange(reserved)
+                    .await
+                    .map_err(|failure| {
+                        anyhow::anyhow!("original Import Arm exchange: {failure:?}")
+                    })?;
+                Ok::<_, anyhow::Error>((client, exchange))
+            })
+            .await?,
+        )
+    } else {
+        None
+    };
     writer
         .acknowledge_legacy_named_import_arm(operation, recorded_arm.request(), arm.clone())
         .await?;
+    let bound_import = if let Some((client, exchange)) = original_exchange {
+        let saved = writer
+            .load(operation)
+            .await?
+            .context("original Import Arm acknowledgement missing")?;
+        let bound = Box::pin(client.legacy_bind_named_prospective(&saved, &arm, exchange))
+            .await
+            .map_err(|failure| anyhow::anyhow!("original Import Bind: {failure:?}"))?;
+        let LegacyNamedProspectiveBind::Bound(bound) = bound else {
+            anyhow::bail!("original Import Bind did not produce live custody");
+        };
+        claim.claim.clock_check = NativeHostClock::new()?.sample()?;
+        Some((client, bound))
+    } else {
+        None
+    };
+    claim_receipt.input_hash = claim.input_hash()?;
     writer
         .record_legacy_named_import_claim(plan, claim.clone())
         .await?;
     writer
         .acknowledge_legacy_named_import_claim(operation, &claim, claim_receipt.clone())
         .await?;
+    let guardian = match (guardian, bound_import) {
+        (Some(guardian), Some((client, bound))) => {
+            Box::pin(bound.prepare_named_import_for_fixture(claim.clone(), claim_receipt.clone()))
+                .await
+                .context("original Import Prepare")?;
+            Some((client, guardian))
+        }
+        _ => None,
+    };
     fs::write(
         root.join("containers")
             .join(original.handle.id())
@@ -210,7 +364,10 @@ pub(super) async fn exercise(
         )
         .await?
         .context("single verification Create authorization missing")?;
-    if let Scenario::ArmWriter { lose_reply } = scenario {
+    if matches!(
+        scenario,
+        Scenario::ArmWriter { .. } | Scenario::GuardianCheck { .. }
+    ) {
         return Box::pin(async {
             // The same synthetic inspection can complete before STOP here.
             fs::write(root.join("verification-inspection-release"), b"")?;
@@ -231,16 +388,32 @@ pub(super) async fn exercise(
                 .acknowledge_legacy_named_import_verification_created(&admitted, created)
                 .await
                 .context(ArmWriterPhase("created_ack"))?;
-            Box::pin(exercise_arm_writer(
-                root,
-                writer,
-                &admitted,
-                binding,
-                &generation,
-                expected_generation,
-                lose_reply,
-            ))
-            .await
+            if let Some((client, guardian)) = guardian {
+                let after_stop = matches!(scenario, Scenario::GuardianCheck { after_stop: true });
+                Box::pin(exercise_guardian_check(
+                    root,
+                    &writer,
+                    &admitted,
+                    binding,
+                    (&generation, expected_generation),
+                    (&client, guardian, after_stop),
+                    &arm.arm.operation_id,
+                ))
+                .await
+            } else if let Scenario::ArmWriter { lose_reply } = scenario {
+                Box::pin(exercise_arm_writer(
+                    root,
+                    writer,
+                    &admitted,
+                    binding,
+                    &generation,
+                    expected_generation,
+                    lose_reply,
+                ))
+                .await
+            } else {
+                anyhow::bail!("guardian Check scenario lacks the prepared original Import")
+            }
         })
         .await;
     }
@@ -358,6 +531,91 @@ pub(super) async fn exercise(
             .iter()
             .any(|prefix| line.starts_with(prefix))
     }));
+    Ok(())
+}
+
+async fn exercise_guardian_check(
+    root: &Path,
+    writer: &WriterClient,
+    admitted: &crate::broker::journal::AcceptedJobV1,
+    binding: &RuntimeAuthority,
+    (generation, expected_generation): (&CancelGeneration, u64),
+    (client, guardian, after_stop): (&EnforcerClient, &LegacyIpcFixture, bool),
+    import_arm_id: &str,
+) -> anyhow::Result<()> {
+    let operation = admitted.operation_id();
+    let retained = writer.load_legacy_named_admission(operation).await?;
+    let request = verification_arm_request(&retained)?;
+    let owned = retained
+        .import_verification_created()
+        .context("verification Created snapshot missing")?
+        .clone();
+    let scope = writer.scope();
+    let target = ProspectiveRegistrationV1::new(
+        hex::encode(Sha256::digest(scope.gateway_origin().as_bytes())),
+        scope.tenant_id().to_owned(),
+        request.arm.clone(),
+        binding.clone(),
+        owned,
+    )?;
+    let LegacyNamedImportVerificationArmWrite::Recorded(recorded) = writer
+        .record_legacy_named_import_verification_arm(
+            admitted,
+            request,
+            binding,
+            generation,
+            expected_generation,
+        )
+        .await
+        .map_err(|failure| anyhow::anyhow!("verification Arm retention: {failure:?}"))?
+    else {
+        anyhow::bail!("guardian Check requires the first confirmed verification Arm")
+    };
+    let arm_head = recorded.job().head().clone();
+    let calls = (!after_stop)
+        .then(|| fs::read(root.join("calls")))
+        .transpose()?;
+    let head = if after_stop {
+        let command = Uuid::new_v4();
+        let stop = writer
+            .stops()
+            .append_cancel(CancelInputV1::new(operation, command)?)
+            .await
+            .map_err(|failure| failure.error())?;
+        assert_eq!(stop.receipt().command_id(), command);
+        assert_eq!(stop.receipt().head().revision(), arm_head.revision() + 1);
+        client
+            .deliver_named_import_stop(&stop)
+            .await
+            .context("durable named STOP did not receive its latch acknowledgement")?;
+        // StopsOnly delivery is independent of the client arbiter. Keep its
+        // original generation to observe the guardian's refusal.
+        assert_eq!(generation.current(), expected_generation);
+        stop.receipt().head().clone()
+    } else {
+        arm_head
+    };
+    client
+        .check_recorded_named_verification_for_fixture(
+            guardian,
+            import_arm_id,
+            recorded,
+            target,
+            after_stop,
+        )
+        .await
+        .context("verification guardian Check")?;
+    assert_eq!(
+        writer
+            .load(operation)
+            .await?
+            .context("named job missing after guardian Check")?
+            .head(),
+        &head,
+    );
+    if let Some(calls) = calls {
+        assert_eq!(fs::read(root.join("calls"))?, calls);
+    }
     Ok(())
 }
 

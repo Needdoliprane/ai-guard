@@ -1,4 +1,5 @@
 //! Legacy prospective process custody. No Full3 ledger or retirement authority.
+use super::super::legacy_named_stop::NamedImportVerificationArmBirthV2;
 use super::*;
 use crate::{
     broker::{
@@ -314,6 +315,93 @@ impl EnforcerClient {
                 custody_nonce,
             })
             .map_err(LegacyNamedProspectiveFailure::StaleAcknowledged)
+    }
+
+    /// Check one verified pending against the original named Import custody.
+    /// The response carries no reservation or permission.
+    #[allow(
+        dead_code,
+        reason = "the named verification service caller is composed separately"
+    )]
+    pub(in crate::broker) async fn legacy_check_named_verification_prospective(
+        &self,
+        birth: NamedImportVerificationArmBirthV2,
+    ) -> Result<(), LegacyNamedProspectiveFailure> {
+        use LegacyNamedProspectiveFailure::{
+            BeforeSend, OutcomeUnknown, Refused, StaleAcknowledged,
+        };
+
+        self.legacy_require_new_prearm_identity()
+            .map_err(BeforeSend)?;
+        let (facts, prospective, (cancel, generation)) =
+            birth.into_prospective_facts().map_err(BeforeSend)?;
+        let (_, import_arm) = facts.import_predecessor().map_err(BeforeSend)?;
+        let (retained, import_custody_nonce) = {
+            let entries = self
+                .legacy_transport()
+                .map_err(BeforeSend)?
+                .prospective
+                .lock()
+                .map_err(|_| BeforeSend(EnforcerError::Unhealthy))?;
+            let entry = entries
+                .get(&import_arm.arm_id)
+                .ok_or(BeforeSend(EnforcerError::NotReady))?;
+            let custody_nonce = entry
+                .custody_nonce
+                .ok_or(BeforeSend(EnforcerError::Conflict))?;
+            if !Arc::ptr_eq(&entry.retained.generation.0, &cancel.0)
+                || entry
+                    .named_bind_ack
+                    .as_ref()
+                    .is_none_or(|ack| ack.generation != generation)
+            {
+                return Err(BeforeSend(EnforcerError::NotReady));
+            }
+            (Arc::clone(&entry.retained), custody_nonce)
+        };
+        import_arm
+            .validate_for_arm(retained.target.arm())
+            .map_err(|_| BeforeSend(EnforcerError::Conflict))?;
+        let import_reservation = retained
+            .reservation
+            .lock()
+            .map_err(|_| BeforeSend(EnforcerError::Unhealthy))?
+            .clone()
+            .ok_or(BeforeSend(EnforcerError::NotReady))?;
+        let epoch = self.0.endpoint.epoch();
+        import_reservation
+            .validate_for(&retained.target, epoch, generation)
+            .map_err(BeforeSend)?;
+
+        let reply = self
+            .0
+            .request_in_generation(
+                Request::CheckNamedVerificationProspective {
+                    request: Box::new(NamedVerificationProspectiveCheckV2 {
+                        import_reservation,
+                        import_custody_nonce,
+                        generation,
+                        facts,
+                        prospective,
+                    }),
+                },
+                IO_TIMEOUT,
+                Some((&cancel, generation)),
+            )
+            .await?;
+        match reply {
+            Response::NamedVerificationProspectiveChecked {
+                epoch: checked_epoch,
+                generation: checked_generation,
+            } if checked_epoch == epoch && checked_generation == generation => cancel
+                .with_current_generation(generation, || ())
+                .map_err(StaleAcknowledged),
+            Response::NamedVerificationProspectiveChecked { .. } => {
+                Err(OutcomeUnknown(EnforcerError::Conflict))
+            }
+            Response::Error { code } => Err(Refused(code.into())),
+            _ => Err(OutcomeUnknown(EnforcerError::Unavailable)),
+        }
     }
 
     async fn reserve_legacy_prospective(
@@ -1123,6 +1211,153 @@ pub(in crate::broker) async fn connect_named_legacy_fixture(
         ConnectFailure::Absent => EnforcerError::Unavailable,
         ConnectFailure::Other(error) => error,
     })
+}
+
+#[cfg(test)]
+impl LegacyNamedProspectiveBindAck {
+    /// Send the fixture's retained control claim through the real Legacy
+    /// Prepare transport. The fixture receipt is not a Service start permit.
+    pub(in crate::broker) async fn prepare_named_import_for_fixture(
+        self: Box<Self>,
+        claim: LegacyNamedImportClaimRequestV1,
+        receipt: MutationReceiptV1,
+    ) -> anyhow::Result<()> {
+        self.require_live_custody()?;
+        let (generation, expected) = self.generation();
+        let reservation = self
+            .owner
+            .retained
+            .reservation
+            .lock()
+            .map_err(|_| EnforcerError::Unhealthy)?
+            .clone()
+            .ok_or(EnforcerError::NotReady)?;
+        let clock = NativeHostClock::new()?;
+        let before_ns = clock.sample()?.continuous_ns()?;
+        let reply = self
+            .owner
+            .client
+            .0
+            .request_in_generation(
+                Request::PrepareNamedImport {
+                    request: Box::new(NamedImportPrepareV1 {
+                        reservation,
+                        registration_hash: self.status.registration_hash.clone(),
+                        generation: expected,
+                        custody_nonce: self.owner.custody_nonce,
+                        original_exchange_nonce: self.original_exchange_nonce,
+                        claim,
+                        receipt,
+                    }),
+                },
+                IO_TIMEOUT,
+                Some((generation, expected)),
+            )
+            .await
+            .map_err(LegacyNamedProspectiveFailure::code)?;
+        let Response::Prepared { value } = reply else {
+            return Err(response_error(reply).into());
+        };
+        require_named_prepare_ack(
+            &self.status,
+            self.registration.arm(),
+            &value,
+            before_ns,
+            &clock.sample()?,
+        )
+        .map_err(LegacyNamedProspectiveFailure::code)?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+impl EnforcerClient {
+    pub(in crate::broker) async fn check_recorded_named_verification_for_fixture(
+        &self,
+        fixture: &super::super::server::test_support::LegacyIpcFixture,
+        import_arm_id: &str,
+        recorded: Box<crate::broker::writer::RecordedLegacyNamedImportVerificationArm>,
+        target: ProspectiveRegistrationV1,
+        after_stop: bool,
+    ) -> anyhow::Result<()> {
+        let verification_arm_id = target.arm_id().to_owned();
+        let original = fixture
+            .pending_reservation(import_arm_id)
+            .ok_or(EnforcerError::NotReady)?;
+        let before = self.legacy_capabilities().await?;
+        assert_eq!(fixture.reserve_requests(), 1);
+        assert_eq!(before.known_stop_slots, 1);
+        assert_eq!(before.owned_active, Some(1));
+        assert!(!before.recovery_incomplete);
+
+        let arm = if after_stop {
+            let response = self
+                .0
+                .request(
+                    Request::Slots {
+                        arm_ids: vec![import_arm_id.to_owned()],
+                    },
+                    IO_TIMEOUT,
+                )
+                .await?;
+            let Response::Slots { values } = response else {
+                return Err(response_error(response).into());
+            };
+            assert!(matches!(
+                values.as_slice(),
+                [value] if value.arm_id == import_arm_id
+                    && value.generation == recorded.generation().1
+                    && value.phase == SlotPhaseV1::Stopping && value.prepared_once
+            ));
+            Some(target.arm().clone())
+        } else {
+            None
+        };
+        let birth = NamedImportVerificationArmBirthV2::from_recorded(recorded, target)?;
+        let checked = self
+            .legacy_check_named_verification_prospective(birth)
+            .await;
+        if let Some(arm) = arm {
+            assert_eq!(
+                checked,
+                Err(LegacyNamedProspectiveFailure::Refused(
+                    EnforcerError::NotReady.into()
+                ))
+            );
+            arm.validate_clock_check(&NativeHostClock::new()?.sample()?)?;
+        } else {
+            checked.map_err(LegacyNamedProspectiveFailure::code)?;
+        }
+
+        let after = self.legacy_capabilities().await?;
+        assert_eq!(after.epoch, before.epoch);
+        assert_eq!(after.known_stop_slots, before.known_stop_slots);
+        assert_eq!(after.owned_active, before.owned_active);
+        assert!(!after.recovery_incomplete);
+        assert_eq!(fixture.reserve_requests(), 1);
+        let retained = fixture
+            .pending_reservation(import_arm_id)
+            .ok_or(EnforcerError::NotReady)?;
+        assert_eq!(canonical(&retained)?, canonical(&original)?);
+        assert!(fixture.pending_reservation(&verification_arm_id).is_none());
+        assert!(matches!(
+            self.0
+                .request(
+                    Request::Slots {
+                        arm_ids: vec![verification_arm_id],
+                    },
+                    IO_TIMEOUT,
+                )
+                .await?,
+            Response::Error {
+                code: EnforcerError::Conflict
+            }
+        ));
+        let local_slots = self.0.slots.lock().map_err(|_| EnforcerError::Unhealthy)?;
+        assert!(local_slots.is_empty());
+        assert_eq!(self.0.legacy_known_slots(&local_slots)?, 1);
+        Ok(())
+    }
 }
 
 #[cfg(test)]

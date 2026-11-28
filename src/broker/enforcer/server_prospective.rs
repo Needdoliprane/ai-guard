@@ -306,6 +306,153 @@ impl ProspectiveActor {
 }
 
 impl State {
+    /// Check the pending verification without retaining its target or custody.
+    pub(super) fn check_named_verification_prospective(
+        &self,
+        request: &NamedVerificationProspectiveCheckV2,
+    ) -> EnforcerResult<()> {
+        let import = self.pending(
+            &request.import_reservation,
+            LegacyProspectiveRailV1::Named(request.import_custody_nonce),
+        )?;
+        if request.generation != import.reservation.cancel_generation {
+            return Err(EnforcerError::NotReady);
+        }
+        let bound = import
+            .state
+            .lock()
+            .map_err(|_| EnforcerError::Unhealthy)?
+            .bound
+            .clone()
+            .ok_or(EnforcerError::NotReady)?;
+        let anchor = import
+            .named_stop_anchor
+            .as_ref()
+            .ok_or(EnforcerError::Conflict)?;
+        anchor.require_verification_target(
+            &request.facts,
+            &request.prospective,
+            &bound.registration,
+        )?;
+
+        self._lease.revalidate()?;
+        let admission = self
+            .admission
+            .lock()
+            .map_err(|_| EnforcerError::Unhealthy)?;
+        self.check_original(&admission)?;
+        if !admission.entries.contains(bound.registration.arm_id())
+            || admission.entries.contains(request.prospective.arm_id())
+        {
+            return Err(EnforcerError::Conflict);
+        }
+        let pending = import.state.lock().map_err(|_| EnforcerError::Unhealthy)?;
+        if pending
+            .bound
+            .as_ref()
+            .is_none_or(|current| !Arc::ptr_eq(current, &bound))
+        {
+            return Err(EnforcerError::Conflict);
+        }
+        check_runtime_installed(&bound)?;
+        let status = bound.state.lock().map_err(|_| EnforcerError::Unhealthy)?;
+        // The first Import's native cutoff can elapse independently of the
+        // verification Arm. Its journal STOP latch still closes this check.
+        if !bound.original
+            || !status.prepared_once
+            || pending.stop_reserved
+            || request.generation != pending.current_generation
+            || request.generation != status.generation
+        {
+            return Err(EnforcerError::NotReady);
+        }
+        let sample = self.clock.sample().map_err(|_| EnforcerError::Unhealthy)?;
+        request
+            .prospective
+            .arm()
+            .validate_clock_check(&sample)
+            .map_err(|_| EnforcerError::NotReady)?;
+        self.check_original(&admission)
+    }
+
+    /// Arbitrate the original named claim with STOP on the same native owner.
+    /// A lost Prepare ACK leaves this actor consumed and still supervised.
+    pub(super) fn prepare_named_import(
+        &self,
+        request: &NamedImportPrepareV1,
+    ) -> EnforcerResult<Response> {
+        let pending = self.pending(
+            &request.reservation,
+            LegacyProspectiveRailV1::Named(request.custody_nonce),
+        )?;
+        let actor = self.actor(&request.reservation.arm_id, &request.registration_hash)?;
+        let anchor = pending
+            .named_stop_anchor
+            .as_ref()
+            .ok_or(EnforcerError::Conflict)?;
+        anchor.require_claim(request, &actor.registration)?;
+        let claim_ns = request
+            .claim
+            .claim
+            .clock_check
+            .continuous_ns()
+            .map_err(|_| EnforcerError::InvalidInput)?;
+
+        let admission = self
+            .admission
+            .lock()
+            .map_err(|_| EnforcerError::Unhealthy)?;
+        self.check_original(&admission)?;
+        if !admission.entries.contains(actor.registration.arm_id()) {
+            return Err(EnforcerError::Conflict);
+        }
+        let value = pending.state.lock().map_err(|_| EnforcerError::Unhealthy)?;
+        if value
+            .bound
+            .as_ref()
+            .is_none_or(|bound| !Arc::ptr_eq(bound, &actor))
+            || !matches!(value.exchange, ExchangePhase::MayHaveIssued { original_nonce }
+                if original_nonce == request.original_exchange_nonce)
+        {
+            return Err(EnforcerError::Conflict);
+        }
+        let mut status = actor.state.lock().map_err(|_| EnforcerError::Unhealthy)?;
+        check_runtime_installed(&actor)?;
+        if request.generation == u64::MAX
+            || request.generation != request.reservation.cancel_generation
+            || request.generation != value.current_generation
+            || request.generation != status.generation
+            || value.stop_reserved
+            || actor.stop.load(Ordering::SeqCst)
+            || !actor.original
+            || status.phase != SlotPhaseV1::Ready
+            || !actor.usable.load(Ordering::SeqCst)
+        {
+            return Err(EnforcerError::NotReady);
+        }
+        if status.prepared_once {
+            return Err(EnforcerError::AlreadyPrepared);
+        }
+        let current = self.clock.sample().map_err(|_| EnforcerError::Unhealthy)?;
+        actor
+            .registration
+            .arm
+            .validate_clock_check(&current)
+            .map_err(|_| EnforcerError::NotReady)?;
+        if current
+            .continuous_ns()
+            .map_err(|_| EnforcerError::Unhealthy)?
+            < claim_ns
+        {
+            return Err(EnforcerError::NotReady);
+        }
+        status.prepared_once = true;
+        status.clock = Some(current);
+        Ok(Response::Prepared {
+            value: Box::new(status.clone()),
+        })
+    }
+
     /// Latch one verified STOP on the original prospective owner. The
     /// transport must authenticate the broker's verified journal projection.
     pub(super) fn latch_named_import_stop(

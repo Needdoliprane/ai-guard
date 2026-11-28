@@ -11,6 +11,7 @@ mod legacy_named_stop;
 mod legacy_named_stop_auth;
 mod legacy_named_stop_ipc;
 pub(in crate::broker) use legacy_named_stop::NamedImportArmBirthV1;
+use legacy_named_stop::NamedImportVerificationProspectiveFactsV2;
 pub(in crate::broker) use legacy_named_stop_ipc::deliver_named_import_stop_from_legacy_root;
 mod native_stop_failure;
 mod recovery;
@@ -23,7 +24,7 @@ mod auth_bootstrap_tests;
 use crate::{
     control::{
         ArmReceiptV1, ArmSubjectV1, ArmV1, HelperPermissionV1, HelperPurposeV1, HostClockSampleV1,
-        RuntimeKindV1,
+        MutationReceiptV1, RuntimeKindV1, session_control::LegacyNamedImportClaimRequestV1,
     },
     runtime::{ContainerObservation, OwnedContainerSnapshot, RuntimeAuthority, RuntimeKind},
 };
@@ -845,6 +846,29 @@ enum LegacyProspectiveRailV1 {
 }
 
 #[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NamedImportPrepareV1 {
+    reservation: ProspectiveReservationV1,
+    registration_hash: String,
+    generation: u64,
+    custody_nonce: Uuid,
+    original_exchange_nonce: Uuid,
+    claim: LegacyNamedImportClaimRequestV1,
+    receipt: MutationReceiptV1,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NamedVerificationProspectiveCheckV2 {
+    import_reservation: ProspectiveReservationV1,
+    #[serde(deserialize_with = "crate::broker::retirement::strict_uuid")]
+    import_custody_nonce: Uuid,
+    generation: u64,
+    facts: NamedImportVerificationProspectiveFactsV2,
+    prospective: ProspectiveRegistrationV1,
+}
+
+#[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum Request {
     ProspectiveCapabilities {},
@@ -862,6 +886,9 @@ enum Request {
         generation: u64,
         custody_nonce: Uuid,
         birth: Box<NamedImportArmBirthV1>,
+    },
+    CheckNamedVerificationProspective {
+        request: Box<NamedVerificationProspectiveCheckV2>,
     },
     BeginProspectiveArmExchange {
         reservation: ProspectiveReservationV1,
@@ -886,6 +913,9 @@ enum Request {
         generation: u64,
         original_exchange_nonce: Uuid,
         custody_nonce: Uuid,
+    },
+    PrepareNamedImport {
+        request: Box<NamedImportPrepareV1>,
     },
     CancelProspective {
         reservation: ProspectiveReservationV1,
@@ -927,6 +957,11 @@ enum Response {
     },
     ProspectiveReserved {
         reservation: ProspectiveReservationV1,
+    },
+    NamedVerificationProspectiveChecked {
+        #[serde(deserialize_with = "crate::broker::retirement::strict_uuid")]
+        epoch: Uuid,
+        generation: u64,
     },
     /// Refusal of the reservation written on this same negotiated connection.
     /// Unnegotiated historical queries keep receiving `Error { code }` exactly.

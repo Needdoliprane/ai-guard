@@ -1448,10 +1448,12 @@ impl Client {
             | Request::NegotiateReservationMotif {}
             | Request::ReserveProspective { .. }
             | Request::ReserveNamedProspective { .. }
+            | Request::CheckNamedVerificationProspective { .. }
             | Request::BeginProspectiveArmExchange { .. }
             | Request::BeginNamedProspectiveArmExchange { .. }
             | Request::BindProspective { .. }
             | Request::BindNamedProspective { .. }
+            | Request::PrepareNamedImport { .. }
             | Request::CancelProspective { .. }
             | Request::BeginRecovery {} => return Err(EnforcerError::Unauthorized),
             Request::Status {} => FullCommand::Status {},

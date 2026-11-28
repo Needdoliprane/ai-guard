@@ -516,6 +516,13 @@ async fn dispatch(
                 Err(refusal) => Ok(refusal.into_response(motif_negotiated)),
             }
         }
+        Request::CheckNamedVerificationProspective { request } => {
+            state.check_named_verification_prospective(&request)?;
+            Ok(Response::NamedVerificationProspectiveChecked {
+                epoch: state.epoch,
+                generation: request.generation,
+            })
+        }
         Request::BeginProspectiveArmExchange {
             reservation,
             generation,
@@ -573,6 +580,7 @@ async fn dispatch(
                 )
                 .await
         }
+        Request::PrepareNamedImport { request } => state.prepare_named_import(&request),
         Request::CancelProspective {
             reservation,
             generation,

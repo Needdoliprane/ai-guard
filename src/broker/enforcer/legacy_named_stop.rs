@@ -1,6 +1,7 @@
 //! Compare verified journal STOP facts with one live named Import target.
 use super::{
-    CancelGeneration, EnforcerError, EnforcerResult, ProspectiveRegistrationV1, hex_hash,
+    CancelGeneration, EnforcerError, EnforcerResult, NamedImportPrepareV1,
+    ProspectiveRegistrationV1, RegistrationV1, hex_hash,
 };
 use crate::{
     broker::{
@@ -12,7 +13,7 @@ use crate::{
         writer::RecordedLegacyNamedImportVerificationArm,
     },
     control::{
-        ArmSubjectV1, HelperPermissionV1, HelperPurposeV1, content_hash,
+        ArmReceiptV1, ArmSubjectV1, HelperPermissionV1, HelperPurposeV1, content_hash,
         session_control::{
             LegacyConfirmedPlanV1, LegacyNamedImportArmRequestV1,
             LegacyNamedImportVerificationArmRequestV2, canonical_uuid,
@@ -198,10 +199,6 @@ impl NamedImportVerificationArmBirthV2 {
 /// and of the Create facts digest.
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-#[allow(
-    dead_code,
-    reason = "the verification prospective transport is composed separately"
-)]
 pub(super) struct NamedImportVerificationProspectiveFactsV2 {
     version: u32,
     scope: JournalScopeV1,
@@ -220,6 +217,26 @@ pub(super) struct NamedImportVerificationProspectiveFactsV2 {
 }
 
 impl NamedImportVerificationProspectiveFactsV2 {
+    pub(super) fn import_predecessor(&self) -> EnforcerResult<(&str, &ArmReceiptV1)> {
+        let ArmSubjectV1::Helper {
+            purpose: HelperPurposeV1::ImportVerification,
+            permission,
+            ..
+        } = &self.request.arm.subject
+        else {
+            return Err(EnforcerError::InvalidInput);
+        };
+        let HelperPermissionV1::ImportVerification {
+            import_helper_id,
+            import_arm,
+            ..
+        } = permission.as_ref()
+        else {
+            return Err(EnforcerError::InvalidInput);
+        };
+        Ok((import_helper_id, import_arm))
+    }
+
     /// Compare the decoded data with the exact target. The caller supplies
     /// the expected scope from authenticated or locally retained context.
     pub(super) fn validate_target(
@@ -386,6 +403,52 @@ impl NamedImportStopAnchorV1 {
 
     pub(super) fn prospective_hash(&self) -> &str {
         &self.prospective_hash
+    }
+
+    pub(super) fn require_claim(
+        &self,
+        request: &NamedImportPrepareV1,
+        registration: &RegistrationV1,
+    ) -> EnforcerResult<()> {
+        request
+            .claim
+            .validate_for_arm(
+                self.birth.binding_ref,
+                &self.birth.scope.control_namespace_uuid().to_string(),
+                &registration.arm,
+                &registration.receipt,
+            )
+            .and_then(|()| request.claim.validate_receipt(&request.receipt))
+            .map_err(|_| EnforcerError::Conflict)
+    }
+
+    /// Check the verification target against the retained original Import.
+    /// Its new journal head and Create/Terminal facts come from the Writer.
+    pub(super) fn require_verification_target(
+        &self,
+        facts: &NamedImportVerificationProspectiveFactsV2,
+        target: &ProspectiveRegistrationV1,
+        import: &RegistrationV1,
+    ) -> EnforcerResult<()> {
+        facts.validate_target(&self.birth.scope, target)?;
+        let (import_helper_id, import_arm) = facts.import_predecessor()?;
+        let invalid = |_| EnforcerError::InvalidInput;
+        if facts.operation_id != self.birth.operation_id
+            || facts.request.binding_ref != self.birth.binding_ref
+            || facts.session_id != self.birth.session_id
+            || facts.arm_pending_head.revision() <= self.birth.arm_pending_head.revision()
+            || facts.arm_pending_head.hash() == self.birth.arm_pending_head.hash()
+            || import.arm().input_hash().map_err(invalid)? != self.arm_input_hash
+            || canonical(import_arm).map_err(|_| EnforcerError::InvalidInput)?
+                != canonical(import.receipt()).map_err(|_| EnforcerError::InvalidInput)?
+            || import_helper_id != import.owned.handle.operation_id().to_string()
+            || target.arm().intent_hash != import.arm().intent_hash
+            || target.owned().handle.id() == import.owned.handle.id()
+            || facts.runtime_binding_hash != self.runtime_binding_hash
+        {
+            return Err(EnforcerError::Conflict);
+        }
+        Ok(())
     }
 
     pub(super) fn require_facts(
