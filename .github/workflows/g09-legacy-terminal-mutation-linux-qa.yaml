@@ -1,0 +1,148 @@
+name: G09 Legacy terminal mutation projection Linux QA
+
+on:
+  push:
+    branches: [codex/g09-legacy-terminal-mutation-linux-qa-20261128]
+    paths: [.github/workflows/g09-legacy-terminal-mutation-linux-qa.yaml]
+
+permissions:
+  contents: read
+
+jobs:
+  legacy-terminal-mutation:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      SOURCE_SHA: 2ecf8aa17e634adef086d142aff4f9a9f1f91bbd
+      SOURCE_TREE: aefd52ce42f0d85c4987963a13a16a5f73684ad6
+      SERVICE_BLOB: 3bc13d4c64ea60f41d5c43abec18ef47918e69dd
+      ORACLE_BLOB: 844a7dfb9346a2e2cf98196a4dadd9d413572e04
+      RUNNER_BLOB: 4908ff8d0129e17e0b27656569279cdaf7fe3aa2
+      WRITER_BLOB: 99035811120eec8c38847a95e9994b1fd9cf913a
+      PROJECTION_BLOB: 16c4640268cf7a09ea0394accd1c6afd8a446bd0
+      STOP_LATCH_BLOB: 82c4b18135da7dbe0d9be9bcbe9c4ad70ece852b
+      RUNNING_FIXTURE_BLOB: d92a48f9cae66f8c69aa648dab20d268509f23b3
+      GUARDIAN_FIXTURE_BLOB: 362759ac83c545dbd33b8b3567969d353172cd3e
+      MANAGED_RUNTIME_BLOB: dcd71a55c727e4897509e4087553f3f8831050e3
+      CARGO_BUILD_JOBS: '1'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      CARGO_TERM_COLOR: never
+      RUST_MIN_STACK: '8388608'
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          persist-credentials: false
+
+      - name: Build one libtest and verify the exact cold Legacy terminal projection
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          selector='broker::service::server::legacy_worker_terminal::tests::cold_legacy_terminal_read_requires_the_exact_latch_and_preserves_state'
+
+          report_not_run() {
+            printf 'test=%s status=NOT_RUN\n' "$selector"
+          }
+
+          if [[ "${GITHUB_REF:-}" != refs/heads/codex/g09-legacy-terminal-mutation-linux-qa-20261128 ||
+                "$(git rev-parse HEAD)" != "$SOURCE_SHA" ||
+                "$(git rev-parse 'HEAD^{tree}')" != "$SOURCE_TREE" ||
+                "$(git rev-parse HEAD:src/broker/service/legacy_worker_terminal.rs)" != "$SERVICE_BLOB" ||
+                "$(git rev-parse HEAD:src/broker/service/legacy_worker_terminal_tests.rs)" != "$ORACLE_BLOB" ||
+                "$(git rev-parse HEAD:src/runner.rs)" != "$RUNNER_BLOB" ||
+                "$(git rev-parse HEAD:src/broker/writer.rs)" != "$WRITER_BLOB" ||
+                "$(git rev-parse HEAD:src/broker/journal/recovery/legacy_worker_terminal.rs)" != "$PROJECTION_BLOB" ||
+                "$(git rev-parse HEAD:src/broker/enforcer/recovery_legacy_terminal.rs)" != "$STOP_LATCH_BLOB" ||
+                "$(git rev-parse HEAD:src/runner/broker/executor/cancelled_recovery_fixture.rs)" != "$RUNNING_FIXTURE_BLOB" ||
+                "$(git rev-parse HEAD:src/broker/service/cancel_retry_tests.rs)" != "$GUARDIAN_FIXTURE_BLOB" ||
+                "$(git rev-parse HEAD:src/runtime/managed.rs)" != "$MANAGED_RUNTIME_BLOB" ]]; then
+            printf 'source=FAIL\n'
+            report_not_run
+            exit 1
+          fi
+          printf 'source=PASS\nsource_sha=%s\nsource_tree=%s\n' "$SOURCE_SHA" "$SOURCE_TREE"
+          printf 'service_blob=%s\noracle_blob=%s\nrunner_blob=%s\nwriter_blob=%s\nprojection_blob=%s\nstop_latch_blob=%s\nrunning_fixture_blob=%s\nguardian_fixture_blob=%s\nmanaged_runtime_blob=%s\n' \
+            "$SERVICE_BLOB" "$ORACLE_BLOB" "$RUNNER_BLOB" "$WRITER_BLOB" "$PROJECTION_BLOB" "$STOP_LATCH_BLOB" \
+            "$RUNNING_FIXTURE_BLOB" "$GUARDIAN_FIXTURE_BLOB" "$MANAGED_RUNTIME_BLOB"
+          export AI_GUARD_BUILD_REVISION="$SOURCE_SHA"
+
+          emit_cargo_errors() {
+            local report
+            report=$(jq -cs '
+              [.[] | select(.reason == "compiler-message" and .message.level == "error") | .message |
+                {code: ((.code.code // "uncoded") | if test("^E[0-9]{4}$") then . else "uncoded" end),
+                 site: ([.spans[]? | select(.is_primary == true
+                     and (.file_name | test("^(src|tests)/([A-Za-z0-9_-]+/)*[A-Za-z0-9_-]+[.]rs$"))
+                     and (.file_name | length) <= 240
+                     and (.line_start | type) == "number"
+                     and (.column_start | type) == "number")
+                   | {file: .file_name, line: .line_start, column: .column_start}] | .[0])}]
+              | .[0:16]' "$1" 2>/dev/null) || return 1
+            printf 'rust_diagnostics=%s\n' "$report"
+          }
+
+          # The synthetic Stops2 guardian binds a Unix socket below TMPDIR.
+          scratch=$(mktemp -d /tmp/aig-g09.XXXXXX)
+          trap 'rm -rf -- "$scratch"' EXIT
+          export TMPDIR="$scratch"
+          export CARGO_TARGET_DIR="$scratch/target"
+          build_json="$scratch/build.jsonl"
+
+          if ! cargo fetch --locked >"$scratch/fetch.log" 2>&1; then
+            printf 'fetch=FAIL\nbuild=NOT_RUN\n'
+            report_not_run
+            exit 1
+          fi
+          printf 'fetch=PASS\n'
+
+          if cargo test --locked --offline -j1 --no-default-features --lib --no-run \
+              --message-format=json >"$build_json" 2>"$scratch/build.stderr"; then
+            printf 'build=PASS\n'
+          else
+            rc=$?
+            printf 'build=FAIL\nbuild_exit=%s\n' "$rc"
+            emit_cargo_errors "$build_json" || printf 'rust_diagnostics=unavailable\n'
+            report_not_run
+            exit 1
+          fi
+
+          if ! libtest=$(jq -ers '[.[] | select(.reason == "compiler-artifact"
+              and .target.name == "agentsandbox" and .target.kind == ["lib"]
+              and .profile.test == true and (.executable | type) == "string") | .executable]
+              | unique | select(length == 1) | .[0]' "$build_json" 2>/dev/null) ||
+              [[ "$libtest" != "$CARGO_TARGET_DIR"/debug/deps/agentsandbox-* ||
+                 ! -f "$libtest" || ! -x "$libtest" || -L "$libtest" ]]; then
+            printf 'libtest=FAIL\n'
+            report_not_run
+            exit 1
+          fi
+          checksum=$(sha256sum -- "$libtest")
+          libtest_sha=${checksum%% *}
+          if [[ ! "$libtest_sha" =~ ^[0-9a-f]{64}$ ]]; then
+            printf 'libtest=FAIL\n'
+            report_not_run
+            exit 1
+          fi
+          printf 'libtest=PASS\nlibtest_sha256=%s\n' "$libtest_sha"
+
+          log="$scratch/test.log"
+          test_exit=0
+          timeout --kill-after=10s 180s "$libtest" --exact "$selector" --test-threads=1 \
+            --color never >"$log" 2>&1 || test_exit=$?
+          if [[ "$test_exit" == 0 ]] &&
+              [[ "$(grep -Fxc 'running 1 test' "$log" || true)" == 1 ]] &&
+              [[ "$(grep -Fxc "test $selector ... ok" "$log" || true)" == 1 ]] &&
+              [[ "$(grep -Ec '^test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; [0-9]+ filtered out; finished in [0-9]+([.][0-9]+)?s$' "$log" || true)" == 1 ]]; then
+            printf 'test=%s status=PASS\ntest_exit=0\ntest_pass_count=1\ntest_fail_count=0\n' "$selector"
+          else
+            printf 'test=%s status=FAIL\ntest_exit=%s\n' "$selector" "$test_exit"
+            grep -m 1 -Eo 'panicked at src/[A-Za-z0-9_./-]+[.]rs:[0-9]+:[0-9]+' "$log" || true
+            if grep -q '^Error: ' "$log"; then
+              printf 'libtest_result_error=true\n'
+            fi
+            exit 1
+          fi
