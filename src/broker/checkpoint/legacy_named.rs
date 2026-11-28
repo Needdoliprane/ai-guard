@@ -2961,6 +2961,7 @@ mod tests {
             verification_writer.load(operation).await?.unwrap().head(),
             &planned_head
         );
+        eprintln!("g04_create_stage=load_existing_plan");
         let create_base = verification_writer
             .load(operation)
             .await?
@@ -2981,6 +2982,7 @@ mod tests {
                 .await,
             Err(JournalError::Conflict)
         ));
+        eprintln!("g04_create_stage=reject_wrong_invocation");
         let mut changed_invocation = serde_json::to_value(&authority)?;
         changed_invocation["invocation"]["cwd"] = json!(root.join("different-cwd"));
         let changed_invocation: RuntimeAuthority = serde_json::from_value(changed_invocation)?;
@@ -3006,6 +3008,7 @@ mod tests {
                 .and_then(|named| named.import_verification_create())
                 .is_none()
         );
+        eprintln!("g04_create_stage=build_exact_candidate");
         let named_create = create_base
             .broker_checkpoint_v2()
             .and_then(|checkpoint| checkpoint.supervision().legacy_named_admission())
@@ -3023,6 +3026,7 @@ mod tests {
         )?;
         let exact_pending_create =
             BrokerCheckpointV3::new(create_broker, create_base_lifecycle.commands().to_vec())?;
+        eprintln!("g04_create_stage=publish_concurrent_create");
         let (create_one, create_two) = tokio::join!(
             verification_writer.record_legacy_named_import_verification_create(
                 &plan,
@@ -3035,10 +3039,12 @@ mod tests {
                 &authority,
             ),
         );
+        eprintln!("g04_create_stage=read_create_outcomes");
         let create_one = create_one?;
         let create_two = create_two?;
         assert_ne!(create_one.is_some(), create_two.is_some());
         let create_token = create_one.or(create_two).ok_or(JournalError::Conflict)?;
+        eprintln!("g04_create_stage=match_confirmed_head");
         let committed_create = verification_writer
             .load(operation)
             .await?
@@ -3069,6 +3075,7 @@ mod tests {
             verification_writer.load(operation).await?.unwrap().head(),
             &create_head
         );
+        eprintln!("g04_create_stage=append_stop");
         let verification_stops = verification_writer.stops();
         verification_stops
             .append_cancel(CancelInputV1::new(operation, Uuid::new_v4())?)
@@ -3080,6 +3087,7 @@ mod tests {
                 .await,
             Err(JournalError::Conflict)
         ));
+        eprintln!("g04_create_stage=replay_after_stop");
         let stopped_plan = verification_writer
             .load_legacy_named_import_verification_plan(operation)
             .await?
@@ -3147,6 +3155,7 @@ mod tests {
             }
         })
         .await??;
+        eprintln!("g04_create_stage=replay_after_reopen");
         let cold_verification_writer = WriterClient::start(journal, 8, Duration::from_secs(5))?;
         let cold_plan = cold_verification_writer
             .load_legacy_named_import_verification_plan(operation)
@@ -3183,6 +3192,7 @@ mod tests {
         // The lifecycle validator must independently fence adding this new
         // stage after a durable STOP, even if a caller bypasses WriterClient's
         // open-lifecycle check and supplies an otherwise valid named plan.
+        eprintln!("g04_create_stage=seed_stopped_plan");
         let stopped_plan_writer = start_admitted_writer("verification-stop-transition").await?;
         seed_named_import_writer_through_claim(
             &stopped_plan_writer,
@@ -3240,6 +3250,7 @@ mod tests {
         let after_stop_lifecycle = after_stop
             .broker_checkpoint_v3()
             .ok_or(JournalError::Conflict)?;
+        eprintln!("g04_create_stage=forge_post_stop_candidate");
         let stopped_named = after_stop
             .broker_checkpoint_v2()
             .and_then(|checkpoint| checkpoint.supervision().legacy_named_admission())
@@ -3258,6 +3269,7 @@ mod tests {
             after_stop_lifecycle.broker().runner().clone(),
             forged_supervision,
         )?;
+        eprintln!("g04_create_stage=reject_post_stop_candidate");
         let forged_after_stop =
             BrokerCheckpointV3::new(forged_broker, after_stop_lifecycle.commands().to_vec())?;
         assert!(
@@ -3281,6 +3293,7 @@ mod tests {
             stopped_plan_writer.load(operation).await?.unwrap().head(),
             &stopped_head
         );
+        eprintln!("g04_create_stage=verification_create_checks_complete");
         drop(stopped_plan_writer);
 
         let writer = start_admitted_writer("import-creation").await?;
