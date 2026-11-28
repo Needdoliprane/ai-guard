@@ -15,6 +15,15 @@ pub(super) enum Scenario {
     ArmWriter { lose_reply: bool },
 }
 
+#[derive(Clone, Copy, Debug)]
+struct ArmWriterPhase(&'static str);
+
+impl std::fmt::Display for ArmWriterPhase {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.0)
+    }
+}
+
 #[tokio::test]
 async fn named_verification_created_ack_survives_durable_stop_and_lost_reply() -> anyhow::Result<()>
 {
@@ -28,7 +37,15 @@ async fn named_verification_arm_writer_retains_one_birth_and_only_replays_after_
         Box::pin(named_admission_fixture(Some(Scenario::ArmWriter {
             lose_reply,
         })))
-        .await?;
+        .await
+        .map_err(|failure| {
+            let phase = failure
+                .downcast_ref::<ArmWriterPhase>()
+                .copied()
+                .unwrap_or(ArmWriterPhase("fixture_prefix"));
+            eprintln!("\ng04_oracle_failure_phase={phase}");
+            anyhow::anyhow!("named verification Arm Writer oracle failed")
+        })?;
     }
     Ok(())
 }
@@ -207,10 +224,13 @@ pub(super) async fn exercise(
                     || Ok(()),
                 ),
             )
-            .await??;
+            .await
+            .context(ArmWriterPhase("verification_create"))?
+            .context(ArmWriterPhase("verification_create"))?;
             writer
                 .acknowledge_legacy_named_import_verification_created(&admitted, created)
-                .await?;
+                .await
+                .context(ArmWriterPhase("created_ack"))?;
             Box::pin(exercise_arm_writer(
                 root,
                 writer,
@@ -368,7 +388,7 @@ async fn exercise_arm_writer(
         .legacy_named_admission()
         .context("named Created prefix missing")?;
     assert!(retained.import_verification_arm_request().is_none());
-    let request = verification_arm_request(retained)?;
+    let request = verification_arm_request(retained).context(ArmWriterPhase("arm_request"))?;
     drop(before);
     let calls = fs::read(root.join("calls"))?;
     let retain = || {
@@ -382,12 +402,16 @@ async fn exercise_arm_writer(
     };
 
     let confirmation = if lose_reply {
-        let mut barrier = writer.advance_reply_barrier_for_test(true).await?;
+        let mut barrier = writer
+            .advance_reply_barrier_for_test(true)
+            .await
+            .context(ArmWriterPhase("lost_reply"))?;
         let mut first = retain();
         tokio::select! {
-            _ = &mut first => anyhow::bail!("Arm result arrived before publication barrier"),
+            _ = &mut first => return Err(anyhow::Error::msg(ArmWriterPhase("lost_reply"))),
             entered = timeout(Duration::from_secs(4), barrier.try_entered_for_test()) => {
-                entered?.map_err(anyhow::Error::msg)?;
+                entered.context(ArmWriterPhase("lost_reply"))?
+                    .map_err(anyhow::Error::msg).context(ArmWriterPhase("lost_reply"))?;
             }
         }
         barrier.release_for_test();
@@ -399,7 +423,10 @@ async fn exercise_arm_writer(
         ));
         None
     } else {
-        let pause = writer.pause_for_test().await?;
+        let pause = writer
+            .pause_for_test()
+            .await
+            .context(ArmWriterPhase("concurrent_cas"))?;
         let mut first = retain();
         let mut second = retain();
         // Both Loads reach the FIFO before either future can offer its CAS.
@@ -410,7 +437,7 @@ async fn exercise_arm_writer(
         let (recorded, replayed) = match (first, second) {
             (Ok(Recorded(recorded)), Ok(Replayed(replayed)))
             | (Ok(Replayed(replayed)), Ok(Recorded(recorded))) => (recorded, replayed),
-            _ => anyhow::bail!("concurrent Arm writes must return one birth and one exact replay"),
+            _ => return Err(anyhow::Error::msg(ArmWriterPhase("concurrent_cas"))),
         };
         assert_eq!(canonical(replayed.as_ref())?, canonical(&request)?);
         Some(recorded)
@@ -418,8 +445,9 @@ async fn exercise_arm_writer(
 
     let arm_head = writer
         .load(operation)
-        .await?
-        .context("retained Arm job missing")?
+        .await
+        .context(ArmWriterPhase("born_head"))?
+        .context(ArmWriterPhase("born_head"))?
         .head()
         .clone();
     assert_eq!(arm_head.revision(), before_revision + 1);
@@ -433,7 +461,7 @@ async fn exercise_arm_writer(
         );
         assert_eq!(confirmation.generation().1, expected_generation);
     }
-    assert_replayed(retain().await, &request)?;
+    assert_replayed(retain().await, &request).context(ArmWriterPhase("replay_before_stop"))?;
     assert_eq!(
         writer
             .load(operation)
@@ -452,10 +480,13 @@ async fn exercise_arm_writer(
         .stops()
         .append_cancel(CancelInputV1::new(operation, Uuid::new_v4())?)
         .await
-        .map_err(|failure| failure.error())?;
+        .map_err(|failure| failure.error())
+        .context(ArmWriterPhase("stop_append"))?;
     let stop_head = stop.receipt().head().clone();
     assert_eq!(stop_head.revision(), arm_head.revision() + 1);
-    let reopened = reopen_writer(root, writer).await?;
+    let reopened = reopen_writer(root, writer)
+        .await
+        .context(ArmWriterPhase("cold_reopen"))?;
     assert_replayed(
         reopened
             .record_legacy_named_import_verification_arm(
@@ -467,7 +498,8 @@ async fn exercise_arm_writer(
             )
             .await,
         &request,
-    )?;
+    )
+    .context(ArmWriterPhase("replay_after_stop"))?;
     let saved = reopened
         .load(operation)
         .await?
