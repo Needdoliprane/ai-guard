@@ -344,7 +344,7 @@ async fn cold_legacy_terminal_read_requires_the_exact_latch_and_preserves_state(
     let quota = store.worker_quota(&QuotaPolicyV1::default())?;
     let reads = seed.worker_get_count();
     let posts = seed.post_count();
-    let observed = service
+    let mut observed = service
         .observe_legacy_worker_terminal(&profile_id, operation, command)
         .await?;
     let terminal = observed.observation();
@@ -371,6 +371,13 @@ async fn cold_legacy_terminal_read_requires_the_exact_latch_and_preserves_state(
             .and_then(|value| value.exit_code),
         Some(17)
     );
+    for restart_count in [None, Some(1)] {
+        observed.observation.restart_count = restart_count;
+        assert!(matches!(
+            observed.terminal_mutation(),
+            Err(Code::NeedsReconciliation)
+        ));
+    }
     assert_eq!(seed.worker_get_count(), reads + 2);
     assert_eq!(seed.post_count(), posts);
     assert_eq!(store.head()?, core_head);

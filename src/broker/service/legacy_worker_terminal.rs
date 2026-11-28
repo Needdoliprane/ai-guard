@@ -55,7 +55,11 @@ impl ObservedLegacyWorkerTerminal {
             expected_revision: worker.revision,
             transition: WorkerTransitionV1::Observe { observation },
         };
-        crate::audit::expected_worker_transition(worker, &mutation).map_err(|_| Code::Conflict)?;
+        let projected = crate::audit::expected_worker_transition(worker, &mutation)
+            .map_err(|_| Code::Conflict)?;
+        if projected.state != WorkerStateV1::Terminal || projected.quota_held {
+            return Err(Code::NeedsReconciliation);
+        }
         Ok(mutation)
     }
 }
