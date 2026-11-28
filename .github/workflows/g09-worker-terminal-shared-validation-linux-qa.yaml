@@ -45,7 +45,7 @@ jobs:
             local selector
             for selector in "${selectors[@]}"; do printf 'test=%s status=NOT_RUN\n' "$selector"; done
           }
-          if [[ "${GITHUB_REF:-}" != refs/heads/codex/g09-legacy-recovery-scheduler-linux-qa-20261128 ||
+          if [[ "${GITHUB_REF:-}" != refs/heads/codex/g09-worker-terminal-shared-validation-linux-qa-20261128 ||
                 "$(git rev-parse HEAD)" != "$SOURCE_SHA" ||
                 "$(git rev-parse 'HEAD^{tree}')" != "$SOURCE_TREE" ||
                 "$(git rev-parse HEAD:src/broker/service/legacy_worker_terminal.rs)" != "$LEGACY_TERMINAL_BLOB" ||
