@@ -1186,7 +1186,10 @@ pub(crate) async fn running_seed_for_cold_terminal_test() -> RunningColdRecovery
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn full3_worker_claim_and_stop_survive_journal_reopen() {
-    use crate::broker::journal::canonical;
+    use crate::broker::{
+        journal::canonical, retirement::RetirementDigestV1,
+        retirement_checkpoint::Full3RegistrationBindingV1,
+    };
 
     let driver = tokio::runtime::Handle::current();
     tokio::task::spawn_blocking(move || {
@@ -1222,6 +1225,25 @@ async fn full3_worker_claim_and_stop_survive_journal_reopen() {
         assert_eq!(acknowledged.receipt.operation_id, claim.operation_id);
         assert_eq!(acknowledged.receipt.input_hash, claim.input_hash().unwrap());
         assert!(acknowledged.receipt.audit_seq > claim.arm_receipt.audit_seq);
+        let original_binding = binding.clone();
+        // Use a different typed expected digest without changing the fixture
+        // source or claiming that another guardian supplied a binding.
+        let wrong_binding = Full3RegistrationBindingV1::new(
+            binding.arm_id(),
+            RetirementDigestV1::parse(&claim.arm_receipt.input_hash).unwrap(),
+            binding.ledger().clone(),
+            binding.original_epoch(),
+        )
+        .unwrap();
+        assert!(wrong_binding.registration_hash() != binding.registration_hash());
+        let claim_bytes = canonical(&(claim, &acknowledged.receipt)).unwrap();
+        let stop = fixture
+            .base
+            .journal()
+            .command_receipt(operation, cancel)
+            .unwrap()
+            .expect("the writer confirmed the exact STOP");
+        let stop_bytes = canonical(&stop).unwrap();
         let binding_bytes = canonical(binding).unwrap();
         let arm_receipt_bytes = canonical(&claim.arm_receipt).unwrap();
         let (arm, owned) = operations
@@ -1287,6 +1309,27 @@ async fn full3_worker_claim_and_stop_survive_journal_reopen() {
             target.arm().inspection.container_id
         );
         assert_eq!(target.owned().observation.process.started_at, None);
+        assert!(matches!(
+            report.full3_worker_claim_before_stop_for_test(
+                &scope,
+                operation,
+                &head,
+                cancel,
+                &wrong_binding,
+            ),
+            Err(JournalError::Conflict)
+        ));
+        let (retained_stop, claim, claim_receipt) = report
+            .full3_worker_claim_before_stop_for_test(
+                &scope,
+                operation,
+                &head,
+                cancel,
+                &original_binding,
+            )
+            .expect("cold STOP should retain the exact previously acknowledged claim");
+        assert!(canonical(&retained_stop).unwrap() == stop_bytes);
+        assert!(canonical(&(&claim, &claim_receipt)).unwrap() == claim_bytes);
         assert!(base.store.worker_usage().unwrap().is_empty());
         let current = base.store.worker(&before.worker_id).unwrap().unwrap();
         assert!(canonical(&current).unwrap() == canonical(&before).unwrap());

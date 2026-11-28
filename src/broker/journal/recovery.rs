@@ -15,6 +15,11 @@ use crate::{
     },
     runtime::{OwnedContainerSnapshot, RuntimeAuthority},
 };
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+use crate::{
+    broker::retirement_checkpoint::Full3RegistrationBindingV1,
+    control::{ArmedStartClaimV1, MutationReceiptV1},
+};
 use std::sync::{
     OnceLock,
     atomic::{AtomicBool, Ordering},
@@ -1482,6 +1487,155 @@ impl StopRecoveryReportV1 {
         }
         projection.revalidate()?;
         Ok(projection.named_import().is_some().then_some(projection))
+    }
+
+    /// The cold fixture reuses the report's lease to relate the post-STOP
+    /// read to the exact V5 claim acknowledgement already durable before STOP.
+    #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+    pub(crate) fn full3_worker_claim_before_stop_for_test(
+        &self,
+        scope: &JournalScopeV1,
+        operation: Uuid,
+        head: &RevisionRefV1,
+        stop_command: Uuid,
+        expected_binding: &Full3RegistrationBindingV1,
+    ) -> JournalResult<(LocalCommandReceiptV1, ArmedStartClaimV1, MutationReceiptV1)> {
+        if self.incomplete || self.retained_core.get().is_some() {
+            return Err(JournalError::Interrupted);
+        }
+        if canonical(self.scope())? != canonical(scope)?
+            || !self
+                .jobs()
+                .iter()
+                .any(|job| job.operation_id() == operation && job.head() == head)
+        {
+            return Err(JournalError::Conflict);
+        }
+        let (Some(job), None, false) = self.reader.read_job(
+            operation,
+            &mut Usage::default(),
+            &mut RecoveryBlobBytes::default(),
+        )?
+        else {
+            return Err(JournalError::Interrupted);
+        };
+        if job.head() != head {
+            return Err(JournalError::Conflict);
+        }
+
+        let mut targets = job
+            .stops()
+            .iter()
+            .filter(|target| matches!(&target.arm().subject, ArmSubjectV1::Worker));
+        let target = targets.next().ok_or(JournalError::Interrupted)?;
+        let binding = target
+            .full3_registration_binding()
+            .ok_or(JournalError::Interrupted)?;
+        if targets.next().is_some()
+            || target.retirement().is_some()
+            || target.cancel_after_arm() != Some(stop_command)
+            || target.owned().handle.operation_id() != operation
+            || target.owned().handle.id() != target.arm().inspection.container_id
+            || binding.arm_id().to_string() != target.arm().operation_id
+            || binding.ledger().installation_id() != &scope.installation_id()
+            || canonical(binding)? != canonical(expected_binding)?
+        {
+            return Err(JournalError::Conflict);
+        }
+        let stop_prefix = job.cancel_prefix(target)?;
+        let stop = stop_prefix
+            .receipts()
+            .iter()
+            .find(|receipt| receipt.command_id() == stop_command)
+            .ok_or(JournalError::Conflict)?;
+        let metadata = job.metadata.as_ref().ok_or(JournalError::Corrupt)?;
+        let v5 = metadata
+            .checkpoint
+            .retirement()
+            .ok_or(JournalError::UnsupportedVersion)?;
+        let operations = v5.outbox().lifecycle().broker().supervision().operations();
+        let mut claims = operations
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| matches!(entry, SupervisionOperationV1::WorkerClaim { .. }));
+        let (claim_index, claim) = claims.next().ok_or(JournalError::Interrupted)?;
+        let SupervisionOperationV1::WorkerClaim {
+            request,
+            response: Some(response),
+        } = claim
+        else {
+            return Err(JournalError::Interrupted);
+        };
+        if claims.next().is_some()
+            || target.birth_index() >= claim_index
+            || canonical(&request.arm_receipt)? != canonical(target.receipt())?
+            || response.receipt.audit_seq <= target.receipt().audit_seq
+            || response.worker.attempt.container_id.as_deref() != Some(target.owned().handle.id())
+        {
+            return Err(JournalError::Conflict);
+        }
+
+        // A claim can enter the chain pending before STOP and receive its ACK
+        // later. Check the exact revision preceding STOP rather than the
+        // operation count at the cancellation boundary.
+        let stop_revision =
+            usize::try_from(stop.head().revision()).map_err(|_| JournalError::Corrupt)?;
+        let prefix = job
+            .chain
+            .get(..stop_revision)
+            .ok_or(JournalError::Corrupt)?;
+        let initial = prefix.first().ok_or(JournalError::Corrupt)?;
+        let before_stop = prefix.last().ok_or(JournalError::Corrupt)?;
+        let directory = fscheck(
+            self.reader
+                .jobs
+                .persistent_child(&operation.to_string(), false),
+        )?
+        .ok_or(JournalError::Interrupted)?;
+        let mut verifier = confirmed::ChainVerifierV1::new_with_launch_profile(
+            self.scope(),
+            &self.reader.control,
+            &metadata.intent,
+            &metadata.binding,
+            initial,
+            metadata.launch_binding.as_ref(),
+        )?;
+        for reference in prefix {
+            let revision = reference.revision();
+            let file = self
+                .reader
+                .read_file(&directory, &revision_name(revision), CHECKPOINT)?
+                .ok_or(JournalError::Interrupted)?;
+            verifier.push(revision, file.bytes())?;
+        }
+        let prefix = verifier.finish(before_stop)?;
+        let prior = prefix
+            .payload
+            .retirement()
+            .ok_or(JournalError::UnsupportedVersion)?;
+        let prior_binding = prior
+            .bindings()
+            .iter()
+            .find(|entry| entry.arm_id() == binding.arm_id())
+            .ok_or(JournalError::Interrupted)?;
+        let prior_operations = prior
+            .outbox()
+            .lifecycle()
+            .broker()
+            .supervision()
+            .operations();
+        let prior_claim = prior_operations
+            .get(claim_index)
+            .ok_or(JournalError::Interrupted)?;
+        if canonical(prior_binding)? != canonical(binding)?
+            || canonical(prior_claim)? != canonical(claim)?
+            || prefix.payload.runner().broker_context().binding != Some(target.authority())
+        {
+            return Err(JournalError::Conflict);
+        }
+        fscheck(directory.revalidate())?;
+        self.revalidate()?;
+        Ok((stop.clone(), request.clone(), response.receipt.clone()))
     }
 
     pub fn issues(&self) -> &[StopRecoveryIssueV1] {
