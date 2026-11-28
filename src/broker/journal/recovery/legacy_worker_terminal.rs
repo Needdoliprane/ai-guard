@@ -2,7 +2,10 @@
 use super::*;
 use crate::{
     broker::checkpoint::SupervisionCheckpointV1,
-    control::{ArmedStartClaimV1, MutationReceiptV1, RuntimeStatusV1, WorkerStateV1},
+    control::{
+        ArmedStartClaimV1, MutationReceiptV1, MutationResultV1, RuntimeStatusV1, WorkerStateV1,
+        content_hash, hash,
+    },
     runtime::RuntimeKind,
 };
 use std::sync::Weak;
@@ -39,6 +42,8 @@ pub(in crate::broker) struct RetainedLegacyWorkerTerminalObservationV1 {
     head: RevisionRefV1,
     stop: LocalCommandReceiptV1,
     request: WorkerMutationV1,
+    expected_worker: WorkerV1,
+    parent_audit_seq: i64,
 }
 
 #[allow(
@@ -70,6 +75,30 @@ impl RetainedLegacyWorkerTerminalObservationV1 {
 
     pub(in crate::broker) fn request(&self) -> &WorkerMutationV1 {
         &self.request
+    }
+
+    /// Match a response from the authenticated Core to the first durable body
+    /// and the exact parent revision. The audit pair identifies an event for a
+    /// separate audit check. This method only validates the response.
+    pub(in crate::broker) fn validate_response(
+        &self,
+        response: &MutationResultV1,
+    ) -> JournalResult<()> {
+        let receipt = &response.receipt;
+        let expected_hash = content_hash("ai-guard:worker-mutation:v1", self.request())
+            .map_err(|_| JournalError::Conflict)?;
+        if receipt.operation_id != self.request.operation_id
+            || receipt.input_hash != expected_hash
+            || receipt.worker_id.as_deref() != Some(self.request.worker_id.as_str())
+            || receipt.revision != Some(self.expected_worker.revision)
+            || response.disposition.is_some()
+            || receipt.audit_seq <= self.parent_audit_seq
+            || hash(&receipt.audit_hash).is_err()
+            || canonical(&response.worker)? != canonical(&self.expected_worker)?
+        {
+            return Err(JournalError::Conflict);
+        }
+        Ok(())
     }
 }
 
@@ -220,6 +249,11 @@ impl StopJournal {
             .ok_or(JournalError::Interrupted)?;
         let old = lifecycle.broker();
         let supervision = old.supervision();
+        terminal_parent_audit_seq(
+            supervision.operations(),
+            current.worker(),
+            current.claim().1.audit_seq,
+        )?;
         let mut operations = supervision.operations().to_vec();
         let stop = last_stop_before_observation(&job, current.claim_index, operations.len())?;
         if stop.command_id() != command {
@@ -338,7 +372,8 @@ fn retained_observation(
         .ok_or(JournalError::Interrupted)?
         .supervision();
     let id = proof.terminal_observation_operation_id()?;
-    for (index, operation) in supervision.operations().iter().enumerate() {
+    let operations = supervision.operations();
+    for (index, operation) in operations.iter().enumerate() {
         if let SupervisionOperationV1::WorkerMutation { request, response } = operation
             && request.operation_id == id
         {
@@ -347,16 +382,52 @@ fn retained_observation(
             if response.is_some() {
                 return Err(JournalError::Conflict);
             }
-            validate_terminal_request(proof, request)?;
+            let expected_worker = validate_terminal_request(proof, request)?;
+            let parent_audit_seq = terminal_parent_audit_seq(
+                &operations[..index],
+                proof.worker(),
+                proof.claim().1.audit_seq,
+            )?;
             let stop = last_stop_before_observation(job, proof.claim_index, index)?;
             return Ok(Some(RetainedLegacyWorkerTerminalObservationV1 {
                 head: job.head().clone(),
                 stop: stop.clone(),
                 request: request.clone(),
+                expected_worker,
+                parent_audit_seq,
             }));
         }
     }
     Ok(None)
+}
+
+fn terminal_parent_audit_seq(
+    prefix: &[SupervisionOperationV1],
+    parent: &WorkerV1,
+    claim_audit_seq: i64,
+) -> JournalResult<i64> {
+    let mut replies = prefix.iter().filter_map(|operation| {
+        let SupervisionOperationV1::WorkerMutation {
+            response: Some(response),
+            ..
+        } = operation
+        else {
+            return None;
+        };
+        let worker = &response.worker;
+        (worker.worker_id == parent.worker_id
+            && worker.attempt.attempt_id == parent.attempt.attempt_id
+            && worker.revision == parent.revision)
+            .then_some(response)
+    });
+    let matching = replies.next().ok_or(JournalError::Conflict)?;
+    if replies.next().is_some()
+        || matching.receipt.audit_seq <= claim_audit_seq
+        || canonical(&matching.worker)? != canonical(parent)?
+    {
+        return Err(JournalError::Conflict);
+    }
+    Ok(matching.receipt.audit_seq)
 }
 
 fn last_stop_before_observation(
@@ -382,7 +453,7 @@ fn last_stop_before_observation(
 fn validate_terminal_request(
     proof: &LegacyWorkerTerminalEvidenceV1,
     request: &WorkerMutationV1,
-) -> JournalResult<()> {
+) -> JournalResult<WorkerV1> {
     let worker = proof.worker();
     let WorkerTransitionV1::Observe { observation } = &request.transition else {
         return Err(JournalError::Conflict);
@@ -416,7 +487,7 @@ fn validate_terminal_request(
     if terminal.state != WorkerStateV1::Terminal || terminal.quota_held || observed < finished {
         return Err(JournalError::Conflict);
     }
-    Ok(())
+    Ok(terminal)
 }
 
 fn project(
