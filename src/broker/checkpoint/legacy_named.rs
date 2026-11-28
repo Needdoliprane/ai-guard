@@ -223,6 +223,47 @@ pub(in crate::broker) struct LegacyNamedImportVerificationArmFacts<'a> {
     reason = "the verification Arm owner is composed separately"
 )]
 impl LegacyNamedImportVerificationArmFacts<'_> {
+    /// Compare the proposed Arm with the retained helper and its full runtime
+    /// binding. The live owner separately validates STOP and the native clock.
+    pub(in crate::broker) fn validate_request(
+        &self,
+        request: &LegacyNamedImportVerificationArmRequestV2,
+        runtime: &RuntimeAuthority,
+    ) -> JournalResult<()> {
+        let arm = &request.arm;
+        checked(request.validate())?;
+        checked(arm.validate_for_parent(&self.prepared))?;
+        let policy = self.preparation.policy();
+        let authority = LegacyNamedImportAuthorityV1::for_policy(policy, runtime)?;
+        let owned = &self.created.owned;
+        let ArmSubjectV1::Helper {
+            helper_id,
+            policy_version,
+            permission,
+            ..
+        } = &arm.subject
+        else {
+            return Err(JournalError::Conflict);
+        };
+        ensure(
+            request.binding_ref == self.plan.binding_ref
+                && request.namespace == self.plan.control_namespace_uuid
+                && arm.operation_id == self.operation_id
+                && arm.intent_hash == self.intent_hash
+                && helper_id == &policy.helper_id
+                && *policy_version == policy.version
+                && arm.timeout_seconds == policy.timeout_seconds
+                && arm.inspection == self.inspection
+                && arm.configuration_fingerprint_version == owned.handle.fingerprint_version()
+                && owned.observation.configuration_fingerprint.as_deref()
+                    == Some(arm.configuration_fingerprint.as_str())
+                && authority.binding_hash == self.runtime_binding_hash
+                && authority.handle_fingerprint == owned.handle.authority_fingerprint()
+                && arm.authority_binding_hash == authority.handle_fingerprint
+                && equal(permission.as_ref(), self.preparation.permission())?,
+        )
+    }
+
     pub(in crate::broker) fn plan(&self) -> &LegacyConfirmedPlanV1 {
         self.plan
     }
@@ -3656,6 +3697,52 @@ mod tests {
             )?
             .as_str(),
         );
+        let mut verification_arm = arm.clone();
+        verification_arm.operation_id = facts.operation_id().to_owned();
+        verification_arm.subject = ArmSubjectV1::Helper {
+            helper_id: verification_policy.helper_id.clone(),
+            purpose: HelperPurposeV1::ImportVerification,
+            policy_version: verification_policy.version,
+            permission: Box::new(facts.preparation().permission().clone()),
+        };
+        verification_arm.inspection = facts.inspection().clone();
+        verification_arm.configuration_fingerprint_version =
+            verification_owned.handle.fingerprint_version();
+        verification_arm.configuration_fingerprint = verification_owned
+            .observation
+            .configuration_fingerprint
+            .clone()
+            .ok_or(JournalError::Conflict)?;
+        let mut verification_request = LegacyNamedImportVerificationArmRequestV2 {
+            version: 2,
+            binding_ref: plan.binding_ref,
+            namespace: plan.control_namespace_uuid.clone(),
+            arm: verification_arm,
+        };
+        facts.validate_request(&verification_request, &authority)?;
+        assert!(matches!(
+            facts.validate_request(&verification_request, &changed_invocation),
+            Err(JournalError::Conflict)
+        ));
+        let ArmSubjectV1::Helper { permission, .. } = &mut verification_request.arm.subject else {
+            return Err(JournalError::Conflict.into());
+        };
+        let HelperPermissionV1::ImportVerification {
+            import_terminal, ..
+        } = permission.as_mut()
+        else {
+            return Err(JournalError::Conflict.into());
+        };
+        import_terminal.audit_hash = if import_terminal.audit_hash == "0".repeat(64) {
+            "1".repeat(64)
+        } else {
+            "0".repeat(64)
+        };
+        verification_request.validate()?;
+        assert!(matches!(
+            facts.validate_request(&verification_request, &authority),
+            Err(JournalError::Conflict)
+        ));
         let mut divergent_created = cold_created.clone();
         divergent_created
             .import_verification_created
