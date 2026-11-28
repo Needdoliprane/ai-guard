@@ -65,9 +65,62 @@ jobs:
               printf 'test=%s status=NOT_RUN\n' "$selector"
             done
           }
+          clean_line() {
+            sed -E \
+              -e "s#/home/runner/work/[^[:space:]\"']+#[workspace-path]#g" \
+              -e "s#/tmp/[^[:space:]\"']+#[scratch-path]#g" \
+              -e "s#Bearer[[:space:]]+[A-Za-z0-9._~+/-]+=*#Bearer [REDACTED]#Ig" \
+              -e "s#(token|secret|password|api[_-]?key)[[:space:]\"=:]+[A-Za-z0-9._~+/-]{8,}#[REDACTED]#Ig" \
+              -e "s#sk-[A-Za-z0-9_-]{16,}#[REDACTED]#g" \
+              -e "s#gh[pousr]_[A-Za-z0-9]{20,}#[REDACTED]#g"
+          }
+          emit_cargo_errors() {
+            local report
+            report=$(jq -cs '[.[] | select(.reason == "compiler-message"
+                and .message.level == "error") | .message as $m |
+                {code: ($m.code.code // "rustc_or_link"),
+                 message: (($m.message // "")
+                   | gsub("/home/runner/work/[^[:space:]\\\"]+"; "[workspace-path]")
+                   | gsub("/tmp/[^[:space:]\\\"]+"; "[scratch-path]")
+                   | gsub("Bearer[[:space:]]+[A-Za-z0-9._~+/-]+=*"; "Bearer [REDACTED]")
+                   | gsub("(?i)(token|secret|password|api[_-]?key)[[:space:]\\\"=:]+[A-Za-z0-9._~+/-]{8,}"; "[REDACTED]")
+                   | gsub("sk-[A-Za-z0-9_-]{16,}"; "[REDACTED]")
+                   | gsub("gh[pousr]_[A-Za-z0-9]{20,}"; "[REDACTED]") | .[0:240]),
+                 files: [$m.spans[]? | select(.file_name | test("^(src|tests|examples)/"))
+                   | {file: .file_name, line: .line_start, column: .column_start}]}] | .[0:24]' "$1") || return 1
+            printf 'rust_diagnostics=%s\n' "$report"
+          }
+          emit_link_disk_diagnostics() {
+            local source="$1" line count=0
+            while IFS= read -r line; do
+              [[ -n "$line" ]] || continue
+              line=$(printf '%s' "$line" | clean_line | cut -c1-240)
+              printf 'build_stderr=%s\n' "$line"
+              count=$((count + 1))
+              [[ "$count" -lt 12 ]] || break
+            done < <(grep -Ei '(^|[[:space:]])error:|linker.*failed|ld:|rustc-LLVM ERROR|No space left on device|disk quota|failed to write|could not compile' "$source" | head -n 12 || true)
+          }
+          scratch=
+          diagnostic_scratch=$(mktemp -d "$RUNNER_TEMP/g04-diagnostic-filter.XXXXXXXX")
+          chmod 700 "$diagnostic_scratch"
+          trap 'if [[ -n "$scratch" ]]; then rm -rf -- "$scratch"; fi; rm -rf -- "$diagnostic_scratch"' EXIT
+          synthetic_json="$diagnostic_scratch/synthetic.jsonl"
+          jq -nc '{reason:"compiler-message",message:{level:"error",code:{code:"E0001"},message:"synthetic Bearer synthetic-token-secret-1234567890",spans:[{file_name:"src/runtime/managed.rs",line_start:73,column_start:2}],rendered:"[private rendered compiler output omitted]"}}' >"$synthetic_json"
+          synthetic_report=$(emit_cargo_errors "$synthetic_json")
+          [[ "$synthetic_report" == *E0001* && "$synthetic_report" == *src/runtime/managed.rs* &&
+             "$synthetic_report" != *synthetic-token-secret* && "$synthetic_report" != *'/tmp/'* &&
+             "$synthetic_report" == *REDACTED* ]]
+          synthetic_stderr="$diagnostic_scratch/synthetic.stderr"
+          printf 'rustc-LLVM ERROR: synthetic linker failure at %s\nNo space left on device: %s\n' \
+            "$diagnostic_scratch/target" "$diagnostic_scratch/target" >"$synthetic_stderr"
+          synthetic_link_report=$(emit_link_disk_diagnostics "$synthetic_stderr")
+          [[ "$synthetic_link_report" == *'rustc-LLVM ERROR'* &&
+             "$synthetic_link_report" == *'No space left on device'* &&
+             "$synthetic_link_report" != *"$diagnostic_scratch"* &&
+             "$synthetic_link_report" == *'[scratch-path]'* ]]
+          printf 'diagnostic_filter_selftest=PASS\n'
           scratch=$(mktemp -d "$RUNNER_TEMP/g04-named-runtime-create.XXXXXXXX")
           chmod 700 "$scratch"
-          trap 'rm -rf -- "$scratch"' EXIT
           export TMPDIR="$scratch/tmp"
           mkdir -m 700 "$TMPDIR"
           export CARGO_TARGET_DIR="$scratch/target"
@@ -84,6 +137,10 @@ jobs:
           else
             rc=$?
             printf 'build=FAIL\nbuild_exit=%s\n' "$rc"
+            emit_cargo_errors "$build_json" || printf 'rust_diagnostics=unavailable\n'
+            emit_link_disk_diagnostics "$scratch/build.stderr"
+            available_kib=$(df -Pk "$scratch" | awk 'NR == 2 { print $4 }')
+            [[ "$available_kib" =~ ^[0-9]+$ ]] && printf 'disk_available_kib=%s\n' "$available_kib"
             report_not_run
             exit 1
           fi
