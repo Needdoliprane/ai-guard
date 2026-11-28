@@ -33,6 +33,18 @@ use std::{
     path::Path,
     process::{Child, Command, Stdio},
 };
+use tokio::sync::Notify;
+
+tokio::task_local! {
+    static TERMINAL_RECOVERY_PAUSE: (Arc<Notify>, Arc<Notify>);
+}
+
+pub(super) async fn pause_after_terminal_recovery_guard() {
+    if let Ok((entered, resume)) = TERMINAL_RECOVERY_PAUSE.try_with(Clone::clone) {
+        entered.notify_one();
+        resume.notified().await;
+    }
+}
 
 #[tokio::test]
 async fn legacy_terminal_target_requires_the_same_current_running_worker() -> Result<()> {
@@ -445,14 +457,73 @@ async fn legacy_terminal_publication_replays_a_lost_core_reply_with_one_durable_
     let calls_path = seed.root().join("calls");
     let calls = fs::read(&calls_path)?;
 
+    let jobs = service.profile_jobs(scope.profile_id())?;
+    let job = jobs.known(operation).context("retained Job missing")?;
+    let entered = Arc::new(Notify::new());
+    let resume = Arc::new(Notify::new());
+    let first = TERMINAL_RECOVERY_PAUSE.scope(
+        (Arc::clone(&entered), Arc::clone(&resume)),
+        service.reconcile_legacy_worker_terminal(scope, operation, pending.head()),
+    );
+    let concurrent = async {
+        tokio::time::timeout(Duration::from_secs(10), entered.notified()).await?;
+        assert!(!job.is_running());
+        assert!(matches!(
+            tokio::time::timeout(
+                Duration::from_secs(5),
+                service.reconcile_legacy_worker_terminal(scope, operation, pending.head()),
+            )
+            .await?,
+            Err(BrokerErrorCodeV1::Busy)
+        ));
+        assert_eq!(seed.worker_get_count(), reads);
+        assert_eq!(seed.post_count(), posts);
+        assert_eq!(fs::read(&calls_path)?, calls);
+
+        // This fixture has no guardian. Cancel must publish its local receipt
+        // while recovery holds the Job gate, then report failed delivery.
+        let command = Uuid::new_v4();
+        let generation = job.cancel.current();
+        let stop_head = tokio::time::timeout(Duration::from_secs(5), async {
+            assert!(matches!(
+                service
+                    .cancel(writer.clone(), Arc::clone(&jobs), operation, command)
+                    .await,
+                Err(BrokerErrorCodeV1::NeedsReconciliation)
+            ));
+            let stop = writer
+                .cancel_stop_projection(operation, command)
+                .await?
+                .context("the STOP must be durable while terminal recovery is paused")?;
+            assert_eq!(stop.operation_id(), operation);
+            assert_eq!(canonical(stop.scope())?, canonical(scope)?);
+            assert_eq!(stop.receipt().command_id(), command);
+            assert_eq!(
+                stop.receipt().head().revision(),
+                pending.head().revision() + 1
+            );
+            assert!(job.has_acknowledged_cancel(command)?);
+            assert!(job.cancel.current() > generation);
+            Ok::<_, anyhow::Error>(stop.receipt().head().clone())
+        })
+        .await??;
+        resume.notify_one();
+        Ok::<_, anyhow::Error>(stop_head)
+    };
+
     seed.arm_transition_response_cut_for_test();
     assert!(seed.transition_response_cut_pending_for_test());
-    assert!(matches!(
-        service
-            .reconcile_legacy_worker_terminal(scope, operation, pending.head())
-            .await,
-        Err(BrokerErrorCodeV1::NeedsReconciliation)
-    ));
+    let ((), later_stop_head) = tokio::try_join!(
+        async {
+            assert!(matches!(
+                first.await,
+                Err(BrokerErrorCodeV1::NeedsReconciliation)
+            ));
+            Ok::<(), anyhow::Error>(())
+        },
+        concurrent
+    )?;
+    drop(jobs);
     assert!(
         !seed.transition_response_cut_pending_for_test(),
         "the successful transition handler must consume the response cut"
@@ -481,7 +552,8 @@ async fn legacy_terminal_publication_replays_a_lost_core_reply_with_one_durable_
         .legacy_worker_terminal_observation(operation)
         .await?
         .context("the lost response must leave the exact pending request")?;
-    assert_eq!(after_cut.head(), pending.head());
+    assert_eq!(after_cut.head(), &later_stop_head);
+    assert_eq!(after_cut.stop().command_id(), seed.cancel_id);
     assert_eq!(
         canonical(after_cut.request())?,
         canonical(pending.request())?
@@ -489,10 +561,22 @@ async fn legacy_terminal_publication_replays_a_lost_core_reply_with_one_durable_
 
     drop(writer);
     reopen_writer(&mut service, &seed.journal_root, scope).await?;
+    assert!(matches!(
+        service
+            .reconcile_legacy_worker_terminal(scope, operation, pending.head())
+            .await,
+        Err(BrokerErrorCodeV1::NeedsReconciliation)
+    ));
+    let jobs = service.profile_jobs(scope.profile_id())?;
+    assert!(jobs.known(operation).is_none());
+    assert_eq!(seed.worker_get_count(), reads + 1);
+    assert_eq!(seed.post_count(), posts + 1);
+    jobs.job(operation)?;
+    drop(jobs);
     let confirmed = service
         .reconcile_legacy_worker_terminal(scope, operation, pending.head())
         .await?;
-    assert_eq!(confirmed.head().revision(), pending.head().revision() + 1);
+    assert_eq!(confirmed.head().revision(), later_stop_head.revision() + 1);
     pending.validate_response(confirmed.response())?;
     assert_eq!(
         canonical(&confirmed.response().worker)?,
@@ -621,6 +705,7 @@ async fn stage_terminal_publication(
     jobs.writer
         .set(capabilities)
         .expect("one retained STOP writer");
+    jobs.job(operation)?;
     service.profiles.insert(scope.profile_id().to_owned(), jobs);
     let mut observation = synthetic_terminal_observation(&evidence)?;
     observation.restart_count = Some(0);
@@ -688,6 +773,7 @@ async fn cold_legacy_terminal_read_requires_the_exact_latch_and_preserves_state(
     let (guardian, peer) = start_legacy_stop_guardian().await?;
     let mut service = read_only_service(seed.root(), seed.config(), &proof)?;
     let jobs = Arc::new(ProfileJobs::new());
+    jobs.job(seed.operation_id)?;
     jobs.writer
         .set(capabilities)
         .expect("one retained STOP writer");

@@ -421,6 +421,17 @@ impl Job {
             _guard: guard,
         })
     }
+
+    /// Exclude other attempts on this Job while terminal recovery is active.
+    /// Cancel retains its independent command and generation path.
+    pub(super) fn try_terminal_reconciliation(
+        &self,
+    ) -> Result<OwnedMutexGuard<()>, BrokerErrorCodeV1> {
+        Arc::clone(&self.gate)
+            .try_lock_owned()
+            .map_err(|_| BrokerErrorCodeV1::Busy)
+    }
+
     pub(super) fn begin_cancel(
         self: &Arc<Self>,
         command: Uuid,

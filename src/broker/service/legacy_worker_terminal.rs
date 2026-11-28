@@ -178,17 +178,30 @@ impl Service {
             .filter(|capabilities| capabilities.is_stop_only())
             .ok_or(Code::NeedsReconciliation)?
             .stops();
-        let state = tokio::time::timeout_at(ColdAuditBudget::start().deadline(), async {
-            self.validate_registry().await?;
+        let read_state = || async {
             writer
                 .legacy_worker_terminal_recovery_state(operation_id, scope, ancestor)
                 .await
                 .map_err(jobs::journal_error)
+        };
+        let state = tokio::time::timeout_at(ColdAuditBudget::start().deadline(), async {
+            self.validate_registry().await?;
+            read_state().await
         })
         .await
         .map_err(|_| Code::Unavailable)??;
 
-        let pending_head = match state {
+        if let Confirmed(confirmed) = state {
+            return Ok(*confirmed);
+        }
+        let job = jobs.known(operation_id).ok_or(Code::NeedsReconciliation)?;
+        let _guard = job.try_terminal_reconciliation()?;
+        #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+        tests::pause_after_terminal_recovery_guard().await;
+
+        // Another recovery may have advanced this prefix between the first
+        // read and acquiring the Job gate.
+        let pending_head = match read_state().await? {
             Confirmed(confirmed) => return Ok(*confirmed),
             Pending(pending) => pending.head().clone(),
             Fresh(proof) => {
