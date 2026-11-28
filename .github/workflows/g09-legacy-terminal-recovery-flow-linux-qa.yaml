@@ -1,0 +1,149 @@
+name: G09 private Legacy terminal recovery flow Linux QA
+
+on:
+  push:
+    branches: [codex/g09-legacy-terminal-recovery-flow-linux-qa-20261128]
+    paths: [.github/workflows/g09-legacy-terminal-recovery-flow-linux-qa.yaml]
+
+permissions:
+  contents: read
+
+jobs:
+  legacy-terminal-recovery-flow:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      SOURCE_SHA: d97ac63bef62840655a518e681a123985619086a
+      SOURCE_TREE: d119e6fc3d39c50b8d6c437b376e24ba6705c786
+      SERVICE_BLOB: 73ce61cc79624bb8060bbeeea7474716eb78cd5c
+      ORACLE_BLOB: fea9a1699cf34ad152cd1e0e989f829a1a877416
+      MANAGED_BLOB: 014c5bb8341f179d146de923e3a11aee8eab1025
+      FIXTURE_BLOB: d8d3e2108b028b497e5d3b00886d5f3f808315e2
+      CARGO_BUILD_JOBS: '1'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      CARGO_TERM_COLOR: never
+      RUST_MIN_STACK: '8388608'
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          persist-credentials: false
+
+      - name: Build one libtest and verify the private terminal recovery flow
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          ulimit -c 0
+          [[ "$RUST_MIN_STACK" == 8388608 ]]
+          selectors=(
+            broker::service::server::legacy_worker_terminal::tests::cold_legacy_terminal_read_requires_the_exact_latch_and_preserves_state
+            broker::service::server::legacy_worker_terminal::tests::legacy_terminal_publication_replays_a_lost_core_reply_with_one_durable_effect
+            broker::service::server::legacy_worker_terminal::tests::legacy_terminal_publication_refuses_a_divergent_core_worker_before_post
+          )
+
+          report_not_run() {
+            local selector
+            for selector in "${selectors[@]}"; do
+              printf 'test=%s status=NOT_RUN\n' "$selector"
+            done
+          }
+
+          if [[ "${GITHUB_REF:-}" != refs/heads/codex/g09-legacy-terminal-recovery-flow-linux-qa-20261128 ||
+                "$(git rev-parse HEAD)" != "$SOURCE_SHA" ||
+                "$(git rev-parse 'HEAD^{tree}')" != "$SOURCE_TREE" ||
+                "$(git rev-parse HEAD:src/broker/service/legacy_worker_terminal.rs)" != "$SERVICE_BLOB" ||
+                "$(git rev-parse HEAD:src/broker/service/legacy_worker_terminal_tests.rs)" != "$ORACLE_BLOB" ||
+                "$(git rev-parse HEAD:src/runner/managed.rs)" != "$MANAGED_BLOB" ||
+                "$(git rev-parse HEAD:src/runner/broker/executor/cancelled_recovery_fixture.rs)" != "$FIXTURE_BLOB" ]]; then
+            printf 'source=FAIL\n'
+            report_not_run
+            exit 1
+          fi
+          printf 'source=PASS\nsource_sha=%s\nsource_tree=%s\n' "$SOURCE_SHA" "$SOURCE_TREE"
+          printf 'service_blob=%s\noracle_blob=%s\nmanaged_blob=%s\nfixture_blob=%s\n' \
+            "$SERVICE_BLOB" "$ORACLE_BLOB" "$MANAGED_BLOB" "$FIXTURE_BLOB"
+          export AI_GUARD_BUILD_REVISION="$SOURCE_SHA"
+
+          emit_cargo_errors() {
+            local report
+            report=$(jq -cs '
+              [.[] | select(.reason == "compiler-message" and .message.level == "error") | .message |
+                {code: ((.code.code // "uncoded") | if test("^E[0-9]{4}$") then . else "uncoded" end),
+                 site: ([.spans[]? | select(.is_primary == true
+                     and (.file_name | test("^(src|tests)/([A-Za-z0-9_-]+/)*[A-Za-z0-9_-]+[.]rs$"))
+                     and (.file_name | length) <= 240
+                     and (.line_start | type) == "number"
+                     and (.column_start | type) == "number")
+                   | {file: .file_name, line: .line_start, column: .column_start}] | .[0])}]
+              | .[0:16]' "$1" 2>/dev/null) || return 1
+            printf 'rust_diagnostics=%s\n' "$report"
+          }
+
+          scratch=$(mktemp -d /tmp/aig-g09.XXXXXX)
+          trap 'find "$scratch" -depth -mindepth 1 -delete; rmdir "$scratch"' EXIT
+          export TMPDIR="$scratch"
+          export CARGO_TARGET_DIR="$scratch/target"
+          build_json="$scratch/build.jsonl"
+
+          if ! cargo fetch --locked >"$scratch/fetch.log" 2>&1; then
+            printf 'fetch=FAIL\nbuild=NOT_RUN\n'
+            report_not_run
+            exit 1
+          fi
+          printf 'fetch=PASS\n'
+
+          if cargo test --locked --offline -j1 --no-default-features --lib --no-run \
+              --message-format=json >"$build_json" 2>"$scratch/build.stderr"; then
+            printf 'build=PASS\n'
+          else
+            rc=$?
+            printf 'build=FAIL\nbuild_exit=%s\n' "$rc"
+            emit_cargo_errors "$build_json" || printf 'rust_diagnostics=unavailable\n'
+            report_not_run
+            exit 1
+          fi
+
+          if ! libtest=$(jq -ers '[.[] | select(.reason == "compiler-artifact"
+              and .target.name == "agentsandbox" and .target.kind == ["lib"]
+              and .profile.test == true and (.executable | type) == "string") | .executable]
+              | unique | select(length == 1) | .[0]' "$build_json" 2>/dev/null) ||
+              [[ "$libtest" != "$CARGO_TARGET_DIR"/debug/deps/agentsandbox-* ||
+                 ! -f "$libtest" || ! -x "$libtest" || -L "$libtest" ]]; then
+            printf 'libtest=FAIL\n'
+            report_not_run
+            exit 1
+          fi
+          checksum=$(sha256sum -- "$libtest")
+          libtest_sha=${checksum%% *}
+          if [[ ! "$libtest_sha" =~ ^[0-9a-f]{64}$ ]]; then
+            printf 'libtest=FAIL\n'
+            report_not_run
+            exit 1
+          fi
+          printf 'libtest=PASS\nlibtest_sha256=%s\n' "$libtest_sha"
+
+          failed=0
+          for selector in "${selectors[@]}"; do
+            log="$scratch/test.log"
+            test_exit=0
+            { timeout --kill-after=10s 180s "$libtest" --exact "$selector" --test-threads=1 \
+              --color never; } >"$log" 2>&1 || test_exit=$?
+            if [[ "$test_exit" == 0 ]] &&
+                [[ "$(grep -Fxc 'running 1 test' "$log" || true)" == 1 ]] &&
+                [[ "$(grep -Fxc "test $selector ... ok" "$log" || true)" == 1 ]] &&
+                [[ "$(grep -Ec '^test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; [0-9]+ filtered out; finished in [0-9]+([.][0-9]+)?s$' "$log" || true)" == 1 ]]; then
+              printf 'test=%s status=PASS\ntest_exit=0\ntest_pass_count=1\ntest_fail_count=0\n' "$selector"
+            else
+              printf 'test=%s status=FAIL\ntest_exit=%s\n' "$selector" "$test_exit"
+              grep -m 1 -Eo 'panicked at src/([A-Za-z0-9_-]+/)*[A-Za-z0-9_-]+[.]rs:[0-9]+:[0-9]+' "$log" || true
+              if grep -q '^Error: ' "$log"; then
+                printf 'libtest_result_error=true\n'
+              fi
+              failed=1
+            fi
+          done
+          exit "$failed"
