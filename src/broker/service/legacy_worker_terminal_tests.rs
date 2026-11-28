@@ -375,7 +375,7 @@ async fn cold_legacy_terminal_read_requires_the_exact_latch_and_preserves_state(
         observed.observation.restart_count = restart_count;
         assert!(matches!(
             observed.terminal_mutation(),
-            Err(Code::NeedsReconciliation)
+            Err(BrokerErrorCodeV1::NeedsReconciliation)
         ));
     }
     assert_eq!(seed.worker_get_count(), reads + 2);
