@@ -1,0 +1,119 @@
+name: G04 named verification runtime Create Linux QA
+
+on:
+  push:
+    branches: [codex/g04-named-verification-runtime-create-linux-qa-20261128]
+    paths: [.github/workflows/g04-named-verification-runtime-create-linux-qa.yaml]
+
+permissions:
+  contents: read
+
+jobs:
+  named-verification-runtime-create:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      SOURCE_SHA: f29f40d96904eeafe24763dc1788e0d5b56fe23c
+      SOURCE_TREE: f9a9798473e30d494f6277c1d71da5cf3d072b5b
+      CHECKPOINT_BLOB: 7f54555c6d6309c92d92511a6d6320f03bd21684
+      NAMED_CHECKPOINT_BLOB: 16695074598ecc9af0fd155a32f3492bc10862ed
+      WRITER_BLOB: cbf05fbd3631c17c4e7900accfdc29b9d14ee1d1
+      NAMED_WRITER_BLOB: a8643ec09a448de8f8d518db5a6aff753852a485
+      RUNTIME_BLOB: 1e2eff1accaeb0c878c9b51bc32dd3a7c32628e2
+      MANAGED_RUNTIME_BLOB: fb9a794423b2899ed2a873d419a2a89c67e148f6
+      CARGO_BUILD_JOBS: '1'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      CARGO_TERM_COLOR: never
+      RUST_MIN_STACK: '8388608'
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          persist-credentials: false
+
+      - name: Verify the branch, source tree and owned blobs
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          test "${GITHUB_REF:-}" = refs/heads/codex/g04-named-verification-runtime-create-linux-qa-20261128
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          test "$(git rev-parse 'HEAD^{tree}')" = "$SOURCE_TREE"
+          test "$(git rev-parse HEAD:src/broker/checkpoint.rs)" = "$CHECKPOINT_BLOB"
+          test "$(git rev-parse HEAD:src/broker/checkpoint/legacy_named.rs)" = "$NAMED_CHECKPOINT_BLOB"
+          test "$(git rev-parse HEAD:src/broker/writer.rs)" = "$WRITER_BLOB"
+          test "$(git rev-parse HEAD:src/broker/writer/legacy_named_admission.rs)" = "$NAMED_WRITER_BLOB"
+          test "$(git rev-parse HEAD:src/runtime.rs)" = "$RUNTIME_BLOB"
+          test "$(git rev-parse HEAD:src/runtime/managed.rs)" = "$MANAGED_RUNTIME_BLOB"
+          printf 'source=PASS\nsource_sha=%s\nsource_tree=%s\n' "$SOURCE_SHA" "$SOURCE_TREE"
+
+      - name: Build the single libtest and run the two exact local oracles
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          selectors=(
+            runtime::managed::named_import_verification_volume_tests::mismatched_existing_workspace_stops_before_any_runtime_create
+            broker::checkpoint::legacy_named::tests::explicit_named_admission_requires_an_immutable_archive_digest
+          )
+          report_not_run() {
+            local selector
+            for selector in "${selectors[@]}"; do
+              printf 'test=%s status=NOT_RUN\n' "$selector"
+            done
+          }
+          scratch=$(mktemp -d "$RUNNER_TEMP/g04-named-runtime-create.XXXXXXXX")
+          chmod 700 "$scratch"
+          trap 'rm -rf -- "$scratch"' EXIT
+          export TMPDIR="$scratch/tmp"
+          mkdir -m 700 "$TMPDIR"
+          export CARGO_TARGET_DIR="$scratch/target"
+          build_json="$scratch/build.jsonl"
+          if ! cargo fetch --locked >"$scratch/fetch.log" 2>&1; then
+            printf 'fetch=FAIL\nbuild=NOT_RUN\n'
+            report_not_run
+            exit 1
+          fi
+          printf 'fetch=PASS\n'
+          if cargo test --locked --offline -j1 --no-default-features --lib --no-run \
+              --message-format=json >"$build_json" 2>"$scratch/build.stderr"; then
+            printf 'build=PASS\n'
+          else
+            rc=$?
+            printf 'build=FAIL\nbuild_exit=%s\n' "$rc"
+            report_not_run
+            exit 1
+          fi
+          if ! libtest=$(jq -ers '[.[] | select(.reason == "compiler-artifact"
+              and .target.name == "agentsandbox" and .target.kind == ["lib"]
+              and .profile.test == true and (.executable | type) == "string") | .executable]
+              | unique | select(length == 1) | .[0]' "$build_json" 2>/dev/null) ||
+              [[ "$libtest" != "$CARGO_TARGET_DIR"/debug/deps/agentsandbox-* ||
+                 ! -f "$libtest" || ! -x "$libtest" || -L "$libtest" ]]; then
+            printf 'libtest=FAIL\n'
+            report_not_run
+            exit 1
+          fi
+          libtest_sha=$(sha256sum -- "$libtest" | cut -d ' ' -f 1)
+          [[ "$libtest_sha" =~ ^[0-9a-f]{64}$ ]]
+          printf 'libtest=PASS\nlibtest_sha256=%s\n' "$libtest_sha"
+          failed=0
+          for selector in "${selectors[@]}"; do
+            log="$scratch/test.log"
+            test_exit=0
+            "$libtest" --exact "$selector" --test-threads=1 --color never >"$log" 2>&1 || test_exit=$?
+            if [[ "$test_exit" == 0 ]] &&
+                [[ "$(grep -Fxc 'running 1 test' "$log" || true)" == 1 ]] &&
+                [[ "$(grep -Fxc "test $selector ... ok" "$log" || true)" == 1 ]] &&
+                [[ "$(grep -Ec '^test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; [0-9]+ filtered out; finished in [0-9]+([.][0-9]+)?s$' "$log" || true)" == 1 ]]; then
+              printf 'test=%s status=PASS\ntest_exit=0\ntest_pass_count=1\ntest_fail_count=0\n' "$selector"
+            else
+              printf 'test=%s status=FAIL\ntest_exit=%s\n' "$selector" "$test_exit"
+              grep -Eo 'panicked at src/[A-Za-z0-9_./-]+[.]rs:[0-9]+:[0-9]+' "$log" || true
+              failed=1
+            fi
+          done
+          exit "$failed"
