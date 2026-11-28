@@ -86,12 +86,7 @@ pub(crate) async fn run(args: PrepareMysqlOwnedArgs) -> Result<()> {
     let json = if args.verify_chain {
         let receipt = verify_owned_audit_chain(endpoint, credentials, request)
             .await
-            .map_err(|error| {
-                owned_operation_error(
-                    error,
-                    "MySQL owned audit chain verification failed; preserve the target and check its exact configuration and state",
-                )
-            })?;
+            .map_err(chain_operation_error)?;
         serde_json::to_string(&receipt).context("cannot encode the verified chain receipt")?
     } else {
         let receipt = if args.verify_only {
@@ -115,6 +110,18 @@ pub(crate) async fn run(args: PrepareMysqlOwnedArgs) -> Result<()> {
         } else {
             "MySQL publication verified but the receipt could not be written"
         })
+}
+
+fn chain_operation_error(error: anyhow::Error) -> anyhow::Error {
+    if error.downcast_ref::<MysqlProbeError>() == Some(&MysqlProbeError::TimedOut) {
+        return anyhow!(
+            "MySQL owned audit chain verification timed out. Release of the MySQL target lock is unconfirmed"
+        );
+    }
+    owned_operation_error(
+        error,
+        "MySQL owned audit chain verification failed; preserve the target and check its exact configuration and state",
+    )
 }
 
 fn owned_operation_error(error: anyhow::Error, fallback: &'static str) -> anyhow::Error {
@@ -152,5 +159,10 @@ mod tests {
                 expected
             );
         }
+        let error = anyhow!(MysqlProbeError::TimedOut).context(private_marker);
+        assert_eq!(
+            format!("{:#}", chain_operation_error(error)),
+            "MySQL owned audit chain verification timed out. Release of the MySQL target lock is unconfirmed"
+        );
     }
 }

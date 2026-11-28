@@ -189,6 +189,8 @@ pub async fn verify_owned_fresh_source(
 /// snapshot. The caller still needs separate projection and epoch proofs.
 /// Coordinate schema administration with the target lock. The catalog observes
 /// unrelated objects created outside that lock at the time of inspection.
+/// A timeout bounds the caller's wait. It does not attest that MySQL has
+/// released the session's target lock.
 pub async fn verify_owned_audit_chain(
     endpoint: MysqlEndpoint<'_>,
     credentials: MysqlCredentials<'_>,

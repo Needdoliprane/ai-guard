@@ -237,8 +237,10 @@ Le reçu `verification_mode: owned_audit_chain` couvre uniquement ces
 vérifications. Les projections et l’admission d’écriture du gateway gardent
 leurs contrôles propres. `--verify-chain` et `--verify-only` sont exclusifs.
 Sans option, la commande conserve le mode de préparation fraîche.
-La vérification a un budget de huit secondes. Une expiration ne produit aucun
-reçu. La recette sur une instance MySQL réelle reste à exécuter.
+La vérification a un budget de huit secondes. Si le délai expire, aucun reçu
+n’est produit et la libération du verrou côté MySQL reste non confirmée.
+Vérifier l’état de la session avant de reprendre l’administration du schéma.
+La recette sur une instance MySQL réelle reste à exécuter.
 
 ## Recettes physiques
 
