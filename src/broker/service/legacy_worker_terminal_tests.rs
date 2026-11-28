@@ -805,6 +805,7 @@ async fn cold_legacy_terminal_read_requires_the_exact_latch_and_preserves_state(
         .await;
     assert!(!partial);
     assert_eq!(restored, expected_targets);
+    let after_restore = fs::read(&calls)?;
 
     let store = seed.store();
     let core_head = store.head()?;
@@ -814,6 +815,7 @@ async fn cold_legacy_terminal_read_requires_the_exact_latch_and_preserves_state(
     let mut observed = service
         .observe_legacy_worker_terminal(&stops, &proof)
         .await?;
+    let after_observe = fs::read(&calls)?;
     let terminal = observed.observation();
     assert_eq!(terminal.id.as_deref(), Some(cid.as_str()));
     assert_eq!(terminal.process.finished_at, Some(finish));
@@ -864,6 +866,7 @@ async fn cold_legacy_terminal_read_requires_the_exact_latch_and_preserves_state(
     let confirmed = service
         .reconcile_legacy_worker_terminal(proof.scope(), operation, proof.head())
         .await?;
+    let after_reconcile = fs::read(&calls)?;
     assert_eq!(confirmed.head().revision(), proof.head().revision() + 2);
     assert_eq!(
         confirmed.response().receipt.operation_id,
@@ -904,11 +907,41 @@ async fn cold_legacy_terminal_read_requires_the_exact_latch_and_preserves_state(
             .lines()
             .any(|line| line.strip_prefix("inspect ") == Some(cid.as_str()))
     );
-    assert!(
-        commands
-            .lines()
-            .all(|line| line == "info" || line.starts_with("inspect "))
-    );
+    let check_command = |line: &str| {
+        if line == "info" || line.starts_with("inspect ") {
+            return true;
+        }
+        let verb = match line.split_ascii_whitespace().next() {
+            Some("kill") => "kill",
+            Some("rm") => "rm",
+            Some("ps") => "ps",
+            Some("start") => "start",
+            Some("create") => "create",
+            Some("image") => "image",
+            Some("volume") => "volume",
+            _ => "unknown",
+        };
+        // The fixture appends commands. Locate the earliest snapshot with
+        // this rejected command.
+        let phase = [
+            ("pre_latch", before_latch.as_slice()),
+            ("restore", after_restore.as_slice()),
+            ("observe", after_observe.as_slice()),
+            ("reconcile", after_reconcile.as_slice()),
+        ]
+        .into_iter()
+        .find_map(|(phase, snapshot)| {
+            let snapshot = std::str::from_utf8(snapshot).ok()?;
+            snapshot
+                .lines()
+                .any(|earlier| earlier == line)
+                .then_some(phase)
+        })
+        .unwrap_or("drop");
+        eprintln!("g09_unexpected_command={verb}:{phase}");
+        false
+    };
+    assert!(commands.lines().all(check_command));
     Ok(())
 }
 
