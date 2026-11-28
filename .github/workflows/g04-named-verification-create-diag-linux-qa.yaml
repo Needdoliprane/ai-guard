@@ -1,0 +1,127 @@
+name: G04 named Import verification Create diagnostic
+
+on:
+  push:
+    branches: [codex/g04-named-verification-create-diag-linux-qa-20261128]
+    paths: [.github/workflows/g04-named-verification-create-diag-linux-qa.yaml]
+
+permissions:
+  contents: read
+
+jobs:
+  named-observation:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      SOURCE_SHA: dbde9321316f6b448ed74e59ef8207e766840a28
+      SOURCE_TREE: aa76706bfad79be0d7680b48c5381839928ff8d1
+      CHECKPOINT_MODULE_BLOB: 07879b98039c9d73fcbdac6d824e06df1ca1fcc7
+      CHECKPOINT_BLOB: 48abd15a012b9c8d1b52aafe843033d2bebc772e
+      WRITER_MODULE_BLOB: 5886dddd98ce94362ff921310e40e56e60161e66
+      WRITER_BLOB: 18c3772dc4c8b0dd0cdafe8422536641dd0cbec6
+      LIFECYCLE_BLOB: 4dab3fa007bde0dcff82cd9b7434ea785e5314aa
+      CARGO_BUILD_JOBS: '1'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      CARGO_TERM_COLOR: never
+      RUST_MIN_STACK: '8388608'
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          persist-credentials: false
+
+      - name: Build one libtest and verify the named verification Create intent
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          # The oracle uses a private SQLite journal and synthetic runtime facts.
+          # It does not start a runtime, provider, model, or external service.
+          selector=broker::checkpoint::legacy_named::tests::explicit_named_admission_requires_an_immutable_archive_digest
+
+          report_not_run() {
+            printf 'test=%s status=NOT_RUN\n' "$selector"
+          }
+
+          if [[ "$(git rev-parse HEAD)" != "$SOURCE_SHA" ||
+                "$(git rev-parse 'HEAD^{tree}')" != "$SOURCE_TREE" ||
+                "$(git rev-parse HEAD:src/broker/checkpoint.rs)" != "$CHECKPOINT_MODULE_BLOB" ||
+                "$(git rev-parse HEAD:src/broker/checkpoint/legacy_named.rs)" != "$CHECKPOINT_BLOB" ||
+                "$(git rev-parse HEAD:src/broker/writer.rs)" != "$WRITER_MODULE_BLOB" ||
+                "$(git rev-parse HEAD:src/broker/writer/legacy_named_admission.rs)" != "$WRITER_BLOB" ||
+                "$(git rev-parse HEAD:src/broker/lifecycle.rs)" != "$LIFECYCLE_BLOB" ]]; then
+            printf 'source=FAIL\n'
+            report_not_run
+            exit 1
+          fi
+          printf 'source=PASS\nsource_sha=%s\nsource_tree=%s\ncheckpoint_module_blob=%s\ncheckpoint_blob=%s\nwriter_module_blob=%s\nwriter_blob=%s\nlifecycle_blob=%s\n' \
+            "$SOURCE_SHA" "$SOURCE_TREE" "$CHECKPOINT_MODULE_BLOB" "$CHECKPOINT_BLOB" \
+            "$WRITER_MODULE_BLOB" "$WRITER_BLOB" "$LIFECYCLE_BLOB"
+          export AI_GUARD_BUILD_REVISION="$SOURCE_SHA"
+
+          scratch=$(mktemp -d /tmp/aig-g04-verification-create-intent.XXXXXX)
+          trap 'rm -rf -- "$scratch"' EXIT
+          export TMPDIR="$scratch"
+          export CARGO_TARGET_DIR="$scratch/target"
+          build_json="$scratch/build.jsonl"
+
+          if ! cargo fetch --locked >"$scratch/fetch.log" 2>&1; then
+            printf 'fetch=FAIL\nbuild=NOT_RUN\n'
+            report_not_run
+            exit 1
+          fi
+          printf 'fetch=PASS\n'
+
+          if cargo test --locked --offline -j1 --no-default-features --lib --no-run \
+              --message-format=json >"$build_json" 2>"$scratch/build.stderr"; then
+            printf 'build=PASS\n'
+          else
+            rc=$?
+            printf 'build=FAIL\nbuild_exit=%s\n' "$rc"
+            jq -Rr 'fromjson? | objects
+              | select(.reason == "compiler-message" and .message.level == "error")
+              | .message.code.code // empty | strings | select(test("^E[0-9]{4}$"))
+              | "compiler_error=" + .' "$build_json" 2>/dev/null | sort -u || true
+            report_not_run
+            exit 1
+          fi
+
+          if ! libtest=$(jq -ers '[.[] | select(.reason == "compiler-artifact"
+              and .target.name == "agentsandbox" and .target.kind == ["lib"]
+              and .profile.test == true and (.executable | type) == "string") | .executable]
+              | unique | select(length == 1) | .[0]' "$build_json" 2>/dev/null) ||
+              [[ "$libtest" != "$CARGO_TARGET_DIR"/debug/deps/agentsandbox-* ||
+                 ! -f "$libtest" || ! -x "$libtest" || -L "$libtest" ]]; then
+            printf 'libtest=FAIL\n'
+            report_not_run
+            exit 1
+          fi
+          checksum=$(sha256sum -- "$libtest")
+          libtest_sha=${checksum%% *}
+          if [[ ! "$libtest_sha" =~ ^[0-9a-f]{64}$ ]]; then
+            printf 'libtest=FAIL\n'
+            report_not_run
+            exit 1
+          fi
+          printf 'libtest=PASS\nlibtest_sha256=%s\n' "$libtest_sha"
+
+          log="$scratch/test.log"
+          test_exit=0
+          "$libtest" --exact "$selector" --test-threads=1 --color never >"$log" 2>&1 || test_exit=$?
+          if [[ "$test_exit" == 0 ]] &&
+              [[ "$(grep -Fxc "running 1 test" "$log" || true)" == 1 ]] &&
+              [[ "$(grep -Fxc "test $selector ... ok" "$log" || true)" == 1 ]] &&
+              [[ "$(grep -Ec '^test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; [0-9]+ filtered out; finished in [0-9]+([.][0-9]+)?s$' "$log" || true)" == 1 ]]; then
+            printf 'test=%s status=PASS\ntest_exit=0\ntest_pass_count=1\ntest_fail_count=0\n' "$selector"
+          else
+            printf 'test=%s status=FAIL\ntest_exit=%s\n' "$selector" "$test_exit"
+            rg -m 20 '^g04_create_stage=[a-z_]{1,48}$' "$log" || true
+            rg -o -m 1 'panicked at src/[A-Za-z0-9_./-]+[.]rs:[0-9]+:[0-9]+' "$log" || true
+            if rg -q '^Error: ' "$log"; then
+              printf 'libtest_result_error=true\n'
+            fi
+            exit 1
+          fi
