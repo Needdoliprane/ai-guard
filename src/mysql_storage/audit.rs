@@ -155,10 +155,62 @@ impl AuditHead {
     }
 }
 
-struct Binding {
+type BindingColumns = (u16, Option<String>, Option<String>, i64, String, u64);
+
+/// The caller selects the expected format before reading the singleton.
+#[derive(Clone, Copy)]
+pub(super) enum ExpectedAuditBinding<'a> {
+    Legacy,
+    Owned {
+        version: u16,
+        tenant: &'a str,
+        namespace: &'a str,
+    },
+}
+
+pub(super) struct Binding {
     tenant: Option<String>,
     namespace: Option<String>,
-    head: AuditHead,
+    pub(super) head: AuditHead,
+}
+
+impl Binding {
+    pub(super) fn decode(row: Row, expected: ExpectedAuditBinding<'_>) -> Result<Self> {
+        Self::from_columns(decode_row(row)?, expected)
+    }
+
+    fn from_columns(
+        (version, tenant, namespace, seq, hash, payload_bytes): BindingColumns,
+        expected: ExpectedAuditBinding<'_>,
+    ) -> Result<Self> {
+        match expected {
+            ExpectedAuditBinding::Legacy => {
+                ensure!(version == 1, "unsupported MySQL audit schema version");
+            }
+            ExpectedAuditBinding::Owned {
+                version: expected_version,
+                tenant: expected_tenant,
+                namespace: expected_namespace,
+            } => {
+                ensure!(
+                    matches!(expected_version, 14 | 15)
+                        && version == expected_version
+                        && tenant.as_deref() == Some(expected_tenant)
+                        && namespace.as_deref() == Some(expected_namespace),
+                    "MySQL owned publication binding mismatch"
+                );
+            }
+        }
+        Ok(Self {
+            tenant,
+            namespace,
+            head: AuditHead {
+                seq,
+                hash,
+                payload_bytes,
+            },
+        })
+    }
 }
 
 pub(super) struct EncodedEvent {
@@ -255,24 +307,7 @@ async fn binding(tx: &mut Transaction<'_>, query: &str) -> Result<Binding> {
         .await
         .map_err(driver_error)?
         .context("MySQL audit schema was not prepared")?;
-    let (version, tenant, namespace, seq, hash, payload_bytes): (
-        u16,
-        Option<String>,
-        Option<String>,
-        i64,
-        String,
-        u64,
-    ) = decode_row(row)?;
-    ensure!(version == 1, "unsupported MySQL audit schema version");
-    Ok(Binding {
-        tenant,
-        namespace,
-        head: AuditHead {
-            seq,
-            hash,
-            payload_bytes,
-        },
-    })
+    Binding::decode(row, ExpectedAuditBinding::Legacy)
 }
 
 fn read_snapshot_options() -> TxOpts {
@@ -2177,6 +2212,84 @@ impl MysqlAuditStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn audit_binding_keeps_the_selected_format_and_scope() -> Result<()> {
+        let namespace = "00000000-0000-0000-0000-000000000001";
+        let head = AuditHead {
+            seq: 3,
+            hash: "a".repeat(64),
+            payload_bytes: 512,
+        };
+        let columns = |version, tenant: Option<&str>, namespace: Option<&str>| {
+            (
+                version,
+                tenant.map(str::to_owned),
+                namespace.map(str::to_owned),
+                head.seq,
+                head.hash.clone(),
+                head.payload_bytes,
+            )
+        };
+        let owned = |version| ExpectedAuditBinding::Owned {
+            version,
+            tenant: "tenant_a",
+            namespace,
+        };
+        let owned_mismatch = "MySQL owned publication binding mismatch";
+        for (required, expected, mismatch) in [
+            (
+                Some(1),
+                ExpectedAuditBinding::Legacy,
+                "unsupported MySQL audit schema version",
+            ),
+            (Some(14), owned(14), owned_mismatch),
+            (Some(15), owned(15), owned_mismatch),
+            (None, owned(1), owned_mismatch),
+        ] {
+            for version in [1, 14, 15, 16] {
+                let result = Binding::from_columns(
+                    columns(version, Some("tenant_a"), Some(namespace)),
+                    expected,
+                );
+                assert_eq!(result.is_ok(), required == Some(version));
+                match result {
+                    Ok(binding) => assert_eq!(binding.head, head),
+                    Err(error) => assert_eq!(error.to_string(), mismatch),
+                }
+            }
+        }
+
+        let initial = AuditHead::empty();
+        let unbound = Binding::from_columns(
+            (
+                1,
+                None,
+                None,
+                initial.seq,
+                initial.hash.clone(),
+                initial.payload_bytes,
+            ),
+            ExpectedAuditBinding::Legacy,
+        )?;
+        assert!(unbound.tenant.is_none() && unbound.namespace.is_none());
+        assert_eq!(unbound.head, initial);
+
+        for (tenant, namespace) in [
+            (None, None),
+            (Some("tenant_b"), Some(namespace)),
+            (
+                Some("tenant_a"),
+                Some("00000000-0000-0000-0000-000000000002"),
+            ),
+        ] {
+            let error = Binding::from_columns(columns(14, tenant, namespace), owned(14))
+                .err()
+                .expect("owned binding must match the configured scope");
+            assert_eq!(error.to_string(), owned_mismatch);
+        }
+        Ok(())
+    }
 
     #[test]
     fn audit_link_mismatch_preserves_the_verified_prefix_and_sequence() -> Result<()> {

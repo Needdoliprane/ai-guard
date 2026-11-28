@@ -15,8 +15,8 @@ use super::{CheckedEmptyTarget, audit_manifest};
 use crate::audit::event_codec::prepare_event;
 use crate::model::Event;
 use crate::mysql_storage::audit::{
-    AuditChainMismatch, AuditHead, EncodedEvent, EventColumns, decode_event_columns,
-    owned_genesis_event, require_owned_genesis,
+    AuditChainMismatch, AuditHead, Binding, EncodedEvent, EventColumns, ExpectedAuditBinding,
+    decode_event_columns, owned_genesis_event, require_owned_genesis,
 };
 use crate::redaction::Redactor;
 use anyhow::{Context, Result, anyhow, ensure};
@@ -200,27 +200,17 @@ async fn read_published_binding(
         .await
         .map_err(driver_error)?
         .context("MySQL owned publication singleton is absent")?;
-    let (found, bound_tenant, bound_namespace, seq, hash, payload_bytes): (
-        u16,
-        Option<String>,
-        Option<String>,
-        i64,
-        String,
-        u64,
-    ) = decode_row(row)?;
-    ensure!(
-        found == version
-            && bound_tenant.as_deref() == Some(tenant)
-            && bound_namespace.as_deref() == Some(namespace),
-        "MySQL owned publication binding mismatch"
-    );
-    ensure!(seq > 0, "MySQL owned publication head is empty");
-    crate::control::hash(&hash)?;
-    Ok(AuditHead {
-        seq,
-        hash,
-        payload_bytes,
-    })
+    let bound = Binding::decode(
+        row,
+        ExpectedAuditBinding::Owned {
+            version,
+            tenant,
+            namespace,
+        },
+    )?;
+    ensure!(bound.head.seq > 0, "MySQL owned publication head is empty");
+    crate::control::hash(&bound.head.hash)?;
+    Ok(bound.head)
 }
 
 /// Verify the entire history of a source that has just been published.
