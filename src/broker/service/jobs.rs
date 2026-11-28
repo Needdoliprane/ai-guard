@@ -40,7 +40,18 @@ mod retirement_audit_tests {
             jobs.job(Uuid::from_u128(id)).unwrap();
         }
         let first = jobs.retirement_audit_batch().unwrap();
+        let mut terminal_cursor = None;
+        assert_eq!(
+            jobs.legacy_terminal_recovery_batch(&mut terminal_cursor)
+                .unwrap(),
+            first
+        );
         let second = jobs.retirement_audit_batch().unwrap();
+        assert_eq!(
+            jobs.legacy_terminal_recovery_batch(&mut terminal_cursor)
+                .unwrap(),
+            second
+        );
         assert_eq!(first.len(), 4);
         assert_eq!(second.len(), 4);
         assert!(second.contains(&Uuid::from_u128(5)));
@@ -316,7 +327,6 @@ impl ProfileJobs {
     /// A bounded round-robin metadata sweep. A broken job cannot permanently
     /// keep later jobs behind its audit retries; this never creates a job.
     pub(super) fn retirement_audit_batch(&self) -> Result<Vec<Uuid>, BrokerErrorCodeV1> {
-        use std::ops::Bound::{Excluded, Unbounded};
         let jobs = self
             .jobs
             .lock()
@@ -325,6 +335,26 @@ impl ProfileJobs {
             .retirement_audit_cursor
             .lock()
             .map_err(|_| BrokerErrorCodeV1::Unavailable)?;
+        Ok(Self::known_operation_batch(&jobs, &mut cursor))
+    }
+
+    pub(super) fn legacy_terminal_recovery_batch(
+        &self,
+        cursor: &mut Option<Uuid>,
+    ) -> Result<Vec<Uuid>, BrokerErrorCodeV1> {
+        let jobs = self
+            .jobs
+            .lock()
+            .map_err(|_| BrokerErrorCodeV1::Unavailable)?;
+        Ok(Self::known_operation_batch(&jobs, cursor))
+    }
+
+    fn known_operation_batch(
+        jobs: &BTreeMap<Uuid, Arc<Job>>,
+        cursor: &mut Option<Uuid>,
+    ) -> Vec<Uuid> {
+        use std::ops::Bound::{Excluded, Unbounded};
+
         let after = cursor.unwrap_or(Uuid::nil());
         let batch = jobs
             .range((Excluded(after), Unbounded))
@@ -335,7 +365,7 @@ impl ProfileJobs {
         if let Some(last) = batch.last() {
             *cursor = Some(*last);
         }
-        Ok(batch)
+        batch
     }
     pub(super) fn invalidate_all(&self) {
         if let Ok(jobs) = self.jobs.lock() {

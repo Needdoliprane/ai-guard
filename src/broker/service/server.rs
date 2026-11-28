@@ -337,6 +337,14 @@ struct Service {
     fenced: Arc<AtomicBool>,
 }
 
+/// Writer retained during the initial Legacy STOP restore, before requests
+/// can open additional profiles.
+struct LegacyTerminalRecoveryProfile {
+    jobs: Arc<ProfileJobs>,
+    writer: StopWriterClient,
+    after: Option<Uuid>,
+}
+
 // Process-local task ownership grants no enforcer or journal capability.
 // Signals need their own bounded registry: the Full job they inhibit may
 // already occupy the last run slot. Both registries retain their own results.
@@ -706,7 +714,7 @@ pub async fn serve_selected_owned(
     let executable =
         std::env::current_exe().map_err(|_| anyhow!("broker executable is unavailable"))?;
     let mut material = early_material.map(Arc::new);
-    let (enforcer, stop_enforcer, mut fresh_guardian) = match selection {
+    let (enforcer, stop_enforcer, mut fresh_guardian) = match &selection {
         ServiceEnforcerSelectionV1::Legacy => {
             let client = EnforcerClient::connect_or_spawn_legacy_with_budget(
                 &root,
@@ -765,7 +773,7 @@ pub async fn serve_selected_owned(
             .await??;
             let (client, owner) = EnforcerFullClientV3::spawn_fresh_with_budget(
                 &root,
-                &role_name,
+                role_name,
                 &executable,
                 registry.data.installation_id,
                 registry.data.max_enforcer_slots,
@@ -778,7 +786,7 @@ pub async fn serve_selected_owned(
         }
         ServiceEnforcerSelectionV1::Full3Existing { role_name } => {
             let role = root
-                .persistent_child(&role_name, false)?
+                .persistent_child(role_name, false)?
                 .ok_or_else(|| anyhow!("sealed enforcer role is unavailable"))?;
             let client =
                 EnforcerFullClientV3::connect_existing(&role, registry.data.max_enforcer_slots)
@@ -839,7 +847,9 @@ pub async fn serve_selected_owned(
         stopping: Arc::new(AtomicBool::new(false)),
         fenced: Arc::new(AtomicBool::new(recovery_only)),
     });
-    service.restore_stops().await;
+    let recovery_fence = service.restore_stops().await;
+    let legacy_terminal_profiles =
+        service.capture_legacy_terminal_recovery_profiles(&selection, recovery_fence);
     let listener_root = if recovery_only {
         lease.listener_root_existing()?
     } else {
@@ -925,7 +935,9 @@ pub async fn serve_selected_owned(
     // never as a substitute for an unauthenticated user's request.
     let reconciler_service = Arc::clone(&service);
     let reconciler = tokio::spawn(async move {
-        reconciler_service.reconcile_loop().await;
+        reconciler_service
+            .reconcile_loop_with_legacy_recovery(legacy_terminal_profiles)
+            .await;
     });
     let operator_shutdown = loop {
         tokio::select! {
@@ -2678,7 +2690,8 @@ impl Service {
 
     /// No authentication backend is needed to retain a previously authorized
     /// stop. This phase never emits a decision, admission, claim, copy or start.
-    async fn restore_stops(&self) {
+    /// A returned generation identifies the STOP guardian's BeginRecovery ACK.
+    async fn restore_stops(&self) -> Option<u64> {
         let mut restored = 0_usize;
         if let Ok(ExecutionEnforcerV1::Legacy(client)) = self.full_enforcer() {
             // Only the actual spawning caller can hold this native-correlated
@@ -2699,7 +2712,7 @@ impl Service {
                     // No recovery reader/scan is opened on this genuine first
                     // installation. Later profile creation uses its normal
                     // durable writer; this never reopens a recovery gate.
-                    return;
+                    return None;
                 }
             }
             // Existing/cold is already fenced by its child constructor. A
@@ -2713,18 +2726,22 @@ impl Service {
                 eprintln!(
                     "broker recovery: Legacy native admission fence unavailable; new starts remain refused"
                 );
-                return;
+                return None;
             }
         }
-        if let Some(stop) = &self.stop_enforcer
-            && stop.begin_recovery().await.is_err()
-        {
-            self.fenced.store(true, Ordering::SeqCst);
-            eprintln!(
-                "broker recovery: native admission fence is unavailable; source transfer refused"
-            );
-            return;
-        }
+        let recovery_fence = match &self.stop_enforcer {
+            Some(stop) => match stop.begin_recovery().await {
+                Ok(generation) => Some(generation),
+                Err(_) => {
+                    self.fenced.store(true, Ordering::SeqCst);
+                    eprintln!(
+                        "broker recovery: native admission fence is unavailable; source transfer refused"
+                    );
+                    return None;
+                }
+            },
+            None => None,
+        };
         if !self.material.complete {
             self.fenced.store(true, Ordering::SeqCst);
             if let Some(stop) = &self.stop_enforcer {
@@ -2791,13 +2808,13 @@ impl Service {
             }
             // This explicitly restricted epoch cannot promote into Full.
             self.fenced.store(true, Ordering::SeqCst);
-            return;
+            return recovery_fence;
         }
         let status = match self.full_enforcer() {
             Ok(enforcer) => enforcer.status().await,
             Err(_) => {
                 self.fenced.store(true, Ordering::SeqCst);
-                return;
+                return None;
             }
         };
         match status {
@@ -2809,6 +2826,37 @@ impl Service {
                 );
             }
         }
+        None
+    }
+
+    /// Snapshot startup ownership before the listener can open more Writers.
+    fn capture_legacy_terminal_recovery_profiles(
+        &self,
+        selection: &ServiceEnforcerSelectionV1,
+        recovery_fence: Option<u64>,
+    ) -> Vec<LegacyTerminalRecoveryProfile> {
+        if !matches!(
+            selection,
+            ServiceEnforcerSelectionV1::Recovery { role_name: None }
+        ) || recovery_fence.is_none()
+        {
+            return Vec::new();
+        }
+        self.profiles
+            .values()
+            .filter_map(|jobs| {
+                let writer = jobs
+                    .writer
+                    .get()
+                    .filter(|capabilities| capabilities.is_stop_only())?
+                    .stops();
+                Some(LegacyTerminalRecoveryProfile {
+                    jobs: Arc::clone(jobs),
+                    writer,
+                    after: None,
+                })
+            })
+            .collect()
     }
 
     async fn restore_profile(
@@ -3197,7 +3245,15 @@ impl Service {
         Ok((restored, partial))
     }
 
+    #[cfg(test)]
     async fn reconcile_loop(self: Arc<Self>) {
+        self.reconcile_loop_with_legacy_recovery(Vec::new()).await;
+    }
+
+    async fn reconcile_loop_with_legacy_recovery(
+        self: Arc<Self>,
+        mut legacy_terminal_profiles: Vec<LegacyTerminalRecoveryProfile>,
+    ) {
         let mut interval = tokio::time::interval(Duration::from_secs(5));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
@@ -3212,6 +3268,10 @@ impl Service {
             // starts are fenced or the writer has only its STOP facade.
             if self.validate_registry().await.is_ok() {
                 self.reconcile_retirement_audit().await;
+            }
+            if let Some(profile) = legacy_terminal_profiles.first_mut() {
+                self.reconcile_legacy_terminal_profile(profile).await;
+                legacy_terminal_profiles.rotate_left(1);
             }
             // A recovery fence allows inspection/cancellation but never a new
             // business start, including an autonomous reconciliation.
@@ -3327,6 +3387,52 @@ impl Service {
                 }
             }
         }
+    }
+
+    async fn reconcile_legacy_terminal_profile(&self, profile: &mut LegacyTerminalRecoveryProfile) {
+        let writer = &profile.writer;
+        if self.stopping.load(Ordering::Acquire)
+            || !profile.jobs.admit_reconcile(writer.outstanding())
+        {
+            return;
+        }
+        let Ok(operations) = profile
+            .jobs
+            .legacy_terminal_recovery_batch(&mut profile.after)
+        else {
+            return;
+        };
+        let scope = writer.scope();
+        let Ok(expected_scope) = canonical(scope) else {
+            return;
+        };
+        let expected_scope = expected_scope.as_slice();
+        let mut attempts =
+            futures_util::stream::iter(operations.into_iter().map(|operation| async move {
+                let Ok(Some(snapshot)) = writer.recovery_status(operation).await else {
+                    return;
+                };
+                if snapshot.incomplete()
+                    || snapshot.operation_id() != operation
+                    || !canonical(snapshot.scope())
+                        .is_ok_and(|actual| actual.as_slice() == expected_scope)
+                {
+                    return;
+                }
+                let Some(ancestor) = snapshot
+                    .cancel_receipts()
+                    .last()
+                    .map(|stop| stop.head().clone())
+                else {
+                    return;
+                };
+                drop(snapshot);
+                let _ = self
+                    .reconcile_legacy_worker_terminal(scope, operation, &ancestor)
+                    .await;
+            }))
+            .buffer_unordered(self.registry.data.max_enforcer_slots.clamp(1, 4) as usize);
+        while attempts.next().await.is_some() {}
     }
 
     async fn reconcile_retirement_audit(self: &Arc<Self>) {

@@ -711,6 +711,21 @@ fn terminal_publication_stops(
     Ok(capabilities)
 }
 
+fn observed_terminal_fixture(
+    evidence: LegacyWorkerTerminalEvidenceV1,
+) -> Result<ObservedLegacyWorkerTerminal> {
+    let mut observation = synthetic_terminal_observation(&evidence)?;
+    observation.restart_count = Some(0);
+    let observed = ObservedLegacyWorkerTerminal {
+        validated: ValidatedLegacyWorkerTerminal { evidence },
+        observation,
+    };
+    observed
+        .validated
+        .validate_terminal_observation(observed.observation())?;
+    Ok(observed)
+}
+
 async fn stage_terminal_publication(
     root: &Path,
     config: &Path,
@@ -735,15 +750,7 @@ async fn stage_terminal_publication(
         .expect("one retained STOP writer");
     jobs.job(operation)?;
     service.profiles.insert(scope.profile_id().to_owned(), jobs);
-    let mut observation = synthetic_terminal_observation(&evidence)?;
-    observation.restart_count = Some(0);
-    let observed = ObservedLegacyWorkerTerminal {
-        validated: ValidatedLegacyWorkerTerminal { evidence },
-        observation,
-    };
-    observed
-        .validated
-        .validate_terminal_observation(observed.observation())?;
+    let observed = observed_terminal_fixture(evidence)?;
     let request = observed.terminal_mutation()?;
     let Ok(ReservedLegacyWorkerTerminalObservationV1::Appended(pending)) = writer
         .reserve_legacy_worker_terminal_observation(observed.validated.evidence, request)
@@ -752,6 +759,220 @@ async fn stage_terminal_publication(
         anyhow::bail!("test could not retain terminal observation");
     };
     Ok((service, writer, pending))
+}
+
+#[tokio::test]
+async fn legacy_terminal_tick_uses_complete_job_under_incomplete_global_inventory() -> Result<()> {
+    let seed = running_seed_for_cold_terminal_test().await;
+    let operation = seed.operation_id;
+    let scope = seed.scope();
+    let (mut service, pending) = {
+        let journal = open_recovery_journal(&seed.journal_root, scope)?;
+        let stops = StopJournal::from_full(&journal);
+        let evidence = stops.legacy_worker_terminal_evidence(operation, seed.cancel_id)?;
+        let service = read_only_service(seed.root(), seed.config(), &evidence)?;
+        let observed = observed_terminal_fixture(evidence)?;
+        let process = &observed.observation().process;
+        let inspect_path = seed.root().join("inspect.json");
+        let mut inspect: serde_json::Value = serde_json::from_slice(&fs::read(&inspect_path)?)?;
+        inspect["State"]["Status"] = json!("exited");
+        inspect["State"]["Running"] = json!(false);
+        inspect["State"]["FinishedAt"] = json!(process.finished_at.as_ref());
+        inspect["State"]["ExitCode"] = json!(process.exit_code);
+        fs::write(inspect_path, serde_json::to_vec(&inspect)?)?;
+
+        let request = observed.terminal_mutation()?;
+        let ReservedLegacyWorkerTerminalObservationV1::Appended(pending) = stops
+            .reserve_legacy_worker_terminal_observation(
+                &observed.validated.evidence,
+                request,
+                || {},
+            )?
+        else {
+            anyhow::bail!("fixture must retain its first terminal observation");
+        };
+        (service, pending)
+    };
+    let jobs = Arc::new(ProfileJobs::new());
+    service
+        .profiles
+        .insert(scope.profile_id().to_owned(), Arc::clone(&jobs));
+    let journals = service
+        .root
+        .persistent_child("journals", false)?
+        .context("fixture journals missing")?;
+    journals
+        .persistent_child("unconfigured-fixture-profile", true)?
+        .context("could not mark the global fixture inventory incomplete")?;
+
+    let (guardian, peer) = start_legacy_stop_guardian().await?;
+    service.stop_enforcer = Some(guardian.clone());
+    assert!(jobs.writer.get().is_none());
+    let generation = service
+        .restore_stops()
+        .await
+        .context("Legacy restore must obtain a BeginRecovery acknowledgement")?;
+    assert!(generation > 0);
+    let legacy = ServiceEnforcerSelectionV1::Recovery { role_name: None };
+    let mut captured = service.capture_legacy_terminal_recovery_profiles(&legacy, Some(generation));
+    let [profile] = captured.as_mut_slice() else {
+        anyhow::bail!("unsealed Legacy recovery must enroll the restored Writer");
+    };
+    assert!(Arc::ptr_eq(&profile.jobs, &jobs));
+    for selection in [
+        ServiceEnforcerSelectionV1::Recovery {
+            role_name: Some("enforcer-full3".into()),
+        },
+        ServiceEnforcerSelectionV1::Full3Existing {
+            role_name: "enforcer-full3".into(),
+        },
+    ] {
+        selection.validate()?;
+        assert!(
+            service
+                .capture_legacy_terminal_recovery_profiles(&selection, Some(generation))
+                .is_empty()
+        );
+    }
+    let status = guardian.status().await?;
+    assert!(status.recovery_fenced());
+    assert!(status.recovery_incomplete());
+
+    let capabilities = jobs
+        .writer
+        .get()
+        .context("restore must install its Writer")?;
+    assert!(capabilities.is_stop_only());
+    assert!(jobs.known(operation).is_some());
+    let writer = capabilities.stops();
+    let snapshot = writer
+        .recovery_status(operation)
+        .await?
+        .context("restored operation missing")?;
+    assert!(!snapshot.incomplete());
+    assert_eq!(snapshot.operation_id(), operation);
+    assert_eq!(canonical(snapshot.scope())?, canonical(scope)?);
+    assert_eq!(snapshot.head(), pending.head());
+    let stop = snapshot
+        .cancel_receipts()
+        .last()
+        .context("retained STOP missing")?;
+    assert_eq!(stop.head(), pending.stop().head());
+    assert_eq!(stop.command_id(), seed.cancel_id);
+    drop(snapshot);
+
+    // Pending is already exact. Reap the synthetic guardian before measuring
+    // the tick so the only possible new native reads would come from recovery.
+    drop(peer);
+    let calls_path = seed.root().join("calls");
+    let calls = fs::read(&calls_path)?;
+    let store = seed.store();
+    assert_eq!(
+        store.worker_quota(&QuotaPolicyV1::default())?.held_workers,
+        1
+    );
+    let reads = seed.worker_get_count();
+    let posts = seed.post_count();
+    service.reconcile_legacy_terminal_profile(profile).await;
+    assert_eq!(profile.after, Some(operation));
+    let confirmed = writer
+        .confirmed_legacy_worker_terminal_observation(operation, scope, pending.head())
+        .await?
+        .context("the tick must confirm the exact terminal observation")?;
+    pending.validate_response(confirmed.response())?;
+    assert_eq!(confirmed.head().revision(), pending.head().revision() + 1);
+    assert_eq!(confirmed.response().worker.state, WorkerStateV1::Terminal);
+    assert_eq!(
+        store.worker_quota(&QuotaPolicyV1::default())?.held_workers,
+        0
+    );
+    assert_eq!(store.worker_usage()?.len(), 1);
+
+    let store_head = store.head()?;
+    service.reconcile_legacy_terminal_profile(profile).await;
+    let cold = writer
+        .confirmed_legacy_worker_terminal_observation(operation, scope, pending.head())
+        .await?
+        .context("the next tick must preserve the terminal receipt")?;
+    assert_eq!(cold.head(), confirmed.head());
+    assert_eq!(
+        canonical(cold.response())?,
+        canonical(confirmed.response())?
+    );
+    assert_eq!(store.head()?, store_head);
+    assert_eq!(seed.worker_get_count(), reads + 1);
+    assert_eq!(seed.post_count(), posts + 1);
+    assert_eq!(fs::read(calls_path)?, calls);
+    Ok(())
+}
+
+#[tokio::test]
+async fn legacy_terminal_capture_refuses_late_writer_after_begin_recovery_failure() -> Result<()> {
+    let seed = running_seed_for_cold_terminal_test().await;
+    let scope = seed.scope();
+    let operation = seed.operation_id;
+    let mut service = {
+        let journal = open_recovery_journal(&seed.journal_root, scope)?;
+        let proof = StopJournal::from_full(&journal)
+            .legacy_worker_terminal_evidence(operation, seed.cancel_id)?;
+        read_only_service(seed.root(), seed.config(), &proof)?
+    };
+    let jobs = Arc::new(ProfileJobs::new());
+    service
+        .profiles
+        .insert(scope.profile_id().to_owned(), Arc::clone(&jobs));
+    let store = seed.store();
+    let head = store.head()?;
+    let reads = seed.worker_get_count();
+    let posts = seed.post_count();
+    let calls_path = seed.root().join("calls");
+    let calls = fs::read(&calls_path)?;
+
+    let (guardian, peer) = start_legacy_stop_guardian().await?;
+    service.stop_enforcer = Some(guardian);
+    // Context is established before the transport disappears. The production
+    // restore must see a failed BeginRecovery with an empty startup profile.
+    drop(peer);
+    let failed_fence =
+        tokio::time::timeout(Duration::from_secs(10), service.restore_stops()).await?;
+    assert!(failed_fence.is_none());
+    assert!(service.recovery_only());
+    assert!(jobs.writer.get().is_none());
+    let legacy = ServiceEnforcerSelectionV1::Recovery { role_name: None };
+    let captured = service.capture_legacy_terminal_recovery_profiles(&legacy, failed_fence);
+    assert!(captured.is_empty());
+
+    let late = service
+        .profile_writers(scope.profile_id(), scope, false)
+        .await?;
+    assert!(late.is_stop_only());
+    let snapshot = late
+        .stops()
+        .recovery_status(operation)
+        .await?
+        .context("late Writer must expose the verified operation")?;
+    assert!(!snapshot.incomplete());
+    assert_eq!(snapshot.operation_id(), operation);
+    assert_eq!(canonical(snapshot.scope())?, canonical(scope)?);
+    assert!(
+        snapshot
+            .cancel_receipts()
+            .iter()
+            .any(|stop| stop.command_id() == seed.cancel_id)
+    );
+    jobs.job(operation)?
+        .remember_cancel_ids(&[seed.cancel_id])?;
+    assert!(captured.is_empty());
+    assert!(
+        service
+            .capture_legacy_terminal_recovery_profiles(&legacy, failed_fence)
+            .is_empty()
+    );
+    assert_eq!(store.head()?, head);
+    assert_eq!(seed.worker_get_count(), reads);
+    assert_eq!(seed.post_count(), posts);
+    assert_eq!(fs::read(calls_path)?, calls);
+    Ok(())
 }
 
 #[tokio::test]
