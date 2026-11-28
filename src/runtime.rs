@@ -83,6 +83,7 @@ impl std::fmt::Debug for LegacyStartVeto {
 /// Neither this notification nor the transport establishes a worker's terminal state.
 pub struct PrearmedStartControl {
     guard: OwnedSpawnCheck,
+    spawn_generation: Option<GenerationSpawnGuard>,
     stop: tokio::sync::watch::Receiver<bool>,
     launch_profile: Option<Box<launch_profile::DockerLaunchProfileBindingV1>>,
     stdout_tap: Option<crate::provider_activity::StdoutTap>,
@@ -124,12 +125,26 @@ impl PrearmedStartControl {
     ) -> Self {
         Self {
             guard: Box::new(guard),
+            spawn_generation: None,
             stop,
             launch_profile: launch_profile.map(Box::new),
             stdout_tap: None,
             #[cfg(unix)]
             native_release,
         }
+    }
+    /// Keep the original job generation through the final check and the
+    /// actual local spawn. The guard must not re-enter this generation gate.
+    pub(crate) fn with_generation_fence(
+        mut self,
+        generation: &CancelGeneration,
+        expected: u64,
+    ) -> Self {
+        self.spawn_generation = Some(GenerationSpawnGuard {
+            generation: generation.clone(),
+            expected,
+        });
+        self
     }
     /// Forward the batch client stdout live to the activity collector, in
     /// addition to the unchanged bounded terminal capture. The tap neither
@@ -241,6 +256,7 @@ pub enum NetworkMode {
 #[derive(Clone, Copy, Debug)]
 pub enum ContainerPurpose {
     Import,
+    ImportVerification,
     Run,
     Export,
 }
@@ -252,6 +268,7 @@ pub struct ContainerSpec {
     pub argv: Vec<String>,
     pub network: NetworkMode,
     operation: Uuid,
+    read_only_workspace: bool,
     secret_env_file: Option<crate::control_fs::PrivateFile>,
     managed_names: Option<(String, String)>,
     security_preset: crate::control::SecurityPresetV1,
@@ -315,6 +332,7 @@ impl ContainerSpec {
             argv,
             network,
             operation,
+            read_only_workspace: false,
             secret_env_file: None,
             managed_names: None,
             security_preset: crate::control::SecurityPresetV1::FixedSandboxV2,
@@ -410,6 +428,31 @@ impl ContainerSpec {
 
     pub fn operation_id(&self) -> Uuid {
         self.operation
+    }
+    /// Named-only helper purposes need their own durable, typed start path.
+    /// The generic runtime entry points must reject them before emitting an
+    /// engine command, while pure argument construction and inspection remain
+    /// available to the authorization/recovery code.
+    pub(crate) fn ensure_generic_create_start_allowed(&self) -> Result<()> {
+        ensure!(
+            !matches!(self.purpose, ContainerPurpose::ImportVerification),
+            "ImportVerification requires its typed named authorization path"
+        );
+        Ok(())
+    }
+    /// Restrict a named ImportVerification helper to reading its retained
+    /// workspace volume. This does not grant permission to create or start it.
+    pub(crate) fn with_read_only_workspace_volume(mut self) -> Result<Self> {
+        ensure!(
+            matches!(self.purpose, ContainerPurpose::ImportVerification)
+                && self.network == NetworkMode::None
+                && self.managed_names.is_some()
+                && self.secret_env_file.is_none()
+                && self.egress_proxy_port.is_none(),
+            "read-only workspace access is reserved for a named, networkless ImportVerification helper"
+        );
+        self.read_only_workspace = true;
+        Ok(self)
     }
     /// Select an already admitted preset when reconstructing a historical
     /// instance. Legacy presets may be inspected, but cannot create or start.
@@ -521,6 +564,7 @@ impl ContainerSpec {
             self.session,
             match self.purpose {
                 ContainerPurpose::Import => "import",
+                ContainerPurpose::ImportVerification => "import_verification",
                 ContainerPurpose::Run => "run",
                 ContainerPurpose::Export => "export",
             },
@@ -538,6 +582,19 @@ impl ContainerSpec {
     }
     fn create_args_for(&self, runtime: RuntimeKind, bootstrap_stdin: bool) -> Result<Vec<String>> {
         self.require_current_creation_policy()?;
+        ensure!(
+            matches!(self.purpose, ContainerPurpose::ImportVerification)
+                == self.read_only_workspace,
+            "ImportVerification requires its read-only workspace mount"
+        );
+        if self.read_only_workspace {
+            ensure!(
+                self.network == NetworkMode::None
+                    && self.secret_env_file.is_none()
+                    && self.egress_proxy_port.is_none(),
+                "ImportVerification cannot use credentials or network access"
+            );
+        }
         let held = self.held_bootstrap_for(bootstrap_stdin)?;
         ensure!(
             held.is_none_or(|binding| binding.runtime == runtime),
@@ -572,6 +629,7 @@ impl ContainerSpec {
                 "agentsandbox.purpose={}",
                 match self.purpose {
                     ContainerPurpose::Import => "import",
+                    ContainerPurpose::ImportVerification => "import_verification",
                     ContainerPurpose::Run => "run",
                     ContainerPurpose::Export => "export",
                 }
@@ -610,7 +668,7 @@ impl ContainerSpec {
             "--env".into(),
             "LANG=C.UTF-8".into(),
             "--mount".into(),
-            format!("type=volume,source={},target=/workspace", self.volume()),
+            self.workspace_volume_mount(runtime),
             "--entrypoint".into(),
             self.argv[0].clone(),
         ];
@@ -651,6 +709,16 @@ impl ContainerSpec {
         args.extend(["--".into(), self.image.clone()]);
         args.extend(self.argv.iter().skip(1).cloned());
         Ok(args)
+    }
+    fn workspace_volume_mount(&self, runtime: RuntimeKind) -> String {
+        let mount = format!("type=volume,source={},target=/workspace", self.volume());
+        if !self.read_only_workspace {
+            return mount;
+        }
+        match runtime {
+            RuntimeKind::Docker => format!("{mount},readonly"),
+            RuntimeKind::Podman => format!("{mount},ro"),
+        }
     }
 }
 fn validate_managed_name(name: &str) -> Result<()> {
@@ -988,6 +1056,7 @@ fn spawn_prearmed_cli<'execution>(
     input: OwnedStartInput<'execution>,
     guard: impl FnOnce(&RuntimeAuthority, &OwnedContainerSnapshot) -> Result<()>,
     stop: &tokio::sync::watch::Receiver<bool>,
+    spawn_generation: Option<GenerationSpawnGuard>,
 ) -> Result<(tokio::process::Child, SpawnedPrearmedInput<'execution>)> {
     let target = created.handle.id();
     command.args(["start", "--attach"]);
@@ -1002,15 +1071,26 @@ fn spawn_prearmed_cli<'execution>(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    ensure_prearmed_live(stop).with_context(|| {
-        RuntimePrestartStageFailure::new(RuntimePrestartStage::StopBeforeSpawn, target)
-    })?;
+    let stop_failure =
+        || RuntimePrestartStageFailure::new(RuntimePrestartStage::StopBeforeSpawn, target);
     let guard_failure =
         || RuntimePrestartStageFailure::new(RuntimePrestartStage::GuardBeforeSpawn, target);
     let spawn_failure = || RuntimePrestartStageFailure::new(RuntimePrestartStage::Spawn, target);
-    // Keep the final trusted check adjacent to spawn.
-    guard(authority, created).with_context(guard_failure)?;
-    let mut child = command.spawn().with_context(spawn_failure)?;
+    let spawn = || {
+        ensure_prearmed_live(stop).with_context(stop_failure)?;
+        guard(authority, created).with_context(guard_failure)?;
+        // The independent guardian may publish STOP while the final check
+        // runs. Keep its latest notification adjacent to process creation.
+        ensure_prearmed_live(stop).with_context(stop_failure)?;
+        command.spawn().with_context(spawn_failure)
+    };
+    let mut child = match spawn_generation {
+        Some(fence) => fence
+            .generation
+            .with_current_generation(fence.expected, spawn)
+            .with_context(guard_failure)??,
+        None => spawn()?,
+    };
     let input = match input {
         OwnedStartInput::Historical(archive) => SpawnedPrearmedInput::Historical(archive),
         #[cfg(unix)]
@@ -1653,6 +1733,8 @@ impl Runtime {
         F: FnMut(RuntimeState) -> Fut,
         Fut: Future<Output = Result<()>>,
     {
+        spec.ensure_generic_create_start_allowed()
+            .map_err(AttemptFailure::unowned)?;
         if spec.security_preset.is_interactive() {
             return Err(AttemptFailure::unowned(anyhow::anyhow!(
                 "interactive execution requires ManagedRuntime and a durable admission; no engine command was emitted"
@@ -2224,6 +2306,7 @@ impl Runtime {
             })?;
         let PrearmedStartControl {
             guard,
+            spawn_generation,
             mut stop,
             launch_profile,
             stdout_tap,
@@ -2248,6 +2331,7 @@ impl Runtime {
                 )
             },
             &stop,
+            spawn_generation,
         )?;
         let input = match input {
             SpawnedPrearmedInput::Historical(archive) => archive,
@@ -3179,6 +3263,7 @@ mod capture_error_tests {
                     Ok(())
                 },
                 &stop,
+                None,
             ) else {
                 bail!("the nonexistent test program was unexpectedly spawned");
             };
@@ -3189,6 +3274,59 @@ mod capture_error_tests {
         };
         assert_eq!(stage(expected)?, RuntimePrestartStage::Spawn);
         assert_eq!(stage(&different)?, RuntimePrestartStage::GuardBeforeSpawn);
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn prearmed_spawn_obeys_generation_and_stop_at_the_final_check() -> Result<()> {
+        use crate::broker::journal::retirement_live_fixture::live_fixture;
+
+        let fixture = live_fixture();
+        let target = fixture.registration.prospective()?;
+        let temporary = tempfile::tempdir()?;
+        let missing_program = temporary.path().join("no-runtime-program");
+        let generation = CancelGeneration::new();
+        let expected = generation.current();
+        let (owner, stop) = tokio::sync::watch::channel(false);
+        let refuse = |expected, guard: &mut dyn FnMut()| {
+            let Err(error) = spawn_prearmed_cli(
+                Command::new(&missing_program),
+                target.authority(),
+                target.owned(),
+                OwnedStartInput::Historical(None),
+                |_, _| {
+                    guard();
+                    Ok(())
+                },
+                &stop,
+                Some(GenerationSpawnGuard {
+                    generation: generation.clone(),
+                    expected,
+                }),
+            ) else {
+                bail!("the nonexistent test program was unexpectedly spawned");
+            };
+            Ok(error
+                .downcast_ref::<RuntimePrestartStageFailure>()
+                .context("expected the prestart stage")?
+                .stage())
+        };
+
+        assert_eq!(refuse(expected, &mut || {})?, RuntimePrestartStage::Spawn);
+        let replacement = generation.invalidate();
+        assert_eq!(
+            refuse(expected, &mut || panic!(
+                "stale generation reached the guard"
+            ))?,
+            RuntimePrestartStage::GuardBeforeSpawn
+        );
+        assert_eq!(
+            refuse(replacement, &mut || {
+                owner.send_replace(true);
+            })?,
+            RuntimePrestartStage::StopBeforeSpawn
+        );
         Ok(())
     }
 

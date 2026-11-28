@@ -1737,6 +1737,7 @@ impl ManagedRuntime {
         bootstrap_stdin: bool,
         spawn_guard: Option<GenerationSpawnGuard>,
     ) -> Result<ContainerHandle> {
+        spec.ensure_generic_create_start_allowed()?;
         spec.require_current_creation_policy()?;
         ensure!(
             spec.managed_names.is_some(),
@@ -2087,6 +2088,7 @@ impl ManagedRuntime {
         F: FnMut(ContainerObservation) -> Fut,
         Fut: Future<Output = Result<()>>,
     {
+        spec.ensure_generic_create_start_allowed()?;
         ensure!(
             duration.is_none() || self.binding.docker_launch_profile.is_none(),
             "strict Docker start profile requires the prearmed start port"
@@ -3047,6 +3049,7 @@ fn validate_configuration_for(
     let config = facts.config;
     let purpose = match spec.purpose {
         ContainerPurpose::Import => "import",
+        ContainerPurpose::ImportVerification => "import_verification",
         ContainerPurpose::Run => "run",
         ContainerPurpose::Export => "export",
     };
@@ -3132,7 +3135,8 @@ fn validate_configuration_for(
     for mount in facts.mounts {
         match (mount.kind.as_str(), mount.destination.as_str()) {
             ("volume", "/workspace")
-                if mount.name.as_deref() == Some(spec.volume().as_str()) && mount.rw =>
+                if mount.name.as_deref() == Some(spec.volume().as_str())
+                    && mount.rw == !spec.read_only_workspace =>
             {
                 workspaces += 1
             }
@@ -3207,8 +3211,125 @@ mod log_policy_tests {
         )
         .unwrap()
     }
+    fn named_import_verification_spec() -> ContainerSpec {
+        spec(ContainerPurpose::ImportVerification)
+            .with_managed_names(
+                "aig-parent-h-0123456789abcdef0123456789abcdef",
+                "aig-parent-work",
+            )
+            .unwrap()
+            .with_read_only_workspace_volume()
+            .unwrap()
+    }
     fn bytes(value: &Value) -> Vec<u8> {
         serde_json::to_vec(value).unwrap()
+    }
+
+    #[test]
+    fn named_import_verification_args_mount_exact_workspace_read_only_for_both_engines() {
+        let verification = named_import_verification_spec();
+        let docker = verification.create_args(RuntimeKind::Docker).unwrap();
+        assert!(
+            docker.iter().any(|arg| {
+                arg == &format!(
+                    "type=volume,source={},target=/workspace,readonly",
+                    verification.volume()
+                )
+            }),
+            "Docker mount must be explicitly read-only"
+        );
+        assert!(docker.windows(2).any(|pair| pair == ["--network", "none"]));
+        assert!(!docker.iter().any(|arg| arg == "--env-file"));
+        assert!(!docker.iter().any(|arg| arg == "--interactive"));
+
+        let podman = verification.create_args(RuntimeKind::Podman).unwrap();
+        assert!(
+            podman.iter().any(|arg| {
+                arg == &format!(
+                    "type=volume,source={},target=/workspace,ro",
+                    verification.volume()
+                )
+            }),
+            "Podman mount must be explicitly read-only"
+        );
+        assert!(podman.windows(2).any(|pair| pair == ["--network", "none"]));
+        assert!(!podman.iter().any(|arg| arg == "--env-file"));
+        assert!(!podman.iter().any(|arg| arg == "--interactive"));
+    }
+
+    #[test]
+    fn named_import_verification_inspection_rejects_writable_or_extra_workspace_mounts() {
+        let verification = named_import_verification_spec();
+        let mut observed = facts();
+        observed["Config"]["Labels"] = json!({
+            "agentsandbox.session": verification.session,
+            "agentsandbox.operation": verification.operation_id(),
+            "agentsandbox.purpose": "import_verification",
+        });
+        observed["HostConfig"]["Tmpfs"] = json!({
+            "/tmp": "rw,nosuid,nodev,noexec,size=256m,mode=1777",
+            "/home/agent": "rw,nosuid,nodev,size=64m,uid=1000,gid=1000,mode=700",
+        });
+        observed["Mounts"] = json!([{
+            "Type": "volume",
+            "Name": verification.volume(),
+            "Destination": "/workspace",
+            "RW": false,
+        }]);
+        validate_configuration(&verification, &bytes(&observed), RuntimeKind::Docker).unwrap();
+
+        let mut podman = observed.clone();
+        podman["HostConfig"]["Tmpfs"] = json!({
+            "/tmp": "rw,nosuid,nodev,noexec,size=256m,mode=1777,rprivate,tmpcopyup",
+            "/home/agent": "size=64m,mode=0700,U,nosuid,nodev,rprivate",
+        });
+        podman["HostConfig"]["CapDrop"] = json!(["CAP_CHOWN", "CAP_DAC_OVERRIDE"]);
+        podman["EffectiveCaps"] = json!(null);
+        podman["BoundingCaps"] = json!(null);
+        validate_configuration(&verification, &bytes(&podman), RuntimeKind::Podman).unwrap();
+
+        observed["Mounts"][0]["RW"] = json!(true);
+        assert!(
+            validate_configuration(&verification, &bytes(&observed), RuntimeKind::Docker).is_err()
+        );
+        observed["Mounts"][0]["RW"] = json!(false);
+        observed["Mounts"].as_array_mut().unwrap().push(json!({
+            "Type": "volume",
+            "Name": verification.volume(),
+            "Destination": "/workspace",
+            "RW": false,
+        }));
+        assert!(
+            validate_configuration(&verification, &bytes(&observed), RuntimeKind::Docker).is_err()
+        );
+    }
+
+    #[test]
+    fn generic_effect_gate_rejects_named_verification_but_keeps_ordinary_purposes() {
+        let verification = named_import_verification_spec();
+        assert!(verification.ensure_generic_create_start_allowed().is_err());
+
+        for purpose in [
+            ContainerPurpose::Import,
+            ContainerPurpose::Run,
+            ContainerPurpose::Export,
+        ] {
+            assert!(spec(purpose).ensure_generic_create_start_allowed().is_ok());
+        }
+    }
+
+    #[test]
+    fn generic_import_mount_arguments_remain_byte_for_byte_unchanged() {
+        let import = spec(ContainerPurpose::Import);
+        let args = import.create_args(RuntimeKind::Docker).unwrap();
+        assert!(args.iter().any(|arg| {
+            arg == &format!("type=volume,source={},target=/workspace", import.volume())
+        }));
+        assert!(
+            !args
+                .iter()
+                .any(|arg| arg.ends_with(",readonly") || arg.ends_with(",ro"))
+        );
     }
 
     #[test]
