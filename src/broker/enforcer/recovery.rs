@@ -2096,6 +2096,7 @@ impl EnforcerStopClient {
         expected_epoch: Option<Uuid>,
     ) -> Result<(StopConnection, String), OpenFailure> {
         let root = &self.0.root;
+        let v3 = self.0.protocol == StopProtocol::V3;
         let ((endpoint, _endpoints, binding), mut stream, handshake_deadline) = if let Some(epoch) =
             expected_epoch
         {
@@ -2106,19 +2107,18 @@ impl EnforcerStopClient {
             // The checked connector includes synchronous inode and peer
             // checks around the bounded Unix connect. Keep that existing
             // operation together off the latch reader's async task.
-            let (prepared, stream) = tokio::task::spawn_blocking(move || {
+            tokio::task::spawn_blocking(move || {
                 let prepared = prepare_stop_endpoint(&root, &affinity, key, Some(epoch))?;
+                let deadline = v3.then(|| Instant::now() + recovery_v3::HANDSHAKE_WINDOW);
                 let (endpoint, endpoints, _) = &prepared;
                 let stream = driver.block_on(connect_stop_endpoint(endpoint, endpoints))?;
-                Ok::<_, OpenFailure>((prepared, stream))
+                Ok::<_, OpenFailure>((prepared, stream, deadline))
             })
             .await
-            .map_err(|_| OpenFailure::Other(EnforcerError::Unavailable))??;
-            (prepared, stream, None)
+            .map_err(|_| OpenFailure::Other(EnforcerError::Unavailable))??
         } else {
             let prepared = prepare_stop_endpoint(root, &self.0.affinity, self.0.capability, None)?;
-            let deadline = (self.0.protocol == StopProtocol::V3)
-                .then(|| Instant::now() + recovery_v3::HANDSHAKE_WINDOW);
+            let deadline = v3.then(|| Instant::now() + recovery_v3::HANDSHAKE_WINDOW);
             let (endpoint, endpoints, _) = &prepared;
             let stream = connect_stop_endpoint(endpoint, endpoints).await?;
             (prepared, stream, deadline)
@@ -3224,6 +3224,97 @@ mod tests {
             None,
             None,
         ))
+    }
+
+    #[tokio::test]
+    async fn pinned_stop3_open_authenticates_without_beginning_recovery() {
+        let files = tempfile::Builder::new()
+            .prefix("ag-")
+            .permissions(std::fs::Permissions::from_mode(0o700))
+            .tempdir_in("/tmp")
+            .unwrap();
+        let parent = Directory::open_existing(&files.path().canonicalize().unwrap()).unwrap();
+        let ledger = super::super::ledger::RetirementLedger::initialize_new(
+            parent.create_enforcer_root("role").unwrap(),
+            Uuid::new_v4(),
+        )
+        .unwrap();
+        let lease = ledger.lease();
+        let root = lease.ledger_root().clone();
+        let capability = capability(&root, true).unwrap();
+        let listener = PrivateListener::bind_new(&lease.listener_root().unwrap()).unwrap();
+        let epoch = listener.endpoint().epoch();
+        let binding = lease.root_binding(listener.endpoint()).unwrap();
+        let mut state = RecoveryState::new(
+            epoch,
+            8,
+            capability,
+            binding.clone(),
+            None,
+            Some(lease.clone()),
+        );
+        state
+            .retain_transport_v3(&root, listener.endpoint())
+            .unwrap();
+        lease.publish_endpoint(listener.endpoint()).unwrap();
+        let state = Arc::new(state);
+        let ledger_identity =
+            super::super::execution::classify_existing_sealed_namespace(&root).unwrap();
+        // The regular constructor starts the recovery monitor and sends BeginRecovery.
+        let client = EnforcerStopClient(Arc::new(StopClient {
+            root,
+            executable: PathBuf::from("/unused-stop3-test-helper"),
+            max_slots: 8,
+            max_recovery_stop_owners: 0,
+            capability,
+            protocol: StopProtocol::V3,
+            affinity: StopAffinity::ExistingFull3(ledger_identity),
+            cache: Mutex::new(StopCache::default()),
+            changed: Arc::new(tokio::sync::Notify::new()),
+            watch_failed: AtomicBool::new(false),
+            attempts: Arc::new(tokio::sync::Semaphore::new(MAX_PENDING_ATTEMPTS)),
+            observed_watch_epoch: Mutex::new(None),
+            open_barrier: Mutex::new(None),
+            observed_epochs: Mutex::new(Vec::new()),
+        }));
+        let wrong_epoch = Uuid::new_v4();
+        assert!(matches!(
+            tokio::time::timeout(IO_TIMEOUT * 2, client.open_with_binding(Some(wrong_epoch)))
+                .await
+                .unwrap(),
+            Err(OpenFailure::Other(EnforcerError::Conflict))
+        ));
+        assert_eq!(state.admitted.recovery_generation(), None);
+        let server_state = Arc::clone(&state);
+        let server = tokio::spawn(async move {
+            let stream = listener.accept_checked().await?;
+            serve_connection(stream, server_state).await
+        });
+
+        let opened = tokio::time::timeout(IO_TIMEOUT * 3, client.open_with_binding(Some(epoch)))
+            .await
+            .expect("pinned STOP handshake timed out");
+        let Ok((connection, observed_binding)) = opened else {
+            panic!("pinned STOP handshake failed");
+        };
+        assert!(connection.v3.is_some(), "pinned STOP handshake must use V3");
+        assert_eq!(connection.epoch, epoch);
+        assert_eq!(observed_binding, binding);
+        drop(connection);
+
+        // Closing after Grant leaves the server waiting for its first command.
+        assert!(
+            tokio::time::timeout(IO_TIMEOUT, server)
+                .await
+                .unwrap()
+                .unwrap()
+                .is_err()
+        );
+        assert_eq!(state.admitted.recovery_generation(), None);
+        let cache = client.0.cache.lock().unwrap();
+        assert_eq!(cache.epoch, None);
+        assert_eq!(cache.observation_version, 0);
+        assert!(cache.entries.is_empty());
     }
 
     #[tokio::test]
