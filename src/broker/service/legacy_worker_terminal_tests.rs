@@ -403,210 +403,238 @@ async fn legacy_terminal_publication_distinguishes_exact_parent_from_possible_re
 #[tokio::test]
 async fn legacy_terminal_publication_replays_a_lost_core_reply_with_one_durable_effect()
 -> Result<()> {
-    async fn reopen_writer(
-        service: &mut Service,
-        journal_root: &Path,
-        scope: &JournalScopeV1,
-    ) -> Result<()> {
-        use crate::broker::journal::JournalError;
+    #[derive(Clone, Copy, Debug)]
+    enum Phase {
+        Prepare,
+        EnterGuard,
+        ConcurrentRecovery,
+        Cancel,
+        PendingAfterCut,
+        ReopenForReplay,
+        ReplayPreflight,
+        Replay,
+        ReopenForAck,
+        ColdAck,
+    }
+    let phase = std::cell::Cell::new(Phase::Prepare);
+    let result: Result<()> = async {
+        async fn reopen_writer(
+            service: &mut Service,
+            journal_root: &Path,
+            scope: &JournalScopeV1,
+        ) -> Result<()> {
+            use crate::broker::journal::JournalError;
 
-        service.profiles.remove(scope.profile_id());
-        let reopened = tokio::time::timeout(Duration::from_secs(10), async {
-            loop {
-                match terminal_publication_stops(journal_root, scope) {
-                    Err(error)
-                        if error.downcast_ref::<JournalError>() == Some(&JournalError::Busy) =>
-                    {
-                        tokio::time::sleep(Duration::from_millis(10)).await;
+            service.profiles.remove(scope.profile_id());
+            let reopened = tokio::time::timeout(Duration::from_secs(10), async {
+                loop {
+                    match terminal_publication_stops(journal_root, scope) {
+                        Err(error)
+                            if error.downcast_ref::<JournalError>()
+                                == Some(&JournalError::Busy) =>
+                        {
+                            tokio::time::sleep(Duration::from_millis(10)).await;
+                        }
+                        result => break result,
                     }
-                    result => break result,
                 }
-            }
-        })
-        .await??;
-        let jobs = Arc::new(ProfileJobs::new());
-        jobs.writer.set(reopened).expect("one reopened STOP writer");
-        service.profiles.insert(scope.profile_id().to_owned(), jobs);
+            })
+            .await??;
+            let jobs = Arc::new(ProfileJobs::new());
+            jobs.writer.set(reopened).expect("one reopened STOP writer");
+            service.profiles.insert(scope.profile_id().to_owned(), jobs);
+            Ok(())
+        }
+
+        let seed = running_seed_for_cold_terminal_test().await;
+        let operation = seed.operation_id;
+        let scope = seed.scope();
+        let (mut service, writer, pending) = stage_terminal_publication(
+            seed.root(),
+            seed.config(),
+            &seed.journal_root,
+            scope,
+            operation,
+            seed.cancel_id,
+        )
+        .await?;
+        let store = seed.store();
+        let before = store.head()?;
+        let parent = store
+            .worker(&seed.worker_id)?
+            .context("fixture worker missing")?;
+        assert_eq!(
+            store.worker_quota(&QuotaPolicyV1::default())?.held_workers,
+            1
+        );
+        assert!(store.worker_usage()?.is_empty());
+        let reads = seed.worker_get_count();
+        let posts = seed.post_count();
+        let calls_path = seed.root().join("calls");
+        let calls = fs::read(&calls_path)?;
+
+        let jobs = service.profile_jobs(scope.profile_id())?;
+        let job = jobs.known(operation).context("retained Job missing")?;
+        let entered = Arc::new(Notify::new());
+        let resume = Arc::new(Notify::new());
+        let first = TERMINAL_RECOVERY_PAUSE.scope(
+            (Arc::clone(&entered), Arc::clone(&resume)),
+            service.reconcile_legacy_worker_terminal(scope, operation, pending.head()),
+        );
+        let concurrent = async {
+            tokio::time::timeout(Duration::from_secs(10), entered.notified()).await?;
+            phase.set(Phase::ConcurrentRecovery);
+            assert!(!job.is_running());
+            assert!(matches!(
+                tokio::time::timeout(
+                    Duration::from_secs(5),
+                    service.reconcile_legacy_worker_terminal(scope, operation, pending.head()),
+                )
+                .await?,
+                Err(BrokerErrorCodeV1::Busy)
+            ));
+            assert_eq!(seed.worker_get_count(), reads);
+            assert_eq!(seed.post_count(), posts);
+            assert_eq!(fs::read(&calls_path)?, calls);
+
+            phase.set(Phase::Cancel);
+            // This fixture has no guardian. Cancel must publish its local receipt
+            // while recovery holds the Job gate, then report failed delivery.
+            let command = Uuid::new_v4();
+            let generation = job.cancel.current();
+            let stop_head = tokio::time::timeout(Duration::from_secs(5), async {
+                assert!(matches!(
+                    service
+                        .cancel(writer.clone(), Arc::clone(&jobs), operation, command)
+                        .await,
+                    Err(BrokerErrorCodeV1::NeedsReconciliation)
+                ));
+                let stop = writer
+                    .cancel_stop_projection(operation, command)
+                    .await?
+                    .context("the STOP must be durable while terminal recovery is paused")?;
+                assert_eq!(stop.operation_id(), operation);
+                assert_eq!(canonical(stop.scope())?, canonical(scope)?);
+                assert_eq!(stop.receipt().command_id(), command);
+                assert_eq!(
+                    stop.receipt().head().revision(),
+                    pending.head().revision() + 1
+                );
+                assert!(job.has_acknowledged_cancel(command)?);
+                assert!(job.cancel.current() > generation);
+                Ok::<_, anyhow::Error>(stop.receipt().head().clone())
+            })
+            .await??;
+            resume.notify_one();
+            Ok::<_, anyhow::Error>(stop_head)
+        };
+
+        seed.arm_transition_response_cut_for_test();
+        assert!(seed.transition_response_cut_pending_for_test());
+        phase.set(Phase::EnterGuard);
+        let ((), later_stop_head) = tokio::try_join!(
+            async {
+                assert!(matches!(
+                    first.await,
+                    Err(BrokerErrorCodeV1::NeedsReconciliation)
+                ));
+                Ok::<(), anyhow::Error>(())
+            },
+            concurrent
+        )?;
+        drop(jobs);
+        phase.set(Phase::PendingAfterCut);
+        assert!(
+            !seed.transition_response_cut_pending_for_test(),
+            "the successful transition handler must consume the response cut"
+        );
+        assert_eq!(seed.worker_get_count(), reads + 1);
+        assert_eq!(seed.post_count(), posts + 1);
+        let core_head = store.head()?;
+        assert_ne!(core_head, before);
+        let terminal = store
+            .worker(&seed.worker_id)?
+            .context("terminal Worker missing")?;
+        assert_eq!(terminal.state, WorkerStateV1::Terminal);
+        assert_eq!(terminal.revision, parent.revision + 1);
+        assert_eq!(terminal.attempt, parent.attempt);
+        assert!(!terminal.quota_held);
+        let quota = store.worker_quota(&QuotaPolicyV1::default())?;
+        assert_eq!(quota.held_workers, 0);
+        let usage = store.worker_usage()?;
+        assert_eq!(usage.len(), 1);
+        assert_eq!(
+            usage[0].terminal_observation_id,
+            pending.request().operation_id
+        );
+        assert!(!usage[0].billable);
+        let after_cut = writer
+            .legacy_worker_terminal_observation(operation)
+            .await?
+            .context("the lost response must leave the exact pending request")?;
+        assert_eq!(after_cut.head(), &later_stop_head);
+        assert_eq!(after_cut.stop().command_id(), seed.cancel_id);
+        assert_eq!(
+            canonical(after_cut.request())?,
+            canonical(pending.request())?
+        );
+
+        drop(writer);
+        phase.set(Phase::ReopenForReplay);
+        reopen_writer(&mut service, &seed.journal_root, scope).await?;
+        phase.set(Phase::ReplayPreflight);
+        assert!(matches!(
+            service
+                .reconcile_legacy_worker_terminal(scope, operation, pending.head())
+                .await,
+            Err(BrokerErrorCodeV1::NeedsReconciliation)
+        ));
+        let jobs = service.profile_jobs(scope.profile_id())?;
+        assert!(jobs.known(operation).is_none());
+        assert_eq!(seed.worker_get_count(), reads + 1);
+        assert_eq!(seed.post_count(), posts + 1);
+        jobs.job(operation)?;
+        drop(jobs);
+        phase.set(Phase::Replay);
+        let confirmed = service
+            .reconcile_legacy_worker_terminal(scope, operation, pending.head())
+            .await?;
+        assert_eq!(confirmed.head().revision(), later_stop_head.revision() + 1);
+        pending.validate_response(confirmed.response())?;
+        assert_eq!(
+            canonical(&confirmed.response().worker)?,
+            canonical(&terminal)?
+        );
+        assert_eq!(seed.worker_get_count(), reads + 2);
+        assert_eq!(seed.post_count(), posts + 2);
+        assert_eq!(store.head()?, core_head);
+        assert_eq!(
+            canonical(&store.worker_quota(&QuotaPolicyV1::default())?)?,
+            canonical(&quota)?
+        );
+        assert_eq!(canonical(&store.worker_usage()?)?, canonical(&usage)?);
+
+        phase.set(Phase::ReopenForAck);
+        reopen_writer(&mut service, &seed.journal_root, scope).await?;
+        phase.set(Phase::ColdAck);
+        let _occupied_execution = service.execution.try_acquire()?;
+        let cold = service
+            .reconcile_legacy_worker_terminal(scope, operation, pending.head())
+            .await?;
+        assert_eq!(cold.head(), confirmed.head());
+        assert_eq!(
+            canonical(cold.response())?,
+            canonical(confirmed.response())?
+        );
+        assert_eq!(seed.worker_get_count(), reads + 2);
+        assert_eq!(seed.post_count(), posts + 2);
+        assert_eq!(store.head()?, core_head);
+        assert_eq!(canonical(&store.worker_usage()?)?, canonical(&usage)?);
+        assert_eq!(fs::read(calls_path)?, calls);
         Ok(())
     }
-
-    let seed = running_seed_for_cold_terminal_test().await;
-    let operation = seed.operation_id;
-    let scope = seed.scope();
-    let (mut service, writer, pending) = stage_terminal_publication(
-        seed.root(),
-        seed.config(),
-        &seed.journal_root,
-        scope,
-        operation,
-        seed.cancel_id,
-    )
-    .await?;
-    let store = seed.store();
-    let before = store.head()?;
-    let parent = store
-        .worker(&seed.worker_id)?
-        .context("fixture worker missing")?;
-    assert_eq!(
-        store.worker_quota(&QuotaPolicyV1::default())?.held_workers,
-        1
-    );
-    assert!(store.worker_usage()?.is_empty());
-    let reads = seed.worker_get_count();
-    let posts = seed.post_count();
-    let calls_path = seed.root().join("calls");
-    let calls = fs::read(&calls_path)?;
-
-    let jobs = service.profile_jobs(scope.profile_id())?;
-    let job = jobs.known(operation).context("retained Job missing")?;
-    let entered = Arc::new(Notify::new());
-    let resume = Arc::new(Notify::new());
-    let first = TERMINAL_RECOVERY_PAUSE.scope(
-        (Arc::clone(&entered), Arc::clone(&resume)),
-        service.reconcile_legacy_worker_terminal(scope, operation, pending.head()),
-    );
-    let concurrent = async {
-        tokio::time::timeout(Duration::from_secs(10), entered.notified()).await?;
-        assert!(!job.is_running());
-        assert!(matches!(
-            tokio::time::timeout(
-                Duration::from_secs(5),
-                service.reconcile_legacy_worker_terminal(scope, operation, pending.head()),
-            )
-            .await?,
-            Err(BrokerErrorCodeV1::Busy)
-        ));
-        assert_eq!(seed.worker_get_count(), reads);
-        assert_eq!(seed.post_count(), posts);
-        assert_eq!(fs::read(&calls_path)?, calls);
-
-        // This fixture has no guardian. Cancel must publish its local receipt
-        // while recovery holds the Job gate, then report failed delivery.
-        let command = Uuid::new_v4();
-        let generation = job.cancel.current();
-        let stop_head = tokio::time::timeout(Duration::from_secs(5), async {
-            assert!(matches!(
-                service
-                    .cancel(writer.clone(), Arc::clone(&jobs), operation, command)
-                    .await,
-                Err(BrokerErrorCodeV1::NeedsReconciliation)
-            ));
-            let stop = writer
-                .cancel_stop_projection(operation, command)
-                .await?
-                .context("the STOP must be durable while terminal recovery is paused")?;
-            assert_eq!(stop.operation_id(), operation);
-            assert_eq!(canonical(stop.scope())?, canonical(scope)?);
-            assert_eq!(stop.receipt().command_id(), command);
-            assert_eq!(
-                stop.receipt().head().revision(),
-                pending.head().revision() + 1
-            );
-            assert!(job.has_acknowledged_cancel(command)?);
-            assert!(job.cancel.current() > generation);
-            Ok::<_, anyhow::Error>(stop.receipt().head().clone())
-        })
-        .await??;
-        resume.notify_one();
-        Ok::<_, anyhow::Error>(stop_head)
-    };
-
-    seed.arm_transition_response_cut_for_test();
-    assert!(seed.transition_response_cut_pending_for_test());
-    let ((), later_stop_head) = tokio::try_join!(
-        async {
-            assert!(matches!(
-                first.await,
-                Err(BrokerErrorCodeV1::NeedsReconciliation)
-            ));
-            Ok::<(), anyhow::Error>(())
-        },
-        concurrent
-    )?;
-    drop(jobs);
-    assert!(
-        !seed.transition_response_cut_pending_for_test(),
-        "the successful transition handler must consume the response cut"
-    );
-    assert_eq!(seed.worker_get_count(), reads + 1);
-    assert_eq!(seed.post_count(), posts + 1);
-    let core_head = store.head()?;
-    assert_ne!(core_head, before);
-    let terminal = store
-        .worker(&seed.worker_id)?
-        .context("terminal Worker missing")?;
-    assert_eq!(terminal.state, WorkerStateV1::Terminal);
-    assert_eq!(terminal.revision, parent.revision + 1);
-    assert_eq!(terminal.attempt, parent.attempt);
-    assert!(!terminal.quota_held);
-    let quota = store.worker_quota(&QuotaPolicyV1::default())?;
-    assert_eq!(quota.held_workers, 0);
-    let usage = store.worker_usage()?;
-    assert_eq!(usage.len(), 1);
-    assert_eq!(
-        usage[0].terminal_observation_id,
-        pending.request().operation_id
-    );
-    assert!(!usage[0].billable);
-    let after_cut = writer
-        .legacy_worker_terminal_observation(operation)
-        .await?
-        .context("the lost response must leave the exact pending request")?;
-    assert_eq!(after_cut.head(), &later_stop_head);
-    assert_eq!(after_cut.stop().command_id(), seed.cancel_id);
-    assert_eq!(
-        canonical(after_cut.request())?,
-        canonical(pending.request())?
-    );
-
-    drop(writer);
-    reopen_writer(&mut service, &seed.journal_root, scope).await?;
-    assert!(matches!(
-        service
-            .reconcile_legacy_worker_terminal(scope, operation, pending.head())
-            .await,
-        Err(BrokerErrorCodeV1::NeedsReconciliation)
-    ));
-    let jobs = service.profile_jobs(scope.profile_id())?;
-    assert!(jobs.known(operation).is_none());
-    assert_eq!(seed.worker_get_count(), reads + 1);
-    assert_eq!(seed.post_count(), posts + 1);
-    jobs.job(operation)?;
-    drop(jobs);
-    let confirmed = service
-        .reconcile_legacy_worker_terminal(scope, operation, pending.head())
-        .await?;
-    assert_eq!(confirmed.head().revision(), later_stop_head.revision() + 1);
-    pending.validate_response(confirmed.response())?;
-    assert_eq!(
-        canonical(&confirmed.response().worker)?,
-        canonical(&terminal)?
-    );
-    assert_eq!(seed.worker_get_count(), reads + 2);
-    assert_eq!(seed.post_count(), posts + 2);
-    assert_eq!(store.head()?, core_head);
-    assert_eq!(
-        canonical(&store.worker_quota(&QuotaPolicyV1::default())?)?,
-        canonical(&quota)?
-    );
-    assert_eq!(canonical(&store.worker_usage()?)?, canonical(&usage)?);
-
-    reopen_writer(&mut service, &seed.journal_root, scope).await?;
-    let _occupied_execution = service.execution.try_acquire()?;
-    let cold = service
-        .reconcile_legacy_worker_terminal(scope, operation, pending.head())
-        .await?;
-    assert_eq!(cold.head(), confirmed.head());
-    assert_eq!(
-        canonical(cold.response())?,
-        canonical(confirmed.response())?
-    );
-    assert_eq!(seed.worker_get_count(), reads + 2);
-    assert_eq!(seed.post_count(), posts + 2);
-    assert_eq!(store.head()?, core_head);
-    assert_eq!(canonical(&store.worker_usage()?)?, canonical(&usage)?);
-    assert_eq!(fs::read(calls_path)?, calls);
-    Ok(())
+    .await;
+    result.map_err(|_| anyhow::anyhow!("g09_guard_failure_phase={:?}", phase.get()))
 }
 
 #[tokio::test]
