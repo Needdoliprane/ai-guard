@@ -3107,7 +3107,8 @@ mod tests {
                 .is_none()
         );
         let mut divergent_terminal = terminal_receipt.clone();
-        divergent_terminal.audit_hash = "e".repeat(64);
+        divergent_terminal.audit_hash = "f".repeat(64);
+        assert_ne!(divergent_terminal, terminal_receipt);
         assert!(matches!(
             verification_writer
                 .record_legacy_named_import_verification_create(
