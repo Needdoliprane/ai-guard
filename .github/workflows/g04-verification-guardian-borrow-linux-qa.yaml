@@ -1,0 +1,136 @@
+name: G04 verification guardian borrow Linux QA
+
+on:
+  push:
+    branches: [codex/g04-verification-guardian-borrow-linux-qa-20261128]
+    paths: [.github/workflows/g04-verification-guardian-borrow-linux-qa.yaml]
+
+permissions:
+  contents: read
+
+jobs:
+  guardian-check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      SOURCE_SHA: 5f7366ee9b448b6e915dde12e1795fbe49d564fc
+      SOURCE_TREE: 95078a80e3c9afabdb1c496a188282c5b1f7c1af
+      VERIFICATION_WRITER_BLOB: 1f02091edb1d4529cb3c84965be7485a4a05c09c
+      ENFORCER_BLOB: 53d3982f7b684d7e73eaf65459b131a37d9effce
+      CLIENT_BLOB: 1821b692fa02548f91476a426343a739aafaedee
+      CLIENT_LEGACY_BLOB: 4d8d024fd6fbc995efa44f835202188b8f44921e
+      LEGACY_NAMED_STOP_BLOB: 352d995220a8f52a26450cb09bb3be939ffba8c5
+      SERVER_BLOB: acd9d6e9cf220e8fe1492d339249882a972771af
+      SERVER_PROSPECTIVE_BLOB: f4244d13584a6e1dde07b449b4253de70b0bbe13
+      PRESENCE_ADMISSION_BLOB: 698bc64eff61753f410f033d42d8195fafa6ca52
+      CARGO_BUILD_JOBS: '1'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      CARGO_TERM_COLOR: never
+      RUST_MIN_STACK: '8388608'
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          persist-credentials: false
+
+      - name: Build one libtest and verify retained named verification Writer birth
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          ulimit -c 0
+          selectors=(
+            broker::checkpoint::legacy_named::tests::verification_created_writer::named_verification_check_keeps_the_original_guardian_slot
+            broker::checkpoint::legacy_named::tests::verification_created_writer::named_verification_check_refuses_after_confirmed_stop
+          )
+          report_not_run() {
+            local selector
+            for selector in "${selectors[@]}"; do printf 'test=%s status=NOT_RUN\n' "$selector"; done
+          }
+          if [[ "${GITHUB_REF:-}" != refs/heads/codex/g04-verification-guardian-borrow-linux-qa-20261128 ||
+                "$(git rev-parse HEAD)" != "$SOURCE_SHA" ||
+                "$(git rev-parse 'HEAD^{tree}')" != "$SOURCE_TREE" ||
+                "$(git rev-parse HEAD:src/broker/checkpoint/legacy_named/tests/verification_created_writer.rs)" != "$VERIFICATION_WRITER_BLOB" ||
+                "$(git rev-parse HEAD:src/broker/enforcer.rs)" != "$ENFORCER_BLOB" ||
+                "$(git rev-parse HEAD:src/broker/enforcer/client.rs)" != "$CLIENT_BLOB" ||
+                "$(git rev-parse HEAD:src/broker/enforcer/client_legacy.rs)" != "$CLIENT_LEGACY_BLOB" ||
+                "$(git rev-parse HEAD:src/broker/enforcer/legacy_named_stop.rs)" != "$LEGACY_NAMED_STOP_BLOB" ||
+                "$(git rev-parse HEAD:src/broker/enforcer/server.rs)" != "$SERVER_BLOB" ||
+                "$(git rev-parse HEAD:src/broker/enforcer/server_prospective.rs)" != "$SERVER_PROSPECTIVE_BLOB" ||
+                "$(git rev-parse HEAD:src/broker/presence/legacy_named_admission.rs)" != "$PRESENCE_ADMISSION_BLOB" ]]; then
+            printf 'source=FAIL\n'
+            report_not_run
+            exit 1
+          fi
+          printf 'source=PASS\nsource_sha=%s\nsource_tree=%s\nverification_writer_blob=%s\nenforcer_blob=%s\nclient_blob=%s\nclient_legacy_blob=%s\nlegacy_named_stop_blob=%s\nserver_blob=%s\nserver_prospective_blob=%s\npresence_admission_blob=%s\n' \
+            "$SOURCE_SHA" "$SOURCE_TREE" "$VERIFICATION_WRITER_BLOB" "$ENFORCER_BLOB" \
+            "$CLIENT_BLOB" "$CLIENT_LEGACY_BLOB" "$LEGACY_NAMED_STOP_BLOB" "$SERVER_BLOB" \
+            "$SERVER_PROSPECTIVE_BLOB" "$PRESENCE_ADMISSION_BLOB"
+
+          scratch=$(mktemp -d /tmp/aig-g04.XXXXXXXX)
+          chmod 700 "$scratch"
+          trap 'find "$scratch" -depth -mindepth 1 -delete; rmdir "$scratch"' EXIT
+          export TMPDIR="$scratch"
+          export CARGO_TARGET_DIR="$scratch/target"
+          build_json="$scratch/build.jsonl"
+          if ! cargo fetch --locked >"$scratch/fetch.log" 2>&1; then
+            printf 'fetch=FAIL\nbuild=NOT_RUN\n'
+            report_not_run
+            exit 1
+          fi
+          printf 'fetch=PASS\n'
+          if cargo test --locked --offline -j1 --no-default-features --lib --no-run \
+              --message-format=json >"$build_json" 2>"$scratch/build.stderr"; then
+            printf 'build=PASS\n'
+          else
+            rc=$?
+            printf 'build=FAIL\nbuild_exit=%s\n' "$rc"
+            report=$(jq -cs '[.[] | select(.reason == "compiler-message" and .message.level == "error") | .message |
+              {code: ((.code.code // "uncoded") | if test("^E[0-9]{4}$") then . else "uncoded" end),
+               site: ([.spans[]? | select(.is_primary == true and (.file_name | test("^(src|tests)(/[A-Za-z0-9_-]+)+[.]rs$"))
+                 and (.line_start | type) == "number" and (.column_start | type) == "number")
+                 | {file: .file_name, line: .line_start, column: .column_start}] | .[0])}]
+              | .[0:12]' "$build_json" 2>/dev/null) || report=unavailable
+            printf 'rust_diagnostics=%s\n' "$report"
+            report_not_run
+            exit 1
+          fi
+          if ! libtest=$(jq -ers '[.[] | select(.reason == "compiler-artifact" and .target.name == "agentsandbox"
+              and .target.kind == ["lib"] and .profile.test == true and (.executable | type) == "string") | .executable]
+              | unique | select(length == 1) | .[0]' "$build_json" 2>/dev/null) ||
+              [[ "$libtest" != "$CARGO_TARGET_DIR"/debug/deps/agentsandbox-* || ! -f "$libtest" || ! -x "$libtest" || -L "$libtest" ]]; then
+            printf 'libtest=FAIL\n'
+            report_not_run
+            exit 1
+          fi
+          checksum=$(sha256sum -- "$libtest")
+          libtest_sha=${checksum%% *}
+          if [[ ! "$libtest_sha" =~ ^[0-9a-f]{64}$ ]]; then
+            printf 'libtest=FAIL\n'
+            report_not_run
+            exit 1
+          fi
+          printf 'libtest=PASS\nlibtest_sha256=%s\n' "$libtest_sha"
+
+          failed=0
+          for selector in "${selectors[@]}"; do
+            test_log="$scratch/test.log"
+            test_exit=0
+            { timeout --kill-after=10s 180s "$libtest" --exact "$selector" --test-threads=1 --color never; } \
+              >"$test_log" 2>&1 || test_exit=$?
+            if [[ "$test_exit" == 0 ]] &&
+                [[ "$(grep -Fxc 'running 1 test' "$test_log" || true)" == 1 ]] &&
+                [[ "$(grep -Fxc "test $selector ... ok" "$test_log" || true)" == 1 ]] &&
+                [[ "$(grep -Ec '^test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; [0-9]+ filtered out; finished in [0-9]+([.][0-9]+)?s$' "$test_log" || true)" == 1 ]]; then
+              printf 'test=%s status=PASS\ntest_exit=0\ntest_pass_count=1\ntest_fail_count=0\n' "$selector"
+            else
+              printf 'test=%s status=FAIL\ntest_exit=%s\n' "$selector" "$test_exit"
+              grep -m 1 -Eo 'panicked at (src|tests)(/[A-Za-z0-9_-]+)+[.]rs:[0-9]+:[0-9]+' "$test_log" || true
+              if grep -q '^Error: ' "$test_log"; then printf 'libtest_result_error=true\n'; fi
+              failed=1
+            fi
+          done
+          exit "$failed"
