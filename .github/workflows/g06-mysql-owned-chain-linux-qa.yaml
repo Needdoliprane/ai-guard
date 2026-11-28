@@ -203,6 +203,7 @@ jobs:
           }
           run_exact "$libtest" "${lib_selectors[0]}" lib-foreign-origin
           run_exact "$libtest" "${lib_selectors[1]}" lib-exact-replay
+          run_exact "$libtest" "${lib_selectors[2]}" lib-table-names
           run_exact "$bintest" "${bin_selectors[0]}" bin-cli-parse
           run_exact "$bintest" "${bin_selectors[1]}" bin-safe-diagnostics
           printf 'oracle_count=5\noracle_failures=%s\n' "$failures"
