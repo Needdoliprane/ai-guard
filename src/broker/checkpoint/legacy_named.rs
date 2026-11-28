@@ -1599,7 +1599,7 @@ mod tests {
                 ControlSecrets, FsExclusions, Journal, JournalLimitsV1, ReserveResult,
                 recovery::StopRecoveryReaderV1,
             },
-            lifecycle::BrokerCheckpointV3,
+            lifecycle::{BrokerCheckpointV3, LocalCommandV1},
             writer::{CancelInputV1, NamedImportArmWriteFailure, WriterClient},
         },
         control::session_control::{LegacyConfirmedLaunchSpecV1, LegacyNamedInitialDecisionV1},
@@ -1615,6 +1615,7 @@ mod tests {
         checkpoint: impl Fn(LegacyNamedAdmissionCheckpoint) -> JournalResult<BrokerCheckpointV2>,
         created: &LegacyNamedAdmissionCheckpoint,
         request: &LegacyNamedImportVerificationArmRequestV2,
+        stop_commands: &[LocalCommandV1],
     ) -> anyhow::Result<()> {
         let old_bytes = checkpoint(created.clone())?.canonical_bytes()?;
         let old = BrokerCheckpointV2::from_bytes(&old_bytes)?;
@@ -1660,6 +1661,32 @@ mod tests {
             .clone()
             .with_import_verification_arm(request.clone())?;
         assert_eq!(checkpoint(replayed)?.canonical_bytes()?, bytes);
+
+        let stopped_before_arm = BrokerCheckpointV3::new(old.clone(), stop_commands.to_vec())?;
+        let cancel_boundary = Some(old.supervision().operations().len());
+        stopped_before_arm.validate_transition(
+            Some(&stopped_before_arm),
+            Some(&old),
+            old.runner(),
+            cancel_boundary,
+        )?;
+        let arm_after_stop = BrokerCheckpointV3::new(reopened.clone(), stop_commands.to_vec())?;
+        assert!(matches!(
+            arm_after_stop.validate_transition(
+                Some(&stopped_before_arm),
+                Some(&old),
+                old.runner(),
+                cancel_boundary,
+            ),
+            Err(JournalError::Conflict)
+        ));
+        let arm_before_stop = BrokerCheckpointV3::new(reopened.clone(), Vec::new())?;
+        arm_after_stop.validate_transition(
+            Some(&arm_before_stop),
+            Some(&reopened),
+            reopened.runner(),
+            None,
+        )?;
 
         let mut shifted = request.clone();
         let later = shifted
@@ -3870,6 +3897,7 @@ mod tests {
             &checkpoint,
             &cold_created,
             &verification_request,
+            stopped_lifecycle.commands(),
         )?;
         assert!(matches!(
             facts.validate_request(&verification_request, &changed_invocation),
