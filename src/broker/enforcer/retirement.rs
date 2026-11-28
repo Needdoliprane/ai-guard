@@ -105,7 +105,7 @@ struct ActorState {
     status: EnforcerSlotStatusV1,
     gate: OriginalGate,
     durable_stop: Option<(u64, CancelReferenceV1)>,
-    observed_after_durable_stop: bool,
+    retained_terminal: Option<Box<ContainerObservation>>,
 }
 struct FullActor {
     registration: RegistrationV1,
@@ -617,29 +617,22 @@ impl FullState {
             || !state.gate.stop_reserved
             || self.owners.failed()
             || !actor.runtime_installed.load(Ordering::SeqCst)
-            || state.status.phase != SlotPhaseV1::Quarantined
             || state
                 .durable_stop
                 .as_ref()
                 .is_none_or(|(generation, retained)| {
                     *generation != state.status.generation || retained != cancel
                 })
-            || !state.observed_after_durable_stop
         {
             return Err(EnforcerError::NotReady);
         }
         let observation = state
-            .status
-            .observation
-            .as_ref()
+            .retained_terminal
+            .as_deref()
             .ok_or(EnforcerError::NotReady)?;
-        observation
-            .validate_terminal(
-                actor.registration.authority.kind,
-                &actor.registration.owned.observation,
-            )
-            .map_err(|_| EnforcerError::NotReady)?;
-        Ok(state.status.clone())
+        let mut value = state.status.clone();
+        value.observation = Some(observation.clone());
+        Ok(value)
     }
 
     /// Positive installation evidence comes from the retained native worker,
@@ -1285,18 +1278,20 @@ impl FullState {
             return Err(EnforcerError::Conflict);
         }
         state.gate.reserve_stop()?;
-        if generation != state.status.generation
-            || cancel.is_some_and(|cancel| {
-                state
-                    .durable_stop
-                    .as_ref()
-                    .is_none_or(|(retained_generation, retained)| {
-                        *retained_generation != generation || retained != cancel
-                    })
-            })
+        if cancel.is_some_and(|cancel| {
+            state
+                .durable_stop
+                .as_ref()
+                .is_some_and(|(retained_generation, retained)| {
+                    *retained_generation == generation && retained == cancel
+                })
+        }) && generation == state.status.generation
         {
+            return Ok(());
+        }
+        if generation != state.status.generation || cancel.is_some() {
             state.durable_stop = cancel.cloned().map(|cancel| (generation, cancel));
-            state.observed_after_durable_stop = false;
+            state.retained_terminal = None;
         }
         state.status.generation = generation;
         state.status.phase = SlotPhaseV1::Stopping;
@@ -1477,16 +1472,33 @@ impl FullActor {
                     managed.stop_snapshot_owned_native(&self.registration.owned),
                 );
                 let mut state = self.state.lock().map_err(|_| EnforcerError::Unhealthy)?;
-                // A STOP may have been delivered while native IO was in
-                // progress. The result can update diagnostics, but cannot
-                // attest the later STOP or a superseding generation.
-                state.observed_after_durable_stop = result.is_some()
-                    && state.durable_stop == durable_stop
-                    && durable_stop
-                        .as_ref()
-                        .is_some_and(|(generation, _)| *generation == state.status.generation);
                 match result {
                     Some(settled) => {
+                        // A result can update diagnostics even if a new STOP
+                        // arrived during IO. Only a matching capture may
+                        // contribute to the retained terminal candidate.
+                        if state.durable_stop == durable_stop
+                            && durable_stop.as_ref().is_some_and(|(generation, _)| {
+                                *generation == state.status.generation
+                            })
+                        {
+                            let observation = &settled.value.observation;
+                            if observation
+                                .validate_terminal(
+                                    self.registration.authority.kind,
+                                    &self.registration.owned.observation,
+                                )
+                                .is_ok()
+                            {
+                                state
+                                    .retained_terminal
+                                    .get_or_insert_with(|| Box::new(observation.clone()));
+                            } else {
+                                // An explicit newer, non-terminal observation
+                                // contradicts the previous terminal sample.
+                                state.retained_terminal = None;
+                            }
+                        }
                         self.failures
                             .observed_stop(self.cause_target(), settled.value.observation.clone());
                         state.status.observation = Some(settled.value.observation);

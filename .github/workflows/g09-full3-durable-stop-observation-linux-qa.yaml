@@ -13,13 +13,13 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
-      SOURCE_SHA: 5fa43625f4e51b0a9e4eeea229833332e1970ffa
-      SOURCE_TREE: a305ba91c000e4d55c3f1bfe7bd4021da1c1d8d4
-      RECOVERY_BLOB: d4bddcf6d71c772e80d61f9d9cb8338d12a83d9d
-      RECOVERY_V3_BLOB: 14a9d7e821229d4a8fb87bf3363649a5c1a644ed
-      RETIREMENT_BLOB: 324489c0c8b7d090b0bec6eba7e95a835db480b6
-      RETIREMENT_PROSPECTIVE_BLOB: 2992d84a18df826f50acb7b3f9487f695ec87106
-      RETIREMENT_TESTS_BLOB: b25e31075016a7563a02ee0978637fe9090b4660
+      SOURCE_SHA: 69fc25193bc80c5d683bce5af886cf2c879e1f08
+      SOURCE_TREE: b53be11ca74254fae88e1e5ea6b12e1dfd70a59b
+      RECOVERY_BLOB: c6c67d500482d5a7e13f6d99b02dc42a750905bb
+      RECOVERY_V3_BLOB: 513c4a3884966fc4331036d3e44e4729c5fda1f4
+      RETIREMENT_BLOB: 814e0018a39cd1c2779bd6c4c0c94d0a1518a008
+      RETIREMENT_PROSPECTIVE_BLOB: d388d334957c3f7a987d5f82973b40046556efcb
+      RETIREMENT_TESTS_BLOB: 7a2ddd2f4d6c18937a432d9c1019e5e0f3ccef1b
       CARGO_BUILD_JOBS: '1'
       CARGO_INCREMENTAL: '0'
       CARGO_PROFILE_DEV_DEBUG: '0'
@@ -34,7 +34,7 @@ jobs:
           ref: ${{ env.SOURCE_SHA }}
           persist-credentials: false
 
-      - name: Build one libtest and verify the V3 STOP-only refusal
+      - name: Build one libtest and verify V3 STOP replay and refusal
         shell: bash
         run: |
           set -euo pipefail
