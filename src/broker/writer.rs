@@ -16,8 +16,12 @@ use super::{
         ReservationTicket, ReserveResult, RevisionRefV1, StopJobSnapshotV1, StopJournal,
         egress_release_fence::{EgressReleaseFenceIssuer, EgressReleaseHeadPermit},
         recovery::{
-            StopRecoveryReaderV1, StopRecoveryReportV1, inventory::StopInventoryPageV1,
-            legacy_worker_terminal::LegacyWorkerTerminalEvidenceV1,
+            StopRecoveryReaderV1, StopRecoveryReportV1,
+            inventory::StopInventoryPageV1,
+            legacy_worker_terminal::{
+                LegacyWorkerTerminalEvidenceV1, ReservedLegacyWorkerTerminalObservationV1,
+                RetainedLegacyWorkerTerminalObservationV1,
+            },
         },
     },
     lifecycle::{BrokerCheckpointV3, LocalCommandReceiptV1, LocalCommandRequestV1, LocalCommandV1},
@@ -26,6 +30,7 @@ use super::{
 #[cfg(test)]
 use crate::control::egress_decision::EgressChannelOpeningReceiptV1;
 use crate::{
+    control::WorkerMutationV1,
     control_fs::Directory,
     model::Event,
     runner::{broker::PreparedSubmission, egress_release::EgressReleaseIntentV1},
@@ -117,12 +122,29 @@ impl WriterDispatchFailure {
     }
 }
 
-enum LifecycleWriteFailure {
+pub(in crate::broker) enum LifecycleWriteFailure {
     BeforePublication(JournalError),
     PublicationUnconfirmed(JournalError),
 }
 
 impl LifecycleWriteFailure {
+    fn from_dispatch(cause: WriterDispatchFailure, attempted: &AtomicBool) -> Self {
+        match cause {
+            WriterDispatchFailure::NotQueued(cause) => {
+                Self::BeforePublication(cause.journal_error())
+            }
+            WriterDispatchFailure::Queued(WriterCallFailure::Actor(error))
+                if !attempted.load(Ordering::Acquire) =>
+            {
+                Self::BeforePublication(error)
+            }
+            // A queued command with a missing reply can still publish later.
+            WriterDispatchFailure::Queued(cause) => {
+                Self::PublicationUnconfirmed(cause.journal_error())
+            }
+        }
+    }
+
     fn journal_error(self) -> JournalError {
         match self {
             Self::BeforePublication(error) | Self::PublicationUnconfirmed(error) => error,
@@ -353,6 +375,15 @@ enum Command {
         operation_id: Uuid,
         command_id: Uuid,
         reply: Reply<LegacyWorkerTerminalEvidenceV1>,
+    },
+    LegacyWorkerTerminalObservation {
+        operation_id: Uuid,
+        reply: Reply<Option<RetainedLegacyWorkerTerminalObservationV1>>,
+    },
+    ReserveLegacyWorkerTerminalObservation {
+        input: Box<(LegacyWorkerTerminalEvidenceV1, WorkerMutationV1)>,
+        publication_attempted: Arc<AtomicBool>,
+        reply: Reply<ReservedLegacyWorkerTerminalObservationV1>,
     },
     AppendCancel {
         input: CancelInputV1,
@@ -728,6 +759,46 @@ impl StopWriterClient {
             })
             .await
     }
+
+    #[allow(
+        dead_code,
+        reason = "the Legacy terminal publisher is composed separately"
+    )]
+    pub(in crate::broker) async fn reserve_legacy_worker_terminal_observation(
+        &self,
+        evidence: LegacyWorkerTerminalEvidenceV1,
+        request: WorkerMutationV1,
+    ) -> Result<ReservedLegacyWorkerTerminalObservationV1, LifecycleWriteFailure> {
+        let publication_attempted = Arc::new(AtomicBool::new(false));
+        let actor_attempted = Arc::clone(&publication_attempted);
+        self.0
+            .call_tracking_enqueue(
+                move |reply| Command::ReserveLegacyWorkerTerminalObservation {
+                    input: Box::new((evidence, request)),
+                    publication_attempted: actor_attempted,
+                    reply,
+                },
+            )
+            .await
+            .map_err(|cause| LifecycleWriteFailure::from_dispatch(cause, &publication_attempted))
+    }
+
+    #[allow(
+        dead_code,
+        reason = "the Legacy terminal publisher is composed separately"
+    )]
+    pub(in crate::broker) async fn legacy_worker_terminal_observation(
+        &self,
+        operation_id: Uuid,
+    ) -> JournalResult<Option<RetainedLegacyWorkerTerminalObservationV1>> {
+        self.0
+            .call(move |reply| Command::LegacyWorkerTerminalObservation {
+                operation_id,
+                reply,
+            })
+            .await
+    }
+
     pub async fn recovery_status(
         &self,
         operation_id: Uuid,
@@ -1599,29 +1670,14 @@ impl WriterClient {
         next: BrokerCheckpointV3,
     ) -> Result<CheckpointReceiptV1, LifecycleWriteFailure> {
         let publication_attempted = Arc::new(AtomicBool::new(false));
-        match self
-            .send_lifecycle_advance(
-                operation_id,
-                expected,
-                next,
-                Some(Arc::clone(&publication_attempted)),
-            )
-            .await
-        {
-            Ok(receipt) => Ok(receipt),
-            Err(WriterDispatchFailure::NotQueued(cause)) => Err(
-                LifecycleWriteFailure::BeforePublication(cause.journal_error()),
-            ),
-            Err(WriterDispatchFailure::Queued(WriterCallFailure::Actor(error)))
-                if !publication_attempted.load(Ordering::Acquire) =>
-            {
-                Err(LifecycleWriteFailure::BeforePublication(error))
-            }
-            // A queued command with a missing reply can still publish later.
-            Err(WriterDispatchFailure::Queued(cause)) => Err(
-                LifecycleWriteFailure::PublicationUnconfirmed(cause.journal_error()),
-            ),
-        }
+        self.send_lifecycle_advance(
+            operation_id,
+            expected,
+            next,
+            Some(Arc::clone(&publication_attempted)),
+        )
+        .await
+        .map_err(|cause| LifecycleWriteFailure::from_dispatch(cause, &publication_attempted))
     }
 
     async fn send_lifecycle_advance(
@@ -2307,6 +2363,48 @@ fn serve_backend(
                     result,
                     status_cache::Update::None,
                     false,
+                );
+            }
+            Command::LegacyWorkerTerminalObservation {
+                operation_id,
+                reply,
+            } => {
+                let result = match &backend {
+                    Backend::Stops(journal) => {
+                        journal.legacy_worker_terminal_observation(operation_id)
+                    }
+                    Backend::Full(_) => Err(JournalError::InvalidInput),
+                };
+                let _ = respond(
+                    &backend,
+                    &status,
+                    reply,
+                    result,
+                    status_cache::Update::None,
+                    false,
+                );
+            }
+            Command::ReserveLegacyWorkerTerminalObservation {
+                input,
+                publication_attempted,
+                reply,
+            } => {
+                let (evidence, request) = *input;
+                let result = match &backend {
+                    Backend::Stops(journal) => journal.reserve_legacy_worker_terminal_observation(
+                        &evidence,
+                        request,
+                        || publication_attempted.store(true, Ordering::Release),
+                    ),
+                    Backend::Full(_) => Err(JournalError::InvalidInput),
+                };
+                let _ = respond(
+                    &backend,
+                    &status,
+                    reply,
+                    result,
+                    status_cache::Update::Clear,
+                    true,
                 );
             }
             Command::AppendCancel { input, reply } => {

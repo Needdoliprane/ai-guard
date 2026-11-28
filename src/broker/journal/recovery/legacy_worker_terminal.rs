@@ -1,9 +1,11 @@
-//! Retained Legacy worker facts for a future observation-only reconciliation.
+//! Retained Legacy worker facts and the first durable terminal request.
 use super::*;
 use crate::{
-    control::{ArmedStartClaimV1, MutationReceiptV1, WorkerStateV1},
+    broker::checkpoint::SupervisionCheckpointV1,
+    control::{ArmedStartClaimV1, MutationReceiptV1, RuntimeStatusV1, WorkerStateV1},
     runtime::RuntimeKind,
 };
+use std::sync::Weak;
 
 /// Historical data from one verified journal prefix. The STOP receipt records
 /// a request. The Arm, claim and Created snapshot qualify the target, while a
@@ -13,6 +15,7 @@ use crate::{
 /// must reopen the authority with the exact configured invocation.
 /// Any later publication must recheck the prefix under the same writer.
 pub(in crate::broker) struct LegacyWorkerTerminalEvidenceV1 {
+    owner: Weak<Inner>,
     scope: JournalScopeV1,
     head: RevisionRefV1,
     cancel_receipt: LocalCommandReceiptV1,
@@ -20,11 +23,55 @@ pub(in crate::broker) struct LegacyWorkerTerminalEvidenceV1 {
     arm_receipt: ArmReceiptV1,
     claim: ArmedStartClaimV1,
     claim_receipt: MutationReceiptV1,
+    claim_index: usize,
     authority: RuntimeAuthority,
     owned: OwnedContainerSnapshot,
     worker: WorkerV1,
 }
 opaque!(LegacyWorkerTerminalEvidenceV1);
+
+/// Exact journal data. An append or cold read grants no authority to send it.
+#[allow(
+    dead_code,
+    reason = "the Legacy terminal publisher is composed separately"
+)]
+pub(in crate::broker) struct RetainedLegacyWorkerTerminalObservationV1 {
+    head: RevisionRefV1,
+    stop: LocalCommandReceiptV1,
+    request: WorkerMutationV1,
+}
+
+#[allow(
+    dead_code,
+    reason = "the Legacy terminal publisher is composed separately"
+)]
+pub(in crate::broker) enum ReservedLegacyWorkerTerminalObservationV1 {
+    Appended(RetainedLegacyWorkerTerminalObservationV1),
+    Existing(RetainedLegacyWorkerTerminalObservationV1),
+}
+
+opaque!(
+    RetainedLegacyWorkerTerminalObservationV1,
+    ReservedLegacyWorkerTerminalObservationV1
+);
+
+#[allow(
+    dead_code,
+    reason = "the Legacy terminal publisher is composed separately"
+)]
+impl RetainedLegacyWorkerTerminalObservationV1 {
+    pub(in crate::broker) fn head(&self) -> &RevisionRefV1 {
+        &self.head
+    }
+
+    pub(in crate::broker) fn stop(&self) -> &LocalCommandReceiptV1 {
+        &self.stop
+    }
+
+    pub(in crate::broker) fn request(&self) -> &WorkerMutationV1 {
+        &self.request
+    }
+}
 
 impl LegacyWorkerTerminalEvidenceV1 {
     pub(in crate::broker) fn operation_id(&self) -> Uuid {
@@ -58,6 +105,29 @@ impl LegacyWorkerTerminalEvidenceV1 {
     pub(in crate::broker) fn worker(&self) -> &WorkerV1 {
         &self.worker
     }
+
+    pub(in crate::broker) fn terminal_observation_operation_id(&self) -> JournalResult<String> {
+        let claim_id =
+            crate::control::session_control::canonical_uuid(&self.claim_receipt.operation_id)
+                .map_err(|_| JournalError::Conflict)?;
+        Ok(crate::model::bound_event_id(
+            b"ai-guard:legacy-worker-terminal-observation:v1",
+            claim_id,
+        ))
+    }
+
+    fn target_facts(&self) -> JournalResult<Vec<u8>> {
+        canonical(&(
+            self.scope(),
+            self.cancel_receipt().command_id(),
+            self.cancel_receipt().input_hash(),
+            self.cancel_receipt().head(),
+            self.arm(),
+            self.claim(),
+            self.target(),
+            self.worker(),
+        ))
+    }
 }
 
 impl StopJournal {
@@ -78,17 +148,283 @@ impl StopJournal {
         if incomplete {
             return Err(JournalError::Interrupted);
         }
-        let proof = project(&reader.scope, &job, command_id)?;
+        let proof = project(&self.core, &job, command_id)?;
         reader.check_shared()?;
         Ok(proof)
     }
+
+    pub(in crate::broker) fn legacy_worker_terminal_observation(
+        &self,
+        operation_id: Uuid,
+    ) -> JournalResult<Option<RetainedLegacyWorkerTerminalObservationV1>> {
+        let mut writer = self.core.writer.lock().map_err(|_| JournalError::Corrupt)?;
+        let (reader, job, incomplete) = self
+            .read_locked(operation_id, &mut writer)?
+            .ok_or(JournalError::Interrupted)?;
+        if incomplete {
+            return Err(JournalError::Interrupted);
+        }
+        let command = *job
+            .cancel_command_ids()
+            .last()
+            .ok_or(JournalError::Interrupted)?;
+        let current = project(&self.core, &job, command)?;
+        let retained = retained_observation(&job, &current)?;
+        reader.check_shared()?;
+        Ok(retained)
+    }
+
+    pub(in crate::broker) fn reserve_legacy_worker_terminal_observation(
+        &self,
+        evidence: &LegacyWorkerTerminalEvidenceV1,
+        request: WorkerMutationV1,
+        on_publication_attempt: impl FnOnce(),
+    ) -> JournalResult<ReservedLegacyWorkerTerminalObservationV1> {
+        use ReservedLegacyWorkerTerminalObservationV1::{Appended, Existing};
+
+        if !Weak::ptr_eq(&evidence.owner, &Arc::downgrade(&self.core)) {
+            return Err(JournalError::Conflict);
+        }
+        let operation = evidence.operation_id();
+        let command = evidence.cancel_receipt().command_id();
+        let mut writer = self.core.writer.lock().map_err(|_| JournalError::Corrupt)?;
+        let (reader, job, incomplete) = self
+            .read_locked(operation, &mut writer)?
+            .ok_or(JournalError::Interrupted)?;
+        if incomplete {
+            return Err(JournalError::Interrupted);
+        }
+
+        let current = project(&self.core, &job, command)?;
+        if !job.chain.contains(evidence.head())
+            || evidence.target_facts()? != current.target_facts()?
+        {
+            return Err(JournalError::Conflict);
+        }
+        if let Some(retained) = retained_observation(&job, &current)? {
+            require_exact_observation(&retained, command, &request)?;
+            reader.check_shared()?;
+            return Ok(Existing(retained));
+        }
+        if job.head() != evidence.head() {
+            return Err(JournalError::Conflict);
+        }
+        if writer.cold_audit.upgrade().is_some() {
+            return Err(JournalError::Busy);
+        }
+        validate_terminal_request(&current, &request)?;
+        let metadata = job.metadata.as_ref().ok_or(JournalError::Corrupt)?;
+        let lifecycle = metadata
+            .checkpoint
+            .lifecycle()
+            .ok_or(JournalError::Interrupted)?;
+        let old = lifecycle.broker();
+        let supervision = old.supervision();
+        let mut operations = supervision.operations().to_vec();
+        let stop = last_stop_before_observation(&job, current.claim_index, operations.len())?;
+        if stop.command_id() != command {
+            return Err(JournalError::Conflict);
+        }
+        // A running broker can have retained a random-id Observe (or another
+        // worker transition) before losing its Store reply. It still owns
+        // reconciliation of that request. The new ID cannot take its place.
+        for prior in &operations {
+            if let SupervisionOperationV1::WorkerMutation {
+                request: prior,
+                response,
+            } = prior
+                && prior.worker_id == request.worker_id
+                && prior.attempt_id == request.attempt_id
+            {
+                let response = response.as_ref().ok_or(JournalError::Interrupted)?;
+                if response.worker.revision > request.expected_revision {
+                    return Err(JournalError::Conflict);
+                }
+            }
+        }
+        operations.push(SupervisionOperationV1::WorkerMutation {
+            request: request.clone(),
+            response: None,
+        });
+        let broker = BrokerCheckpointV2::new(
+            old.runner().clone(),
+            SupervisionCheckpointV1::new(
+                supervision.control_namespace_uuid(),
+                supervision.helpers().to_vec(),
+                operations,
+            )?,
+        )?;
+        let lifecycle = BrokerCheckpointV3::new(broker, lifecycle.commands().to_vec())?;
+        let next = match metadata.checkpoint.outbox() {
+            Some(old) => {
+                LoadedCheckpoint::V4(BrokerCheckpointV4::new(lifecycle, old.events().to_vec())?)
+            }
+            None => LoadedCheckpoint::V3(lifecycle),
+        };
+        confirmed::context_checkpoint_with_launch(
+            &self.core.scope,
+            &self.core.control,
+            &next,
+            &metadata.intent,
+            &metadata.binding,
+            metadata.launch_binding.as_ref(),
+        )?;
+        confirmed::check_transition(
+            &metadata.checkpoint,
+            &next,
+            metadata.legacy_managed_seen,
+            metadata.last_cancel_operations,
+        )?;
+        let intent_hash = metadata
+            .intent
+            .intent_hash()
+            .map_err(|_| JournalError::Corrupt)?;
+        let (bytes, head) =
+            encode_checkpoint(&self.core, operation, &intent_hash, job.head(), &next)?;
+        let usage = stop_budget_usage(&self.core, operation)?;
+        reader.check_shared()?;
+        publish_revision_observing(
+            &self.core,
+            operation,
+            &intent_hash,
+            job.head(),
+            &head,
+            &bytes,
+            PublicationResources {
+                usage,
+                budget: retirement::PublicationBudget::NewAllocation,
+                writer: &mut writer,
+            },
+            on_publication_attempt,
+        )?;
+        writer.floors.insert(operation, head.clone());
+        writer.observed_jobs.insert(operation);
+        let (reader, confirmed, incomplete) = self
+            .read_locked(operation, &mut writer)?
+            .ok_or(JournalError::Corrupt)?;
+        if incomplete || confirmed.head() != &head {
+            return Err(JournalError::Interrupted);
+        }
+        let current = project(&self.core, &confirmed, command)?;
+        let retained = retained_observation(&confirmed, &current)?.ok_or(JournalError::Corrupt)?;
+        require_exact_observation(&retained, command, &request)?;
+        reader.check_shared()?;
+        #[cfg(test)]
+        stop_before_ack()?;
+        Ok(Appended(retained))
+    }
+}
+
+fn require_exact_observation(
+    retained: &RetainedLegacyWorkerTerminalObservationV1,
+    command: Uuid,
+    request: &WorkerMutationV1,
+) -> JournalResult<()> {
+    if retained.stop.command_id() != command || canonical(&retained.request)? != canonical(request)?
+    {
+        return Err(JournalError::Conflict);
+    }
+    Ok(())
+}
+
+fn retained_observation(
+    job: &RecoveredJobV1,
+    proof: &LegacyWorkerTerminalEvidenceV1,
+) -> JournalResult<Option<RetainedLegacyWorkerTerminalObservationV1>> {
+    let metadata = job.metadata.as_ref().ok_or(JournalError::Corrupt)?;
+    let supervision = metadata
+        .checkpoint
+        .supervised()
+        .ok_or(JournalError::Interrupted)?
+        .supervision();
+    let id = proof.terminal_observation_operation_id()?;
+    for (index, operation) in supervision.operations().iter().enumerate() {
+        if let SupervisionOperationV1::WorkerMutation { request, response } = operation
+            && request.operation_id == id
+        {
+            // This port reads only the pending request. The Core ACK is a
+            // separate transition that must have its own validated receipt.
+            if response.is_some() {
+                return Err(JournalError::Conflict);
+            }
+            validate_terminal_request(proof, request)?;
+            let stop = last_stop_before_observation(job, proof.claim_index, index)?;
+            return Ok(Some(RetainedLegacyWorkerTerminalObservationV1 {
+                head: job.head().clone(),
+                stop: stop.clone(),
+                request: request.clone(),
+            }));
+        }
+    }
+    Ok(None)
+}
+
+fn last_stop_before_observation(
+    job: &RecoveredJobV1,
+    claim_index: usize,
+    observation_index: usize,
+) -> JournalResult<&LocalCommandReceiptV1> {
+    // A later Cancel's boundary includes the already recorded observation.
+    // Choose the last eligible command in the verified append-only prefix
+    // as it stood before this request was born, even on a later head.
+    let command = job
+        .cancel_command_ids()
+        .iter()
+        .rfind(|id| {
+            job.cancel_boundaries
+                .get(id)
+                .is_some_and(|boundary| claim_index < *boundary && *boundary <= observation_index)
+        })
+        .ok_or(JournalError::Interrupted)?;
+    job.cancel_receipt(*command).ok_or(JournalError::Corrupt)
+}
+
+fn validate_terminal_request(
+    proof: &LegacyWorkerTerminalEvidenceV1,
+    request: &WorkerMutationV1,
+) -> JournalResult<()> {
+    let worker = proof.worker();
+    let WorkerTransitionV1::Observe { observation } = &request.transition else {
+        return Err(JournalError::Conflict);
+    };
+    if request.operation_id != proof.terminal_observation_operation_id()?
+        || observation.status != RuntimeStatusV1::Exited
+        || !matches!(
+            worker.state,
+            WorkerStateV1::Running | WorkerStateV1::Stopping
+        )
+        || !worker.quota_held
+        || worker.allocation_inconsistent
+        || worker.unknown_reason.is_some()
+        || worker.last_observation.as_ref().is_none_or(|last| {
+            last.status != RuntimeStatusV1::Running || last.running != Some(true)
+        })
+    {
+        return Err(JournalError::Conflict);
+    }
+    let observed = chrono::DateTime::parse_from_rfc3339(&observation.observed_at)
+        .map_err(|_| JournalError::Conflict)?;
+    let finished = chrono::DateTime::parse_from_rfc3339(
+        observation
+            .finished_at
+            .as_deref()
+            .ok_or(JournalError::Conflict)?,
+    )
+    .map_err(|_| JournalError::Conflict)?;
+    let terminal = crate::audit::expected_worker_transition(worker, request)
+        .map_err(|_| JournalError::Conflict)?;
+    if terminal.state != WorkerStateV1::Terminal || terminal.quota_held || observed < finished {
+        return Err(JournalError::Conflict);
+    }
+    Ok(())
 }
 
 fn project(
-    scope: &JournalScopeV1,
+    owner: &Arc<Inner>,
     job: &RecoveredJobV1,
     command_id: Uuid,
 ) -> JournalResult<LegacyWorkerTerminalEvidenceV1> {
+    let scope = &owner.scope;
     let boundary = *job
         .cancel_boundaries
         .get(&command_id)
@@ -193,6 +529,7 @@ fn project(
     }
 
     Ok(LegacyWorkerTerminalEvidenceV1 {
+        owner: Arc::downgrade(owner),
         scope: scope.clone(),
         head: job.head().clone(),
         cancel_receipt: cancel_receipt.clone(),
@@ -200,6 +537,7 @@ fn project(
         arm_receipt: arm_receipt.clone(),
         claim: claim.clone(),
         claim_receipt: acknowledged.receipt.clone(),
+        claim_index,
         authority: authority.clone(),
         owned: owned.clone(),
         worker: worker.clone(),
