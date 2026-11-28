@@ -73,6 +73,10 @@ mod retained_audit;
 #[path = "checkpoint_source.rs"]
 mod checkpoint_source;
 
+#[allow(dead_code, reason = "the Stops Writer query is composed separately")]
+#[path = "legacy_worker_terminal.rs"]
+mod legacy_worker_terminal;
+
 #[path = "legacy_named_launch.rs"]
 mod legacy_named_launch;
 

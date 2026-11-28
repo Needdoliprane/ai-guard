@@ -600,14 +600,14 @@ impl Registry {
             .find(|profile| profile.id == id)
             .ok_or_else(|| anyhow!("broker request is not authorized"))
     }
-    fn profile_for_scope(&self, scope: &JournalScopeV1) -> Result<&ControlProfileV1> {
+    pub(super) fn profile_for_scope(&self, scope: &JournalScopeV1) -> Result<&ControlProfileV1> {
         let profile = self.profile(scope.profile_id())?;
         ensure!(
             scope.installation_id() == self.data.installation_id
                 && scope.tenant_id() == profile.tenant_id
                 && scope.gateway_origin() == profile.gateway
                 && scope.control_namespace_uuid() == profile.control_namespace_uuid,
-            "named broker source scope does not match the operator profile"
+            "broker scope does not match the operator profile"
         );
         Ok(profile)
     }
