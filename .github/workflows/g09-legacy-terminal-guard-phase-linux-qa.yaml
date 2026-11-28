@@ -1,0 +1,215 @@
+name: G09 Legacy terminal Job guard phase and Fresh Linux QA
+
+on:
+  push:
+    branches: [codex/g09-legacy-terminal-guard-phase-linux-qa-20261128]
+    paths: [.github/workflows/g09-legacy-terminal-guard-phase-linux-qa.yaml]
+
+permissions:
+  contents: read
+
+jobs:
+  legacy-terminal-guard-phase:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      SOURCE_SHA: ff8ee695fa54393b8d04eaa54c0be51ea6a12340
+      SOURCE_TREE: b1f4113c9d85897dbe54b87f3c24772d59c6b95a
+      SERVICE_BLOB: c89449cc2787dc41091c08a29db6c8a52bb16dfd
+      ORACLE_BLOB: 58d0e559337a4b7192871149822883e8f52a4824
+      MANAGED_BLOB: 014c5bb8341f179d146de923e3a11aee8eab1025
+      FIXTURE_BLOB: 3766943d22121c2b225007a02e62c90ff5a5931b
+      JOBS_BLOB: 78a7021c52b99beda6bfac186c473010673280e6
+      CARGO_BUILD_JOBS: '1'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      CARGO_TERM_COLOR: never
+      RUST_MIN_STACK: '8388608'
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          persist-credentials: false
+
+      - name: Build one libtest for the Job guard and Fresh
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          ulimit -c 0
+          [[ "$RUST_MIN_STACK" == 8388608 ]]
+          selectors=(
+            broker::service::server::legacy_worker_terminal::tests::legacy_terminal_publication_replays_a_lost_core_reply_with_one_durable_effect
+            broker::service::server::legacy_worker_terminal::tests::cold_legacy_terminal_read_requires_the_exact_latch_and_preserves_state
+          )
+
+          report_not_run() {
+            local selector
+            for selector in "${selectors[@]}"; do
+              printf 'test=%s status=NOT_RUN\n' "$selector"
+            done
+          }
+
+          if [[ "${GITHUB_REF:-}" != refs/heads/codex/g09-legacy-terminal-guard-phase-linux-qa-20261128 ||
+                "$(git rev-parse HEAD)" != "$SOURCE_SHA" ||
+                "$(git rev-parse 'HEAD^{tree}')" != "$SOURCE_TREE" ||
+                "$(git rev-parse HEAD:src/broker/service/legacy_worker_terminal.rs)" != "$SERVICE_BLOB" ||
+                "$(git rev-parse HEAD:src/broker/service/legacy_worker_terminal_tests.rs)" != "$ORACLE_BLOB" ||
+                "$(git rev-parse HEAD:src/runner/managed.rs)" != "$MANAGED_BLOB" ||
+                "$(git rev-parse HEAD:src/runner/broker/executor/cancelled_recovery_fixture.rs)" != "$FIXTURE_BLOB" ||
+                "$(git rev-parse HEAD:src/broker/service/jobs.rs)" != "$JOBS_BLOB" ]]; then
+            printf 'source=FAIL\n'
+            report_not_run
+            exit 1
+          fi
+          printf 'source=PASS\nsource_sha=%s\nsource_tree=%s\n' "$SOURCE_SHA" "$SOURCE_TREE"
+          printf 'service_blob=%s\noracle_blob=%s\nmanaged_blob=%s\nfixture_blob=%s\n' \
+            "$SERVICE_BLOB" "$ORACLE_BLOB" "$MANAGED_BLOB" "$FIXTURE_BLOB"
+          printf 'jobs_blob=%s\n' "$JOBS_BLOB"
+          export AI_GUARD_BUILD_REVISION="$SOURCE_SHA"
+
+          emit_cargo_errors() {
+            local report
+            report=$(jq -cs '
+              [.[] | select(.reason == "compiler-message" and .message.level == "error") | .message |
+                {code: ((.code.code // "uncoded") | if test("^E[0-9]{4}$") then . else "uncoded" end),
+                 site: ([.spans[]? | select(.is_primary == true
+                     and (.file_name | test("^(src|tests)/([A-Za-z0-9_-]+/)*[A-Za-z0-9_-]+[.]rs$"))
+                     and (.file_name | length) <= 240
+                     and (.line_start | type) == "number"
+                     and (.column_start | type) == "number")
+                   | {file: .file_name, line: .line_start, column: .column_start}] | .[0])}]
+              | .[0:16]' "$1" 2>/dev/null) || return 1
+            printf 'rust_diagnostics=%s\n' "$report"
+          }
+
+          emit_unexpected_command() {
+            local capture="$1"
+            [[ "$(LC_ALL=C grep -a -m 2 -c '^g09_unexpected_command=' "$capture" 2>/dev/null || true)" == 1 ]] || return 0
+            LC_ALL=C grep -aEx 'g09_unexpected_command=(kill|rm|ps|start|create|image|volume|unknown):(pre_latch|restore|observe|reconcile|drop)' "$capture" 2>/dev/null || true
+          }
+
+          emit_guard_failure_phase() {
+            local capture="$1" selector="$2"
+            LC_ALL=C awk -v test_prefix="test $selector ... Error: " '
+              BEGIN { error_prefix = "Error: " }
+              /g09_guard_failure_phase=/ {
+                count++
+                if (index($0, error_prefix) == 1) {
+                  tag = substr($0, length(error_prefix) + 1)
+                } else if (index($0, test_prefix) == 1) {
+                  tag = substr($0, length(test_prefix) + 1)
+                } else {
+                  next
+                }
+                if (tag ~ /^g09_guard_failure_phase=(Prepare|EnterGuard|ConcurrentRecovery|Cancel|PendingAfterCut|ReopenForReplay|ReplayPreflight|Replay|ReopenForAck|ColdAck)$/) {
+                  phase = tag
+                }
+              }
+              END { if (count == 1 && phase != "") print phase }
+            ' "$capture" 2>/dev/null
+          }
+
+          scratch=$(mktemp -d /tmp/aig-g09.XXXXXX)
+          trap 'find "$scratch" -depth -mindepth 1 -delete; rmdir "$scratch"' EXIT
+          export TMPDIR="$scratch"
+          export CARGO_TARGET_DIR="$scratch/target"
+          synthetic="$scratch/unexpected-command.synthetic"
+          printf '%s\n' "private synthetic in $scratch/path" 'g09_unexpected_command=ps:restore' >"$synthetic"
+          [[ "$(emit_unexpected_command "$synthetic")" == 'g09_unexpected_command=ps:restore' ]]
+          printf '%s\n' 'Error: synthetic private text with no tag' >"$synthetic"
+          [[ -z "$(emit_unexpected_command "$synthetic")" ]]
+          printf '%s\n' 'g09_unexpected_command=exec:restore' 'g09_unexpected_command=ps:unlisted' >"$synthetic"
+          [[ -z "$(emit_unexpected_command "$synthetic")" ]]
+          printf '%s\n' "g09_unexpected_command=ps:restore $scratch/path" >"$synthetic"
+          [[ -z "$(emit_unexpected_command "$synthetic")" ]]
+          printf '%s\n' 'g09_unexpected_command=ps:restore' 'g09_unexpected_command=ps:restore' >"$synthetic"
+          [[ -z "$(emit_unexpected_command "$synthetic")" ]]
+          printf '%s\n' 'g09_unexpected_command=ps:restore' 'g09_unexpected_command=ps:unlisted' >"$synthetic"
+          [[ -z "$(emit_unexpected_command "$synthetic")" ]]
+          synthetic="$scratch/guard-failure-phase.synthetic"
+          printf '%s\n' 'synthetic noise' 'Error: g09_guard_failure_phase=Prepare' >"$synthetic"
+          [[ "$(emit_guard_failure_phase "$synthetic" "${selectors[0]}")" == 'g09_guard_failure_phase=Prepare' ]]
+          printf 'test %s ... Error: g09_guard_failure_phase=ColdAck\n' "${selectors[0]}" >"$synthetic"
+          [[ "$(emit_guard_failure_phase "$synthetic" "${selectors[0]}")" == 'g09_guard_failure_phase=ColdAck' ]]
+          printf '%s\n' 'Error: synthetic private text with no tag' >"$synthetic"
+          [[ -z "$(emit_guard_failure_phase "$synthetic" "${selectors[0]}")" ]]
+          printf '%s\n' 'Error: g09_guard_failure_phase=Unlisted' >"$synthetic"
+          [[ -z "$(emit_guard_failure_phase "$synthetic" "${selectors[0]}")" ]]
+          printf '%s\n' 'Error: g09_guard_failure_phase=Prepare synthetic-private-suffix' >"$synthetic"
+          [[ -z "$(emit_guard_failure_phase "$synthetic" "${selectors[0]}")" ]]
+          printf 'test %s ... Error: g09_guard_failure_phase=Prepare\n' "${selectors[1]}" >"$synthetic"
+          [[ -z "$(emit_guard_failure_phase "$synthetic" "${selectors[0]}")" ]]
+          printf 'Error: g09_guard_failure_phase=Prepare\ntest %s ... Error: g09_guard_failure_phase=Prepare\n' \
+            "${selectors[0]}" >"$synthetic"
+          [[ -z "$(emit_guard_failure_phase "$synthetic" "${selectors[0]}")" ]]
+          printf '%s\n' 'Error: g09_guard_failure_phase=Prepare' 'Error: g09_guard_failure_phase=Unlisted' >"$synthetic"
+          [[ -z "$(emit_guard_failure_phase "$synthetic" "${selectors[0]}")" ]]
+          build_json="$scratch/build.jsonl"
+
+          if ! cargo fetch --locked >"$scratch/fetch.log" 2>&1; then
+            printf 'fetch=FAIL\nbuild=NOT_RUN\n'
+            report_not_run
+            exit 1
+          fi
+          printf 'fetch=PASS\n'
+
+          if cargo test --locked --offline -j1 --no-default-features --lib --no-run \
+              --message-format=json >"$build_json" 2>"$scratch/build.stderr"; then
+            printf 'build=PASS\n'
+          else
+            rc=$?
+            printf 'build=FAIL\nbuild_exit=%s\n' "$rc"
+            emit_cargo_errors "$build_json" || printf 'rust_diagnostics=unavailable\n'
+            report_not_run
+            exit 1
+          fi
+
+          if ! libtest=$(jq -ers '[.[] | select(.reason == "compiler-artifact"
+              and .target.name == "agentsandbox" and .target.kind == ["lib"]
+              and .profile.test == true and (.executable | type) == "string") | .executable]
+              | unique | select(length == 1) | .[0]' "$build_json" 2>/dev/null) ||
+              [[ "$libtest" != "$CARGO_TARGET_DIR"/debug/deps/agentsandbox-* ||
+                 ! -f "$libtest" || ! -x "$libtest" || -L "$libtest" ]]; then
+            printf 'libtest=FAIL\n'
+            report_not_run
+            exit 1
+          fi
+          checksum=$(sha256sum -- "$libtest")
+          libtest_sha=${checksum%% *}
+          if [[ ! "$libtest_sha" =~ ^[0-9a-f]{64}$ ]]; then
+            printf 'libtest=FAIL\n'
+            report_not_run
+            exit 1
+          fi
+          printf 'libtest=PASS\nlibtest_sha256=%s\n' "$libtest_sha"
+
+          failed=0
+          for selector in "${selectors[@]}"; do
+            log="$scratch/test.log"
+            test_exit=0
+            { timeout --kill-after=10s 180s "$libtest" --exact "$selector" --test-threads=1 \
+              --color never; } >"$log" 2>&1 || test_exit=$?
+            if [[ "$test_exit" == 0 ]] &&
+                [[ "$(grep -Fxc 'running 1 test' "$log" || true)" == 1 ]] &&
+                [[ "$(grep -Fxc "test $selector ... ok" "$log" || true)" == 1 ]] &&
+                [[ "$(grep -Ec '^test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; [0-9]+ filtered out; finished in [0-9]+([.][0-9]+)?s$' "$log" || true)" == 1 ]]; then
+              printf 'test=%s status=PASS\ntest_exit=0\ntest_pass_count=1\ntest_fail_count=0\n' "$selector"
+            else
+              printf 'test=%s status=FAIL\ntest_exit=%s\n' "$selector" "$test_exit"
+              grep -m 1 -Eo 'panicked at src/([A-Za-z0-9_-]+/)*[A-Za-z0-9_-]+[.]rs:[0-9]+:[0-9]+' "$log" || true
+              if LC_ALL=C grep -aEq "^Error: |^test $selector [.][.][.] Error: " "$log"; then
+                printf 'libtest_result_error=true\n'
+                if [[ "$selector" == "${selectors[0]}" ]]; then
+                  emit_guard_failure_phase "$log" "$selector"
+                fi
+              fi
+              if [[ "$selector" == "${selectors[1]}" ]]; then
+                emit_unexpected_command "$log"
+              fi
+              failed=1
+            fi
+          done
+          exit "$failed"
