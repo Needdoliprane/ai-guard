@@ -1,0 +1,91 @@
+name: G06 MySQL Review anchor Linux QA
+
+on:
+  push:
+    branches: [codex/g06-review-anchor-linux-qa-20261128]
+    paths: [.github/workflows/g06-review-anchor-linux-qa.yaml]
+
+permissions:
+  contents: read
+
+jobs:
+  review-anchor:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      SOURCE: 6ee38a8e7dc1c2eb3b32f19d226da1f502dfcd55
+      SOURCE_TREE: fd590d328b0d0bef495421a8a8fb8201b4675064
+      PUBLIC_PARENT: a7146bb85e28040f7f7d7d0471932ec7141da0e3
+      CARGO_BUILD_JOBS: '1'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      CARGO_TERM_COLOR: never
+      LC_ALL: C
+      RUST_MIN_STACK: '8388608'
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.SOURCE }}
+          fetch-depth: 2
+          persist-credentials: false
+
+      - name: Verify the Review authority reference without a MySQL server
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          ulimit -c 0
+          selector=mysql_storage::owned_origin::preparation::publication::tests::owned_review_reference_matches_the_fresh_anchor_before_the_history_tail
+          if [[ "${GITHUB_REF:-}" != refs/heads/codex/g06-review-anchor-linux-qa-20261128 ||
+                "$(git rev-parse HEAD)" != "$SOURCE" ||
+                "$(git rev-parse 'HEAD^{tree}')" != "$SOURCE_TREE" ||
+                "$(git rev-parse HEAD^)" != "$PUBLIC_PARENT" ||
+                -n "$(git status --porcelain --untracked-files=all)" ]]; then
+            printf 'source=FAIL\ntest=%s status=NOT_RUN\n' "$selector"
+            exit 1
+          fi
+          printf 'source=PASS\nsource_sha=%s\nsource_tree=%s\n' "$SOURCE" "$SOURCE_TREE"
+          export AI_GUARD_BUILD_REVISION="$SOURCE"
+          scratch=$(mktemp -d /tmp/aig-g06-review.XXXXXX)
+          export TMPDIR="$scratch"
+          export CARGO_TARGET_DIR="$scratch/target"
+          if ! cargo fetch --locked >"$scratch/fetch.log" 2>&1; then
+            printf 'fetch=FAIL\ntest=%s status=NOT_RUN\n' "$selector"
+            exit 1
+          fi
+          if cargo test --locked --offline --no-default-features --features mysql-storage \
+              -p agentsandbox --lib --no-run --message-format=json \
+              >"$scratch/build.jsonl" 2>"$scratch/build.stderr"; then
+            printf 'build=PASS\n'
+          else
+            rc=$?
+            jq -Rr 'fromjson? | objects
+              | select(.reason == "compiler-message" and .message.level == "error")
+              | .message.code.code // "uncoded"
+              | select(test("^(E[0-9]{4}|uncoded)$"))' "$scratch/build.jsonl" |
+              sort -u | sed -n '1,10p'
+            printf 'build=FAIL\nbuild_exit=%s\ntest=%s status=NOT_RUN\n' "$rc" "$selector"
+            exit 1
+          fi
+          libtest=$(jq -ers '[.[] | select(.reason == "compiler-artifact"
+            and .target.name == "agentsandbox" and .target.kind == ["lib"]
+            and .profile.test == true and (.executable | type) == "string") | .executable]
+            | unique | select(length == 1) | .[0]' "$scratch/build.jsonl")
+          [[ "$libtest" == "$CARGO_TARGET_DIR"/debug/deps/agentsandbox-* &&
+             -f "$libtest" && -x "$libtest" && ! -L "$libtest" ]]
+          lib_sha=$(sha256sum -- "$libtest")
+          printf 'libtest_sha256=%s\n' "${lib_sha%% *}"
+          status=0
+          timeout --kill-after=5s 90s "$libtest" --exact "$selector" --test-threads=1 --color never \
+            >"$scratch/test.log" 2>&1 || status=$?
+          if [[ "$status" == 0 &&
+                "$(grep -Fxc 'running 1 test' "$scratch/test.log" || true)" == 1 &&
+                "$(grep -Fxc "test $selector ... ok" "$scratch/test.log" || true)" == 1 &&
+                "$(grep -Ec '^test result: ok[.] 1 passed; 0 failed; 0 ignored; 0 measured; [0-9]+ filtered out;' "$scratch/test.log" || true)" == 1 ]]; then
+            printf 'test=%s status=PASS\ntest_pass_count=1\n' "$selector"
+          else
+            printf 'test=%s status=FAIL\ntest_exit=%s\n' "$selector" "$status"
+            exit 1
+          fi
