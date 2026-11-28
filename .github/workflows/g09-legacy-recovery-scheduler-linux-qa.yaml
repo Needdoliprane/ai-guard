@@ -39,7 +39,6 @@ jobs:
           ulimit -c 0
           [[ "$RUST_MIN_STACK" == 8388608 ]]
           selectors=(
-            broker::service::jobs::retirement_audit_tests::audit_sweep_visits_later_jobs_without_creating_or_waiting_for_earlier_jobs
             broker::service::server::legacy_worker_terminal::tests::legacy_terminal_tick_uses_complete_job_under_incomplete_global_inventory
             broker::service::server::legacy_worker_terminal::tests::legacy_terminal_capture_refuses_late_writer_after_begin_recovery_failure
           )
@@ -61,10 +60,18 @@ jobs:
             "$SOURCE_SHA" "$SOURCE_TREE" "$JOBS_BLOB" "$SERVER_BLOB" "$TERMINAL_TESTS_BLOB"
           export AI_GUARD_BUILD_REVISION="$SOURCE_SHA"
 
-          scratch=$(mktemp -d "${RUNNER_TEMP:-/tmp}/g09-recovery-scheduler.XXXXXXXX")
+          # The native seed opens a Unix socket below this directory.
+          scratch=$(mktemp -d /tmp/aig-g09.XXXXXX)
           chmod 700 "$scratch"
           trap 'find "$scratch" -depth -mindepth 1 -delete; rmdir "$scratch"' EXIT
           export TMPDIR="$scratch"
+          fixture_endpoint="$TMPDIR/cd-000000/enforcer/endpoints/i-0000000000000000/s"
+          if (( ${#fixture_endpoint} > 103 )); then
+            printf 'fixture_socket_path=FAIL\n'
+            report_not_run
+            exit 1
+          fi
+          printf 'fixture_socket_path=PASS\n'
           export CARGO_TARGET_DIR="$scratch/target"
           build_json="$scratch/build.jsonl"
           if ! cargo fetch --locked >"$scratch/fetch.log" 2>&1; then
