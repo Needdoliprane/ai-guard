@@ -1,0 +1,142 @@
+name: G07 Claude SessionStart context Linux QA
+
+on:
+  push:
+    branches: [codex/g07-claude-session-start-context-linux-qa-20261128]
+    paths: [.github/workflows/g07-claude-session-start-context-linux-qa.yaml]
+
+permissions:
+  contents: read
+
+jobs:
+  recorded-session-start:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      SOURCE_SHA: db73b80cf975be6f238b26ada276e71c9f01d847
+      SOURCE_PARENT: ed6fd38017419a84fab06045b34744e66a0705f2
+      SOURCE_TREE: 275b004cd2de0c01c602b18bb8890512ea1cab1e
+      SOURCE_TESTS_BLOB: 1f1cdeccf8147043809dd2d1d1e3fed54b5854d9
+      SOURCE_FIXTURE_BLOB: 7da557d86204b229c010ad7b0e6a56c1809243c0
+      CARGO_BUILD_JOBS: '1'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      CARGO_TERM_COLOR: never
+      RUST_MIN_STACK: '8388608'
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Build one libtest and run the exact recorded SessionStart oracle
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          ulimit -c 0
+          selector=activity_channel::tests::recorded_claude_session_start_is_durable_with_control_context_before_ack
+          fixture=tests/adapters_fixtures/recorded/claude-code-2.1.329.offline.hooks.jsonl
+
+          report_not_run() {
+            printf 'test=%s status=NOT_RUN\n' "$selector"
+          }
+
+          if [[ "$GITHUB_REF" != refs/heads/codex/g07-claude-session-start-context-linux-qa-20261128 ||
+                "$(git rev-parse --is-shallow-repository 2>/dev/null)" != false ||
+                "$(git rev-parse HEAD 2>/dev/null)" != "$SOURCE_SHA" ||
+                "$(git rev-parse HEAD^ 2>/dev/null)" != "$SOURCE_PARENT" ||
+                "$(git rev-parse 'HEAD^{tree}' 2>/dev/null)" != "$SOURCE_TREE" ||
+                "$(git rev-parse HEAD:src/activity_channel/tests.rs 2>/dev/null)" != "$SOURCE_TESTS_BLOB" ||
+                "$(git rev-parse "HEAD:$fixture" 2>/dev/null)" != "$SOURCE_FIXTURE_BLOB" ||
+                "$GITHUB_SHA" == "$SOURCE_SHA" ||
+                "$(git rev-parse "$GITHUB_SHA^" 2>/dev/null)" != "$SOURCE_SHA" ]] ||
+              ! git merge-base --is-ancestor "$SOURCE_SHA" "$GITHUB_SHA" 2>/dev/null; then
+            printf 'source=FAIL\n'
+            report_not_run
+            exit 1
+          fi
+          printf 'source=PASS\nsource_sha=%s\nsource_parent=%s\nsource_tree=%s\ntests_blob=%s\nfixture_blob=%s\nstack_bytes=%s\n' \
+            "$SOURCE_SHA" "$SOURCE_PARENT" "$SOURCE_TREE" "$SOURCE_TESTS_BLOB" "$SOURCE_FIXTURE_BLOB" "$RUST_MIN_STACK"
+          export AI_GUARD_BUILD_REVISION="$SOURCE_SHA"
+
+          if ! scratch=$(mktemp -d /tmp/aig-g07.XXXXXX 2>/dev/null); then
+            printf 'scratch=FAIL\n'
+            report_not_run
+            exit 1
+          fi
+          trap 'rm -rf -- "$scratch"' EXIT
+          export TMPDIR="$scratch"
+          export CARGO_TARGET_DIR="$scratch/target"
+          build_json="$scratch/build.jsonl"
+
+          if ! cargo fetch --locked >"$scratch/fetch.log" 2>&1; then
+            printf 'fetch=FAIL\nbuild=NOT_RUN\n'
+            report_not_run
+            exit 1
+          fi
+          printf 'fetch=PASS\n'
+
+          if cargo test --locked --offline -j1 --no-default-features --lib --no-run \
+              --message-format=json >"$build_json" 2>"$scratch/build.stderr"; then
+            printf 'build=PASS\n'
+          else
+            rc=$?
+            printf 'build=FAIL\nbuild_exit=%s\n' "$rc"
+            jq -r '
+              select(.reason == "compiler-message" and .message.level == "error")
+              | (.message.code.code // "") as $code
+              | select($code | test("^E[0-9]{4}$"))
+              | .message.spans[]?
+              | select(.is_primary == true and .file_name == "src/activity_channel/tests.rs")
+              | select((.line_start | type) == "number" and .line_start > 0 and .line_start < 1000000)
+              | "rust_error=\($code):src/activity_channel/tests.rs:\(.line_start)"
+            ' "$build_json" 2>/dev/null | LC_ALL=C sort -u | sed -n '1,6p' || true
+            report_not_run
+            exit 1
+          fi
+
+          if ! libtest=$(jq -ers '[.[] | select(.reason == "compiler-artifact"
+              and .target.name == "agentsandbox" and .target.kind == ["lib"]
+              and .profile.test == true and (.executable | type) == "string") | .executable]
+              | unique | select(length == 1) | .[0]' "$build_json" 2>/dev/null) ||
+              [[ "$libtest" != "$CARGO_TARGET_DIR"/debug/deps/agentsandbox-* ||
+                 ! -f "$libtest" || ! -x "$libtest" || -L "$libtest" ]] ||
+              ! checksum=$(sha256sum -- "$libtest" 2>/dev/null); then
+            printf 'libtest=FAIL\n'
+            report_not_run
+            exit 1
+          fi
+          libtest_sha=${checksum%% *}
+          if [[ ! "$libtest_sha" =~ ^[0-9a-f]{64}$ ]]; then
+            printf 'libtest=FAIL\n'
+            report_not_run
+            exit 1
+          fi
+          printf 'libtest=PASS\nlibtest_sha256=%s\n' "$libtest_sha"
+
+          log="$scratch/test.log"
+          test_exit=0
+          "$libtest" --exact "$selector" --test-threads=1 --color never >"$log" 2>&1 || test_exit=$?
+          pass_count=$(grep -Fxc -- "test $selector ... ok" "$log" || true)
+          fail_count=$(grep -Fxc -- "test $selector ... FAILED" "$log" || true)
+          status=FAIL
+          if [[ "$test_exit" == 0 && "$pass_count" == 1 && "$fail_count" == 0 ]] &&
+              [[ "$(grep -Fxc 'running 1 test' "$log" || true)" == 1 ]] &&
+              [[ "$(grep -Ec '^test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; [0-9]+ filtered out; finished in [0-9]+([.][0-9]+)?s$' "$log" || true)" == 1 ]]; then
+            status=PASS
+          fi
+          printf 'test=%s status=%s\ntest_exit=%s\ntest_pass_count=%s\ntest_fail_count=%s\n' \
+            "$selector" "$status" "$test_exit" "$pass_count" "$fail_count"
+          if [[ "$status" == PASS ]]; then
+            exit 0
+          fi
+          grep -Eo 'panicked at src/activity_channel/tests\.rs:[0-9]{1,5}:[0-9]{1,5}:' "$log" |
+            sed -n '1s/^panicked at \(.*\):$/test_panic_at=\1/p' || true
+          if grep -q '^Error:' "$log"; then
+            printf 'test_result_error=true\n'
+          fi
+          exit 1
