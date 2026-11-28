@@ -233,17 +233,31 @@ async fn replay_published_prefix(
         bound.seq == PUBLISHED_EVENTS,
         "MySQL owned publication prefix is not the fresh source"
     );
-    let rows: Vec<Row> = tx
-        .query(
+    let mut result = tx
+        .query_iter(
             "SELECT seq,event_id,received_at,prev_hash,hash,payload \
              FROM ai_guard_audit_event ORDER BY seq LIMIT 3",
         )
         .await
         .map_err(driver_error)?;
-    ensure!(
-        rows.len() as i64 == PUBLISHED_EVENTS,
-        "MySQL owned publication chain length mismatch"
-    );
+    let prefix = async {
+        let Some(genesis) = result.next().await.map_err(driver_error)? else {
+            return Ok(None);
+        };
+        let Some(anchor) = result.next().await.map_err(driver_error)? else {
+            return Ok(None);
+        };
+        let has_suffix = result.next().await.map_err(driver_error)?.is_some();
+        Ok::<_, anyhow::Error>((!has_suffix).then_some([genesis, anchor]))
+    }
+    .await;
+    // Drain the cursor before decoding the retained rows or reusing the transaction.
+    let drained = result.drop_result().await.map_err(driver_error);
+    let prefix = prefix?;
+    drained?;
+    let Some(rows) = prefix else {
+        return Err(anyhow!("MySQL owned publication chain length mismatch"));
+    };
     verify_owned_history(
         rows.into_iter().map(decode_row::<EventColumns>),
         bound,
