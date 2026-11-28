@@ -276,11 +276,11 @@ impl Service {
             let material = Arc::clone(&self.material);
             let credential = self
                 .filesystem(move || {
-                    material
+                    Ok(material
                         .checked_reconciler(&profile)
-                        .map_err(|_| Code::Unavailable)
+                        .map_err(|_| Code::Unavailable))
                 })
-                .await?;
+                .await??;
             let expected_scope = canonical(scope).map_err(jobs::journal_error)?;
             let authenticate = || async {
                 let verified = VerifiedProfile::authenticate(
