@@ -1,0 +1,142 @@
+name: G09 Full3 antecedent Linux QA
+
+on:
+  push:
+    branches: [codex/g09-full3-terminal-antecedent-linux-qa-20261128]
+    paths: [.github/workflows/g09-full3-terminal-antecedent-linux-qa.yaml]
+
+permissions:
+  contents: read
+
+jobs:
+  full3-terminal-antecedent:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      SOURCE_SHA: f9320fdb0d8a59db64fc850a84d4c10234da428b
+      SOURCE_TREE: 1d52fd04003efb17bb0906b2cfec01db5f45c3d2
+      FIXTURE_BLOB: 622c4f63e0c5918cd97f0edfa81f95d8e09b5e09
+      RECOVERY_BLOB: 7185be8effa936d7fbe5e97cebcd4df0c375ffde
+      CHAIN_VERIFIER_BLOB: f03c99784f8170f24df57b98922dc43c0063f6c7
+      NATIVE_SUPPORT_BLOB: 632dd60e1189c44bc184b063cc2e0af8d2baf418
+      NATIVE_TESTS_BLOB: 6d0a8527294f0f6b3ef39020d5174fe88273b45f
+      CARGO_BUILD_JOBS: '1'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      CARGO_TERM_COLOR: never
+      LC_ALL: C
+      RUST_MIN_STACK: '8388608'
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          persist-credentials: false
+
+      - name: Build one libtest and verify the V5 claim before STOP
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          ulimit -c 0
+          selector=runner::broker::executor::journal::tests::cancelled_recovery_tests::fixture::full3_worker_claim_and_stop_survive_journal_reopen
+          report_not_run() {
+            printf 'test=%s status=NOT_RUN\n' "$selector"
+          }
+          if [[ "${GITHUB_REF:-}" != refs/heads/codex/g09-full3-terminal-antecedent-linux-qa-20261128 ||
+                "$(git rev-parse HEAD)" != "$SOURCE_SHA" ||
+                "$(git rev-parse 'HEAD^{tree}')" != "$SOURCE_TREE" ||
+                "$(git rev-parse HEAD:src/runner/broker/executor/cancelled_recovery_fixture.rs)" != "$FIXTURE_BLOB" ||
+                "$(git rev-parse HEAD:src/broker/journal/recovery.rs)" != "$RECOVERY_BLOB" ||
+                "$(git rev-parse HEAD:src/broker/journal/confirmed.rs)" != "$CHAIN_VERIFIER_BLOB" ||
+                "$(git rev-parse HEAD:src/broker/enforcer/retirement_test_support.rs)" != "$NATIVE_SUPPORT_BLOB" ||
+                "$(git rev-parse HEAD:src/broker/enforcer/retirement_tests.rs)" != "$NATIVE_TESTS_BLOB" ||
+                "$RUST_MIN_STACK" != 8388608 ]]; then
+            printf 'source=FAIL\n'
+            report_not_run
+            exit 1
+          fi
+          printf 'source=PASS\nsource_sha=%s\nsource_tree=%s\nfixture_blob=%s\nrecovery_blob=%s\nchain_verifier_blob=%s\nnative_support_blob=%s\nnative_tests_blob=%s\n' \
+            "$SOURCE_SHA" "$SOURCE_TREE" "$FIXTURE_BLOB" "$RECOVERY_BLOB" "$CHAIN_VERIFIER_BLOB" \
+            "$NATIVE_SUPPORT_BLOB" "$NATIVE_TESTS_BLOB"
+          export AI_GUARD_BUILD_REVISION="$SOURCE_SHA"
+
+          # Both synthetic IPC peers use the same private, short root.
+          scratch=$(mktemp -d /tmp/aig-g09.XXXXXX)
+          chmod 700 "$scratch"
+          trap 'find "$scratch" -depth -mindepth 1 -delete; rmdir "$scratch"' EXIT
+          export TMPDIR="$scratch" AI_GUARD_TEST_D5_IPC_ROOT="$scratch"
+          legacy_endpoint="$scratch/cd-000000/enforcer/endpoints/i-0000000000000000/s"
+          full3_endpoint="$scratch/f3r-000000/role/endpoints/i-0000000000000000/s"
+          if [[ "$scratch" != "$(realpath -- "$scratch")" ]] ||
+              (( ${#legacy_endpoint} > 103 || ${#full3_endpoint} > 103 )); then
+            printf 'fixture_socket_path=FAIL\n'
+            report_not_run
+            exit 1
+          fi
+          printf 'fixture_socket_path=PASS\nlegacy_socket_bytes=%s\nfull3_socket_bytes=%s\n' \
+            "${#legacy_endpoint}" "${#full3_endpoint}"
+          export CARGO_TARGET_DIR="$scratch/target"
+          build_json="$scratch/build.jsonl"
+          if ! cargo fetch --locked >"$scratch/fetch.log" 2>&1; then
+            printf 'fetch=FAIL\nbuild=NOT_RUN\n'
+            report_not_run
+            exit 1
+          fi
+          printf 'fetch=PASS\n'
+          if cargo test --locked --offline -j1 --no-default-features --lib --no-run \
+              --message-format=json >"$build_json" 2>"$scratch/build.stderr"; then
+            printf 'build=PASS\n'
+          else
+            rc=$?
+            printf 'build=FAIL\nbuild_exit=%s\n' "$rc"
+            report=$(jq -cs '[.[] | select(.reason == "compiler-message" and .message.level == "error") | .message |
+              {code: ((.code.code // "uncoded") | if test("^E[0-9]{4}$") then . else "uncoded" end),
+               site: ([.spans[]? | select(.is_primary == true and (.file_name | test("^(src|tests)(/[A-Za-z0-9_-]+)+[.]rs$"))
+                 and (.line_start | type) == "number" and (.column_start | type) == "number")
+                 | {file: .file_name, line: .line_start, column: .column_start}] | .[0])}]
+              | .[0:16]' "$build_json" 2>/dev/null) || report=unavailable
+            printf 'rust_diagnostics=%s\n' "$report"
+            report_not_run
+            exit 1
+          fi
+          if ! libtest=$(jq -ers '[.[] | select(.reason == "compiler-artifact" and .target.name == "agentsandbox"
+              and .target.kind == ["lib"] and .profile.test == true and (.executable | type) == "string") | .executable]
+              | unique | select(length == 1) | .[0]' "$build_json" 2>/dev/null) ||
+              [[ "$libtest" != "$CARGO_TARGET_DIR"/debug/deps/agentsandbox-* || ! -f "$libtest" || ! -x "$libtest" || -L "$libtest" ]]; then
+            printf 'libtest=FAIL\n'
+            report_not_run
+            exit 1
+          fi
+          checksum=$(sha256sum -- "$libtest")
+          libtest_sha=${checksum%% *}
+          if [[ ! "$libtest_sha" =~ ^[0-9a-f]{64}$ ]]; then
+            printf 'libtest=FAIL\n'
+            report_not_run
+            exit 1
+          fi
+          printf 'libtest=PASS\nlibtest_sha256=%s\n' "$libtest_sha"
+
+          if ! timeout --kill-after=2s 15s "$libtest" --exact "$selector" --list --color never >"$scratch/selection.log" 2>&1 ||
+              [[ "$(grep -Fxc "$selector: test" "$scratch/selection.log" || true)" != 1 ]]; then
+            printf 'selection=FAIL\n'
+            report_not_run
+            exit 1
+          fi
+          printf 'selection=PASS\n'
+          log="$scratch/test.log"
+          test_exit=0
+          timeout --kill-after=10s 180s "$libtest" --exact "$selector" --test-threads=1 --color never \
+            >"$log" 2>&1 || test_exit=$?
+          if [[ "$test_exit" == 0 ]] &&
+              [[ "$(grep -Fxc 'running 1 test' "$log" || true)" == 1 ]] &&
+              [[ "$(grep -Fxc "test $selector ... ok" "$log" || true)" == 1 ]] &&
+              [[ "$(grep -Ec '^test result: ok[.] 1 passed; 0 failed; 0 ignored; 0 measured; [0-9]+ filtered out; finished in [0-9]+([.][0-9]+)?s$' "$log" || true)" == 1 ]]; then
+            printf 'test=%s status=PASS\ntest_exit=0\ntest_pass_count=1\ntest_fail_count=0\n' "$selector"
+          else
+            printf 'test=%s status=FAIL\ntest_exit=%s\n' "$selector" "$test_exit"
+            grep -m 1 -Eo 'panicked at (src|tests)(/[A-Za-z0-9_-]+)+[.]rs:[0-9]+:[0-9]+' "$log" || true
+            if grep -q '^Error: ' "$log"; then printf 'libtest_result_error=true\n'; fi
+            exit 1
+          fi
