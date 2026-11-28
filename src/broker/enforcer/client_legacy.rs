@@ -1472,12 +1472,17 @@ impl EnforcerClient {
             let Response::Slots { values } = response else {
                 return Err(response_error(response).into());
             };
-            assert!(matches!(
-                values.as_slice(),
-                [value] if value.arm_id == import_arm_id
-                    && value.generation == recorded.generation().1
-                    && value.phase == SlotPhaseV1::Stopping && value.prepared_once
-            ));
+            // The authenticated STOP ACK already proves the latch. Check
+            // the retained slot without sampling the watchdog's phase.
+            let [slot] = values.as_slice() else {
+                anyhow::bail!("expected one slot after the STOP acknowledgement");
+            };
+            anyhow::ensure!(slot.arm_id == import_arm_id, "STOP slot identity mismatch");
+            anyhow::ensure!(
+                slot.generation == recorded.generation().1,
+                "STOP slot generation mismatch"
+            );
+            anyhow::ensure!(slot.prepared_once, "STOP slot Prepare state missing");
             Some(target.arm().clone())
         } else {
             None
