@@ -1,8 +1,6 @@
 //! Private broker transport for the retained Legacy confirmation/admission.
 //! This client has no Runner surface and never starts a runtime.
 use super::*;
-#[cfg(test)]
-use crate::control::MutationReceiptV1;
 use crate::{
     audit::legacy_session_prepare::LegacyNamedCancelReservationV1,
     broker::{
@@ -10,8 +8,9 @@ use crate::{
         presence::http::{Client, Limits},
     },
     control::{
-        AdmissionRefusalV1, ArmSubjectV1, HelperPermissionV1, MutationResultV1, RuntimeKindV1,
-        WorkerV1, session_control::*,
+        AdmissionRefusalV1, ArmSubjectV1, ClaimDispositionV1, HelperClaimResultV1,
+        HelperPermissionV1, MutationReceiptV1, MutationResultV1, RuntimeKindV1, WorkerV1,
+        session_control::*,
     },
 };
 use reqwest::{Method, StatusCode};
@@ -126,7 +125,7 @@ async fn exchange_confirmation<T>(
     (method, body): (Method, Option<Vec<u8>>),
     binding_ref: Uuid,
     suffix: &str,
-    success_bytes: u64,
+    response_bytes: u64,
     generation: Option<(&CancelGeneration, u64)>,
     decode: impl FnOnce(StatusCode, &[u8]) -> Result<T>,
 ) -> Result<T> {
@@ -146,8 +145,8 @@ async fn exchange_confirmation<T>(
                 body,
                 Limits {
                     request: LEGACY_NAMED_ADMISSION_REQUEST_BYTES as u64,
-                    success: success_bytes,
-                    error: RESPONSE_BYTES,
+                    success: response_bytes,
+                    error: response_bytes,
                 },
             )
             .await
@@ -361,6 +360,69 @@ impl LegacyNamedControl {
         )
         .await
     }
+
+    /// Reconcile the exact consumed verification claim under this broker.
+    /// An absent receipt only describes the remote snapshot of this read.
+    #[allow(
+        dead_code,
+        reason = "the named verification claim recovery caller is composed separately"
+    )]
+    pub(crate) async fn reconcile_legacy_named_import_verification_claim(
+        &self,
+        request: &LegacyNamedImportVerificationClaimRequestV2,
+    ) -> Result<Option<MutationReceiptV1>> {
+        let presence = &self.0;
+        request.validate().map_err(|_| PresenceError::Protocol)?;
+        if request.namespace != presence.scope.control_namespace_uuid.to_string() {
+            return Err(PresenceError::Forbidden);
+        }
+        presence.revalidate()?;
+        let value = serde_json::to_value(request).map_err(|_| PresenceError::Protocol)?;
+        presence.screen(&value)?;
+        let body = serde_json::to_vec(request).map_err(|_| PresenceError::Protocol)?;
+        if body.len() > LEGACY_NAMED_ADMISSION_REQUEST_BYTES {
+            return Err(PresenceError::Protocol);
+        }
+        exchange_confirmation(
+            presence,
+            (Method::POST, Some(body)),
+            request.binding_ref,
+            "/admission/import-verification-claim/reconcile",
+            LEGACY_NAMED_IMPORT_CLAIM_RESPONSE_BYTES as u64,
+            None,
+            |status, bytes| {
+                decode_verification_claim_reconciliation(presence, request, status, bytes)
+            },
+        )
+        .await
+    }
+}
+
+fn decode_verification_reconciliation(
+    presence: &PresenceAuthority,
+    status: StatusCode,
+    bytes: &[u8],
+    receipt_not_found: &str,
+) -> Result<Option<Value>> {
+    let value = crate::json::decode_unique(bytes, 64)
+        .map_err(|_| PresenceError::AdmissionOutcomeUnknown)?;
+    presence
+        .screen(&value)
+        .map_err(|_| PresenceError::AdmissionOutcomeUnknown)?;
+    if status == StatusCode::OK {
+        return Ok(Some(value));
+    }
+    if status == StatusCode::NOT_FOUND
+        && value.as_object().is_some_and(|fields| fields.len() == 1)
+        && value["error"]
+            .as_object()
+            .is_some_and(|fields| fields.len() == 2)
+        && value["error"]["code"] == receipt_not_found
+        && value["error"]["message"].is_string()
+    {
+        return Ok(None);
+    }
+    Err(PresenceError::AdmissionOutcomeUnknown)
 }
 
 fn decode_verification_arm_reconciliation(
@@ -369,24 +431,18 @@ fn decode_verification_arm_reconciliation(
     status: StatusCode,
     bytes: &[u8],
 ) -> Result<Option<ArmResultV1>> {
-    let value = crate::json::decode_unique(bytes, 64)
-        .map_err(|_| PresenceError::AdmissionOutcomeUnknown)?;
-    presence
-        .screen(&value)
-        .map_err(|_| PresenceError::AdmissionOutcomeUnknown)?;
-    if status == StatusCode::NOT_FOUND
-        && value.as_object().is_some_and(|fields| fields.len() == 1)
-        && value["error"]
-            .as_object()
-            .is_some_and(|fields| fields.len() == 2)
-        && value["error"]["code"] == LEGACY_NAMED_IMPORT_VERIFICATION_ARM_RECEIPT_NOT_FOUND
-        && value["error"]["message"].is_string()
-    {
+    let Some(value) = decode_verification_reconciliation(
+        presence,
+        status,
+        bytes,
+        LEGACY_NAMED_IMPORT_VERIFICATION_ARM_RECEIPT_NOT_FOUND,
+    )?
+    else {
         return Ok(None);
-    }
+    };
     let expected_arm =
         serde_json::to_value(&request.arm).map_err(|_| PresenceError::AdmissionOutcomeUnknown)?;
-    if status != StatusCode::OK || value["arm"] != expected_arm {
+    if value["arm"] != expected_arm {
         return Err(PresenceError::AdmissionOutcomeUnknown);
     }
     let result: ArmResultV1 =
@@ -408,6 +464,32 @@ fn decode_verification_arm_reconciliation(
         return Err(PresenceError::AdmissionOutcomeUnknown);
     }
     Ok(Some(result))
+}
+
+fn decode_verification_claim_reconciliation(
+    presence: &PresenceAuthority,
+    request: &LegacyNamedImportVerificationClaimRequestV2,
+    status: StatusCode,
+    bytes: &[u8],
+) -> Result<Option<MutationReceiptV1>> {
+    let Some(value) = decode_verification_reconciliation(
+        presence,
+        status,
+        bytes,
+        LEGACY_NAMED_IMPORT_VERIFICATION_CLAIM_RECEIPT_NOT_FOUND,
+    )?
+    else {
+        return Ok(None);
+    };
+    let result: HelperClaimResultV1 =
+        serde_json::from_value(value).map_err(|_| PresenceError::AdmissionOutcomeUnknown)?;
+    if result.disposition != ClaimDispositionV1::AlreadyConsumed {
+        return Err(PresenceError::AdmissionOutcomeUnknown);
+    }
+    request
+        .validate_receipt(&result.receipt)
+        .map_err(|_| PresenceError::AdmissionOutcomeUnknown)?;
+    Ok(Some(result.receipt))
 }
 
 async fn send_import_arm(
@@ -1044,6 +1126,122 @@ mod tests {
         ));
         let duplicate = br#"{"error":{"code":"not_found","code":"legacy_named_import_verification_arm_receipt_not_found","message":"Missing receipt."}}"#;
         assert!(decode(StatusCode::NOT_FOUND, duplicate).is_err());
+        Ok(())
+    }
+
+    fn import_claim_fixture()
+    -> anyhow::Result<(LegacyNamedImportClaimRequestV1, HelperClaimResultV1)> {
+        use crate::control::{
+            ArmReceiptV1, HelperStartClaimV1, HostClockMethodV1, HostClockSampleV1,
+        };
+
+        let binding_ref = Uuid::new_v4();
+        let namespace = Uuid::new_v4().to_string();
+        let arm_id = Uuid::new_v4();
+        let worker_id = Uuid::new_v4().to_string();
+        let request = LegacyNamedImportClaimRequestV1 {
+            version: 1,
+            binding_ref,
+            namespace: namespace.clone(),
+            claim: HelperStartClaimV1 {
+                version: 1,
+                operation_id: LegacyNamedImportClaimRequestV1::operation_id(binding_ref, arm_id),
+                helper_id: Uuid::new_v4().to_string(),
+                emitter_id: Uuid::new_v4().to_string(),
+                arm_receipt: ArmReceiptV1 {
+                    version: 1,
+                    arm_id: arm_id.to_string(),
+                    worker_id: worker_id.clone(),
+                    attempt_id: Uuid::new_v4().to_string(),
+                    input_hash: "a".repeat(64),
+                    control_namespace_uuid: namespace,
+                    audit_seq: 11,
+                    audit_hash: "b".repeat(64),
+                },
+                clock_check: HostClockSampleV1 {
+                    version: 1,
+                    method: HostClockMethodV1::LinuxBoottimeV1,
+                    boot_id: Uuid::new_v4().to_string(),
+                    continuous_ns_decimal: "100000000000".into(),
+                    observed_utc: None,
+                },
+            },
+        };
+        let response = HelperClaimResultV1 {
+            disposition: ClaimDispositionV1::EmitOnce,
+            receipt: MutationReceiptV1 {
+                operation_id: request.claim.operation_id.clone(),
+                worker_id: Some(worker_id),
+                revision: None,
+                input_hash: request.input_hash()?,
+                audit_seq: 12,
+                audit_hash: "c".repeat(64),
+            },
+        };
+        Ok((request, response))
+    }
+
+    #[test]
+    fn verification_claim_reconciliation_accepts_only_the_exact_consumed_receipt()
+    -> anyhow::Result<()> {
+        let fixture = Fixture::new();
+        fixture.write_config();
+        let scope = fixture.scope();
+        let namespace = scope.control_namespace_uuid.to_string();
+        let presence = PreparedPresence::load(&fixture.config, scope, vec![])?;
+        let (legacy, mut response) = import_claim_fixture()?;
+        let binding_ref = legacy.binding_ref;
+        let mut claim = legacy.claim;
+        claim.arm_receipt.control_namespace_uuid = namespace.clone();
+        claim.arm_receipt.arm_id = LegacyNamedImportVerificationArmRequestV2::operation_id(
+            binding_ref,
+            canonical_uuid(&claim.arm_receipt.attempt_id)?,
+        );
+        claim.operation_id = LegacyNamedImportVerificationClaimRequestV2::operation_id(
+            binding_ref,
+            canonical_uuid(&claim.arm_receipt.arm_id)?,
+        );
+        let request = LegacyNamedImportVerificationClaimRequestV2 {
+            version: 2,
+            binding_ref,
+            namespace,
+            claim,
+        };
+        response.receipt.operation_id = request.claim.operation_id.clone();
+        response.receipt.input_hash = request.input_hash()?;
+        response.disposition = ClaimDispositionV1::AlreadyConsumed;
+        let decode = |status, bytes: &[u8]| {
+            decode_verification_claim_reconciliation(&presence.authority, &request, status, bytes)
+        };
+        let consumed = serde_json::to_vec(&response)?;
+        assert_eq!(
+            decode(StatusCode::OK, &consumed)?,
+            Some(response.receipt.clone())
+        );
+        assert!(decode(StatusCode::CREATED, &consumed).is_err());
+
+        let mut divergent = response.clone();
+        divergent.disposition = ClaimDispositionV1::EmitOnce;
+        for status in [StatusCode::OK, StatusCode::CREATED] {
+            assert!(decode(status, &serde_json::to_vec(&divergent)?).is_err());
+        }
+        divergent = response.clone();
+        divergent.receipt.input_hash = request.claim.input_hash()?;
+        assert!(decode(StatusCode::OK, &serde_json::to_vec(&divergent)?).is_err());
+        divergent = response;
+        divergent.receipt.audit_seq = request.claim.arm_receipt.audit_seq;
+        assert!(decode(StatusCode::OK, &serde_json::to_vec(&divergent)?).is_err());
+
+        let absent = br#"{"error":{"code":"legacy_named_import_verification_claim_receipt_not_found","message":"Missing receipt."}}"#;
+        assert!(decode(StatusCode::NOT_FOUND, absent)?.is_none());
+        assert!(decode(StatusCode::FORBIDDEN, absent).is_err());
+        let legacy_absence = br#"{"error":{"code":"legacy_named_import_claim_receipt_not_found","message":"Missing receipt."}}"#;
+        assert!(matches!(
+            decode(StatusCode::NOT_FOUND, legacy_absence),
+            Err(PresenceError::AdmissionOutcomeUnknown)
+        ));
+        let orphan = br#"{"error":{"code":"not_found","message":"Missing receipt."}}"#;
+        assert!(decode(StatusCode::NOT_FOUND, orphan).is_err());
         Ok(())
     }
 
