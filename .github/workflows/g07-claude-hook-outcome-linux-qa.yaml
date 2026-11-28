@@ -1,0 +1,133 @@
+name: G07 Claude hook outcome Linux QA
+
+on:
+  push:
+    branches: [codex/g07-claude-hook-outcome-linux-qa-20261128]
+    paths: [.github/workflows/g07-claude-hook-outcome-linux-qa.yaml]
+
+permissions:
+  contents: read
+
+jobs:
+  hooks:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      SOURCE_SHA: 11376cf0650e9a43187cc78844ca03fad972c6ea
+      SOURCE_TREE: 03ab1dbe497b821c477fbbde31c641a1e660104c
+      CARGO_BUILD_JOBS: '1'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      CARGO_TERM_COLOR: never
+      RUST_MIN_STACK: '8388608'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Pin source and driver
+        id: pins
+        shell: bash
+        run: |
+          set -euo pipefail
+          driver_sha=$(git rev-parse HEAD)
+          driver_tree=$(git rev-parse 'HEAD^{tree}')
+          [[ "$driver_sha" == "$GITHUB_SHA" ]]
+          [[ "$GITHUB_REF_NAME" == 'codex/g07-claude-hook-outcome-linux-qa-20261128' ]]
+          printf 'driver_sha=%s\ndriver_tree=%s\nsource_sha=%s\nsource_tree=%s\n' \
+            "$driver_sha" "$driver_tree" "$SOURCE_SHA" "$SOURCE_TREE"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: 11376cf0650e9a43187cc78844ca03fad972c6ea
+          path: source
+          persist-credentials: false
+
+      - name: Build one integration test binary and run two exact hooks oracles
+        shell: bash
+        working-directory: source
+        run: |
+          set -euo pipefail
+          umask 077
+          selectors=(
+            claude_hooks_map_tools_prompts_and_subagents_without_inventing_a_parent
+            every_provider_event_is_declared_native_and_keeps_the_trusted_context
+          )
+          report_not_run() {
+            local selector
+            for selector in "${selectors[@]}"; do
+              printf 'test=%s status=NOT_RUN\n' "$selector"
+            done
+          }
+          if [[ "$(git rev-parse HEAD)" != "$SOURCE_SHA" ||
+                "$(git rev-parse 'HEAD^{tree}')" != "$SOURCE_TREE" ]]; then
+            printf 'source=FAIL\n'
+            report_not_run
+            exit 1
+          fi
+          printf 'source=PASS\nsource_sha=%s\nsource_tree=%s\n' "$SOURCE_SHA" "$SOURCE_TREE"
+
+          scratch=$(mktemp -d "$RUNNER_TEMP/g07-claude-hooks.XXXXXX")
+          trap 'rm -rf -- "$scratch"' EXIT
+          export CARGO_TARGET_DIR="$scratch/target"
+          export TMPDIR="$scratch"
+          if ! cargo fetch --locked >"$scratch/fetch.log" 2>&1; then
+            printf 'fetch=FAIL\nbuild=NOT_RUN\n'
+            report_not_run
+            exit 1
+          fi
+          printf 'fetch=PASS\n'
+
+          if cargo test --locked --offline --test provider_activity_adapters \
+              --no-run --message-format=json >"$scratch/build.jsonl" 2>"$scratch/build.stderr"; then
+            printf 'build=PASS\n'
+          else
+            printf 'build=FAIL\n'
+            report_not_run
+            exit 1
+          fi
+
+          if ! libtest=$(jq -ers '[.[] | select(.reason == "compiler-artifact"
+              and .target.name == "provider_activity_adapters"
+              and .target.kind == ["test"] and .profile.test == true
+              and .fresh == false and (.executable | type) == "string") | .executable]
+              | unique | select(length == 1) | .[0]' "$scratch/build.jsonl" 2>/dev/null) ||
+              [[ "$libtest" != "$CARGO_TARGET_DIR"/debug/deps/provider_activity_adapters-* ||
+                 ! -f "$libtest" || ! -x "$libtest" || -L "$libtest" ]]; then
+            printf 'libtest=FAIL\n'
+            report_not_run
+            exit 1
+          fi
+          initial_sha=$(sha256sum -- "$libtest" | cut -d' ' -f1)
+          [[ "$initial_sha" =~ ^[0-9a-f]{64}$ ]]
+          printf 'libtest_sha256=%s\n' "$initial_sha"
+
+          check_selector() {
+            local selector=$1 log="$scratch/test.log"
+            if ! "$libtest" --exact "$selector" --test-threads=1 --color never >"$log" 2>&1; then
+              printf 'FAIL'
+            elif grep -Fqx 'running 0 tests' "$log"; then
+              printf 'NO_TEST'
+            elif grep -Fqx 'running 1 test' "$log" &&
+                 grep -Fqx "test $selector ... ok" "$log" &&
+                 grep -Eq '^test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; [0-9]+ filtered out;' "$log"; then
+              printf 'PASS'
+            else
+              printf 'FAIL'
+            fi
+          }
+
+          failed=0
+          for selector in "${selectors[@]}"; do
+            status=$(check_selector "$selector")
+            printf 'test=%s status=%s\n' "$selector" "$status"
+            [[ "$status" == PASS ]] || failed=1
+          done
+          final_sha=$(sha256sum -- "$libtest" | cut -d' ' -f1)
+          if [[ "$final_sha" != "$initial_sha" ]]; then
+            printf 'libtest_integrity=FAIL\n'
+            exit 1
+          fi
+          printf 'libtest_integrity=PASS\n'
+          exit "$failed"
