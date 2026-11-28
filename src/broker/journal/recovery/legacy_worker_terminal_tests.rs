@@ -222,6 +222,8 @@ fn validates_only_the_exact_core_receipt_of_the_retained_terminal_observation() 
         hash: "d".repeat(64),
     };
     let pending = RetainedLegacyWorkerTerminalObservationV1 {
+        owner: std::sync::Weak::new(),
+        operation: Uuid::from_u128(14),
         head: head.clone(),
         stop: LocalCommandReceiptV1 {
             command_id: Uuid::from_u128(9),

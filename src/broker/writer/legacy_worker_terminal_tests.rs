@@ -1,7 +1,10 @@
 use super::*;
 use crate::{
     broker::journal::canonical,
-    control::{ArmSubjectV1, QuotaPolicyV1, RuntimeStatusV1, WorkerMutationV1, WorkerTransitionV1},
+    control::{
+        ArmSubjectV1, MutationReceiptV1, MutationResultV1, QuotaPolicyV1, RuntimeStatusV1,
+        WorkerMutationV1, WorkerStateV1, WorkerTransitionV1, content_hash,
+    },
     runner::broker::running_seed_for_cold_terminal_test,
 };
 use anyhow::Context;
@@ -295,6 +298,97 @@ async fn stops_writer_retains_the_first_terminal_observation_across_later_stops(
     assert_eq!(pending.stop().command_id(), command);
     assert_eq!(pending.stop().head(), &stop_head);
     assert_eq!(pending.head(), &later_head);
+
+    let parent = reopened
+        .legacy_worker_terminal_evidence(operation, command)
+        .await?;
+    let worker = crate::audit::expected_worker_transition(parent.worker(), pending.request())?;
+    let response = MutationResultV1 {
+        receipt: MutationReceiptV1 {
+            operation_id: pending.request().operation_id.clone(),
+            worker_id: Some(worker.worker_id.clone()),
+            revision: Some(worker.revision),
+            input_hash: content_hash("ai-guard:worker-mutation:v1", pending.request())?,
+            // Synthetic reply above the fixture's entire audit prefix. This
+            // oracle exercises the journal adapter, with no Core exchange.
+            audit_seq: i64::MAX - 1,
+            audit_hash: "a".repeat(64),
+        },
+        worker,
+        disposition: None,
+    };
+    let intercalated = Uuid::new_v4();
+    let intercalated_stop = reopened
+        .append_cancel(CancelInputV1::new(operation, intercalated)?)
+        .await?;
+    let intercalated_head = intercalated_stop.receipt().head().clone();
+    let intercalated_hash = intercalated_stop.receipt().input_hash().to_owned();
+    drop(intercalated_stop);
+    assert!(matches!(
+        reopened
+            .confirm_legacy_worker_terminal_observation(&appended, response.clone())
+            .await,
+        Err(LifecycleWriteFailure::BeforePublication(
+            JournalError::Conflict
+        ))
+    ));
+
+    let mut divergent = response.clone();
+    divergent.receipt.input_hash = "b".repeat(64);
+    assert!(matches!(
+        reopened
+            .confirm_legacy_worker_terminal_observation(&pending, divergent)
+            .await,
+        Err(LifecycleWriteFailure::BeforePublication(
+            JournalError::Conflict
+        ))
+    ));
+    let acknowledged = reopened
+        .confirm_legacy_worker_terminal_observation(&pending, response.clone())
+        .await
+        .map_err(LifecycleWriteFailure::journal_error)?;
+    assert_eq!(
+        acknowledged.head().revision(),
+        intercalated_head.revision() + 1
+    );
+    assert_eq!(canonical(acknowledged.response())?, canonical(&response)?);
+    let replayed = reopened
+        .confirm_legacy_worker_terminal_observation(&pending, response.clone())
+        .await
+        .map_err(LifecycleWriteFailure::journal_error)?;
+    assert_eq!(acknowledged.head(), replayed.head());
+    assert_eq!(canonical(replayed.response())?, canonical(&response)?);
+    assert!(matches!(
+        reopened.legacy_worker_terminal_observation(operation).await,
+        Err(JournalError::Conflict)
+    ));
+    // Both audit hashes are well-formed. A plausible but different reply
+    // cannot replace the exact receipt already durable at this index.
+    let mut divergent = response.clone();
+    divergent.receipt.audit_hash = "c".repeat(64);
+    pending.validate_response(&divergent)?;
+    assert!(matches!(
+        reopened
+            .confirm_legacy_worker_terminal_observation(&pending, divergent)
+            .await,
+        Err(LifecycleWriteFailure::BeforePublication(
+            JournalError::Conflict
+        ))
+    ));
+    let observed = reopened
+        .recovery_status(operation)
+        .await?
+        .context("acknowledged job missing")?;
+    assert_eq!(observed.head(), acknowledged.head());
+    let stop = observed
+        .cancel_receipts()
+        .iter()
+        .find(|receipt| receipt.command_id() == intercalated)
+        .context("intercalated STOP lost")?;
+    assert_eq!(stop.head(), &intercalated_head);
+    assert_eq!(stop.input_hash(), intercalated_hash);
+    drop(observed);
+
     assert_eq!(seed.store().head()?, store_head);
     assert_eq!(
         canonical(&seed.store().worker_quota(&QuotaPolicyV1::default())?)?,
@@ -309,6 +403,30 @@ async fn stops_writer_retains_the_first_terminal_observation_across_later_stops(
     let job = journal.load(operation)?.context("fixture job missing")?;
     let after = job.broker_checkpoint_v4().context("outbox was lost")?;
     assert_eq!(canonical(&after.events())?, outbox_before);
+    let broker = after.lifecycle().broker();
+    let worker = broker
+        .runner()
+        .broker_context()
+        .worker
+        .context("local Worker missing")?;
+    assert_eq!(worker.state, WorkerStateV1::Terminal);
+    assert!(!worker.quota_held);
+    assert_eq!(canonical(worker)?, canonical(&response.worker)?);
+    let mut replies = broker
+        .supervision()
+        .operations()
+        .iter()
+        .filter_map(|operation| match operation {
+            crate::broker::checkpoint::SupervisionOperationV1::WorkerMutation {
+                request,
+                response: Some(receipt),
+            } if request.operation_id == response.receipt.operation_id => Some((request, receipt)),
+            _ => None,
+        });
+    let (stored_request, stored_response) = replies.next().context("durable ACK missing")?;
+    assert!(replies.next().is_none());
+    assert_eq!(canonical(stored_request)?, expected_bytes);
+    assert_eq!(canonical(stored_response)?, canonical(&response)?);
     Ok(())
 }
 

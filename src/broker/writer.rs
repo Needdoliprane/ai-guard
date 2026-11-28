@@ -19,7 +19,8 @@ use super::{
             StopRecoveryReaderV1, StopRecoveryReportV1,
             inventory::StopInventoryPageV1,
             legacy_worker_terminal::{
-                LegacyWorkerTerminalEvidenceV1, ReservedLegacyWorkerTerminalObservationV1,
+                ConfirmedLegacyWorkerTerminalObservationV1, LegacyWorkerTerminalEvidenceV1,
+                ReservedLegacyWorkerTerminalObservationV1,
                 RetainedLegacyWorkerTerminalObservationV1,
             },
         },
@@ -30,7 +31,7 @@ use super::{
 #[cfg(test)]
 use crate::control::egress_decision::EgressChannelOpeningReceiptV1;
 use crate::{
-    control::WorkerMutationV1,
+    control::{MutationResultV1, WorkerMutationV1},
     control_fs::Directory,
     model::Event,
     runner::{broker::PreparedSubmission, egress_release::EgressReleaseIntentV1},
@@ -384,6 +385,11 @@ enum Command {
         input: Box<(LegacyWorkerTerminalEvidenceV1, WorkerMutationV1)>,
         publication_attempted: Arc<AtomicBool>,
         reply: Reply<ReservedLegacyWorkerTerminalObservationV1>,
+    },
+    ConfirmLegacyWorkerTerminalObservation {
+        input: Box<(RetainedLegacyWorkerTerminalObservationV1, MutationResultV1)>,
+        publication_attempted: Arc<AtomicBool>,
+        reply: Reply<ConfirmedLegacyWorkerTerminalObservationV1>,
     },
     AppendCancel {
         input: CancelInputV1,
@@ -797,6 +803,30 @@ impl StopWriterClient {
                 reply,
             })
             .await
+    }
+
+    #[allow(
+        dead_code,
+        reason = "the Legacy terminal publisher is composed separately"
+    )]
+    pub(in crate::broker) async fn confirm_legacy_worker_terminal_observation(
+        &self,
+        pending: &RetainedLegacyWorkerTerminalObservationV1,
+        response: MutationResultV1,
+    ) -> Result<ConfirmedLegacyWorkerTerminalObservationV1, LifecycleWriteFailure> {
+        let publication_attempted = Arc::new(AtomicBool::new(false));
+        let actor_attempted = Arc::clone(&publication_attempted);
+        let input = Box::new(((*pending).clone(), response));
+        self.0
+            .call_tracking_enqueue(
+                move |reply| Command::ConfirmLegacyWorkerTerminalObservation {
+                    input,
+                    publication_attempted: actor_attempted,
+                    reply,
+                },
+            )
+            .await
+            .map_err(|cause| LifecycleWriteFailure::from_dispatch(cause, &publication_attempted))
     }
 
     pub async fn recovery_status(
@@ -2394,6 +2424,29 @@ fn serve_backend(
                     Backend::Stops(journal) => journal.reserve_legacy_worker_terminal_observation(
                         &evidence,
                         request,
+                        || publication_attempted.store(true, Ordering::Release),
+                    ),
+                    Backend::Full(_) => Err(JournalError::InvalidInput),
+                };
+                let _ = respond(
+                    &backend,
+                    &status,
+                    reply,
+                    result,
+                    status_cache::Update::Clear,
+                    true,
+                );
+            }
+            Command::ConfirmLegacyWorkerTerminalObservation {
+                input,
+                publication_attempted,
+                reply,
+            } => {
+                let (pending, response) = *input;
+                let result = match &backend {
+                    Backend::Stops(journal) => journal.confirm_legacy_worker_terminal_observation(
+                        &pending,
+                        response,
                         || publication_attempted.store(true, Ordering::Release),
                     ),
                     Backend::Full(_) => Err(JournalError::InvalidInput),

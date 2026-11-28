@@ -960,6 +960,39 @@ impl CheckpointPayloadV1 {
             egress_release: self.0.egress_release.as_deref(),
         }
     }
+    /// Advance only the Worker projection for an already verified terminal
+    /// response. The caller publishes it together with the exact receipt.
+    pub(crate) fn with_confirmed_terminal_worker(
+        &self,
+        parent: &crate::control::WorkerV1,
+        terminal: &crate::control::WorkerV1,
+    ) -> crate::broker::journal::JournalResult<Self> {
+        use crate::{broker::journal::JournalError, control::WorkerStateV1};
+
+        let mut next = self.clone();
+        let worker = next
+            .0
+            .managed
+            .as_mut()
+            .and_then(|managed| managed.worker.as_mut())
+            .ok_or(JournalError::Conflict)?;
+        if !matches!(
+            parent.state,
+            WorkerStateV1::Running | WorkerStateV1::Stopping
+        ) || !parent.quota_held
+            || terminal.state != WorkerStateV1::Terminal
+            || terminal.quota_held
+            || terminal.worker_id != parent.worker_id
+            || terminal.attempt != parent.attempt
+            || parent.revision.checked_add(1) != Some(terminal.revision)
+            || serde_json::to_value(&*worker).map_err(|_| JournalError::Corrupt)?
+                != serde_json::to_value(parent).map_err(|_| JournalError::Corrupt)?
+        {
+            return Err(JournalError::Conflict);
+        }
+        *worker = terminal.clone();
+        Ok(next)
+    }
     pub fn initial(
         intent: &crate::broker::intent::ExecutionIntentV1,
     ) -> crate::broker::journal::JournalResult<Self> {
