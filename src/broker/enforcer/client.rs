@@ -2998,13 +2998,6 @@ impl SpawnGuard {
         if self.local.latch.revoked() {
             return Err(failure(EnforcerFailureReason::StopSignalled, None).into());
         }
-        let _gate = self
-            .local
-            .generation
-            .0
-            .gate
-            .lock()
-            .map_err(|_| failure(EnforcerFailureReason::LockPoisoned, None))?;
         self.client
             .0
             .check_health()
