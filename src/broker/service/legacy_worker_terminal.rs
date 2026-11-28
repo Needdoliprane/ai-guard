@@ -1,10 +1,10 @@
-//! Authenticate the current control data for a retained Legacy target.
+//! Authenticate and observe an already retained Legacy target.
 use super::*;
 use crate::{
     broker::journal::recovery::legacy_worker_terminal::LegacyWorkerTerminalEvidenceV1,
     control::{RuntimeStatusV1, WorkerStateV1, WorkerV1},
     runner::ColdAuditBudget,
-    runtime::{ContainerObservation, InvocationBindingV1, Runtime, RuntimeKind},
+    runtime::{ContainerObservation, InvocationBindingV1, ManagedRuntime, Runtime, RuntimeKind},
 };
 use BrokerErrorCodeV1 as Code;
 
@@ -14,6 +14,23 @@ use BrokerErrorCodeV1 as Code;
 /// Legacy recovery owner on its restricted path.
 pub(super) struct ValidatedLegacyWorkerTerminal {
     evidence: LegacyWorkerTerminalEvidenceV1,
+}
+
+/// Private observation of the exact retained target. A later publisher must
+/// check the current head and authorization again at its own durable boundary.
+pub(super) struct ObservedLegacyWorkerTerminal {
+    validated: ValidatedLegacyWorkerTerminal,
+    observation: ContainerObservation,
+}
+
+impl ObservedLegacyWorkerTerminal {
+    pub(super) fn evidence(&self) -> &LegacyWorkerTerminalEvidenceV1 {
+        self.validated.evidence()
+    }
+
+    pub(super) fn observation(&self) -> &ContainerObservation {
+        &self.observation
+    }
 }
 
 impl ValidatedLegacyWorkerTerminal {
@@ -93,19 +110,103 @@ impl ValidatedLegacyWorkerTerminal {
 }
 
 impl Service {
+    /// Read a terminal observation on the already installed Legacy recovery
+    /// profile. Latch reads corroborate the exact durable STOP at each end of
+    /// the observation. Each latch read independently authenticates its epoch.
+    pub(super) async fn observe_legacy_worker_terminal(
+        &self,
+        profile_id: &str,
+        operation_id: Uuid,
+        command_id: Uuid,
+    ) -> Result<ObservedLegacyWorkerTerminal, Code> {
+        self.require_legacy_terminal_validation_fence()?;
+        check_ids(operation_id, command_id)?;
+        let guardian = self
+            .stop_enforcer
+            .as_ref()
+            .ok_or(Code::NeedsReconciliation)?;
+        let jobs = self.profile_jobs(profile_id)?;
+        let writer = jobs
+            .writer
+            .get()
+            .filter(|capabilities| capabilities.is_stop_only())
+            .ok_or(Code::NeedsReconciliation)?
+            .stops();
+        if writer.scope().profile_id() != profile_id {
+            return Err(Code::Forbidden);
+        }
+        let _capacity = self.execution.try_acquire().map_err(|_| Code::Busy)?;
+        let budget = ColdAuditBudget::start();
+        tokio::time::timeout_at(budget.deadline(), async {
+            let read = || async {
+                writer
+                    .legacy_worker_terminal_evidence(operation_id, command_id)
+                    .await
+                    .map_err(jobs::journal_error)
+            };
+            let proof = read().await?;
+            let expected = observation_target_facts(&proof)?;
+            let pinned = self.check_legacy_terminal_target(&proof, &budget).await?;
+            guardian
+                .confirm_legacy_terminal_stop_latch(&proof)
+                .await
+                .map_err(|_| Code::NeedsReconciliation)?;
+            if observation_target_facts(&read().await?)? != expected {
+                return Err(Code::Conflict);
+            }
+            self.require_legacy_terminal_validation_fence()?;
+
+            let validated = ValidatedLegacyWorkerTerminal { evidence: proof };
+            let (authority, owned) = validated.evidence().target();
+            let observation = ManagedRuntime::reopen_with_runtime(authority.clone(), pinned)
+                .await
+                .map_err(|_| Code::NeedsReconciliation)?
+                .resume_terminal(&owned.handle)
+                .await
+                .map_err(|_| Code::NeedsReconciliation)?;
+            validated.validate_terminal_observation(&observation)?;
+
+            self.check_legacy_terminal_target(validated.evidence(), &budget)
+                .await?;
+            guardian
+                .confirm_legacy_terminal_stop_latch(validated.evidence())
+                .await
+                .map_err(|_| Code::NeedsReconciliation)?;
+            if observation_target_facts(&read().await?)? != expected {
+                return Err(Code::Conflict);
+            }
+            self.require_legacy_terminal_validation_fence()?;
+            Ok(ObservedLegacyWorkerTerminal {
+                validated,
+                observation,
+            })
+        })
+        .await
+        .map_err(|_| Code::Unavailable)?
+    }
+
     pub(super) async fn validate_legacy_worker_terminal(
         &self,
         proof: LegacyWorkerTerminalEvidenceV1,
     ) -> Result<ValidatedLegacyWorkerTerminal, Code> {
-        self.require_legacy_terminal_validation_fence()?;
         let budget = ColdAuditBudget::start();
+        self.check_legacy_terminal_target(&proof, &budget).await?;
+        Ok(ValidatedLegacyWorkerTerminal { evidence: proof })
+    }
+
+    async fn check_legacy_terminal_target(
+        &self,
+        proof: &LegacyWorkerTerminalEvidenceV1,
+        budget: &ColdAuditBudget,
+    ) -> Result<Runtime, Code> {
+        self.require_legacy_terminal_validation_fence()?;
         let scope = proof.scope();
         let profile = self
             .registry
             .profile_for_scope(scope)
             .map_err(|_| Code::Forbidden)?
             .clone();
-        let invocation = require_archived_invocation(&profile, &proof)?.clone();
+        let invocation = require_archived_invocation(&profile, proof)?.clone();
         let expected_scope = canonical(scope).map_err(jobs::journal_error)?;
 
         tokio::time::timeout_at(budget.deadline(), self.validate_registry())
@@ -113,7 +214,7 @@ impl Service {
             .map_err(|_| Code::Unavailable)??;
         let material = Arc::clone(&self.material);
         let retained_profile = profile.clone();
-        let credential = tokio::time::timeout_at(
+        let (credential, pinned) = tokio::time::timeout_at(
             budget.deadline(),
             self.filesystem(move || {
                 let credential = material
@@ -121,10 +222,9 @@ impl Service {
                     .map_err(|_| Code::Unavailable)?;
                 // Pin the exact archived executable/directory, environment and
                 // policy. This performs filesystem validation only.
-                let runtime = Runtime::from_invocation(retained_profile.runtime, invocation)
+                let pinned = Runtime::from_invocation(retained_profile.runtime, invocation)
                     .map_err(|_| Code::Conflict)?;
-                drop(runtime);
-                Ok(credential)
+                Ok((credential, pinned))
             }),
         )
         .await
@@ -145,7 +245,7 @@ impl Service {
         let verified = authenticate().await?;
         let worker = verified
             .client
-            .cold_worker(&proof.worker().worker_id, &budget)
+            .cold_worker(&proof.worker().worker_id, budget)
             .await
             .map_err(|_| Code::Unavailable)?;
         // The Worker read permits ReadIdentity. Recheck that the same
@@ -156,7 +256,7 @@ impl Service {
         if budget.remaining().is_zero() {
             return Err(Code::Unavailable);
         }
-        Ok(ValidatedLegacyWorkerTerminal { evidence: proof })
+        Ok(pinned)
     }
 
     fn require_legacy_terminal_validation_fence(&self) -> Result<(), Code> {
@@ -168,6 +268,22 @@ impl Service {
         }
         Ok(())
     }
+}
+
+fn observation_target_facts(proof: &LegacyWorkerTerminalEvidenceV1) -> Result<Vec<u8>, Code> {
+    let stop = proof.cancel_receipt();
+    canonical(&(
+        proof.scope(),
+        proof.head(),
+        stop.command_id(),
+        stop.input_hash(),
+        stop.head(),
+        proof.arm(),
+        proof.claim(),
+        proof.target(),
+        proof.worker(),
+    ))
+    .map_err(jobs::journal_error)
 }
 
 fn require_archived_invocation<'a>(
