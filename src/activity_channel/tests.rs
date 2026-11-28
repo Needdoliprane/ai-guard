@@ -1010,6 +1010,7 @@ struct PumpBroker<'a> {
     child: &'a mut Option<JoinHandle<ProcessResult>>,
     child_result: Option<oneshot::Sender<ChildObservation>>,
     expected_event: EventV1,
+    before_ack: &'a mut (dyn FnMut(u64, HookAck) + Send),
     sent_ack: Option<HookAck>,
 }
 
@@ -1077,6 +1078,7 @@ impl HookTransport for PumpBroker<'_> {
     }
 
     async fn ack(&mut self, seq: u64, ack: HookAck) -> anyhow::Result<()> {
+        (self.before_ack)(seq, ack);
         let status = match ack {
             HookAck::Recorded => StatusV1::Recorded,
             HookAck::Refused => StatusV1::Refused,
@@ -1095,6 +1097,7 @@ async fn collect_claude_hook(
     event: EventV1,
     payload: &'static [u8],
     after_ready: impl FnOnce() -> anyhow::Result<()>,
+    mut before_ack: impl FnMut(u64, HookAck) + Send,
 ) -> anyhow::Result<(HookPumpOutcome, ChildObservation)> {
     let (mut broker, mut helper) = Broker::start(root.clone());
     // Keep the task handles outside the exchange timeout for bounded cleanup.
@@ -1118,6 +1121,7 @@ async fn collect_claude_hook(
             child: &mut child,
             child_result: Some(child_result_tx),
             expected_event: event,
+            before_ack: &mut before_ack,
             sent_ack: None,
         };
         let outcome = pump_hooks(collector.clone(), transport).await;
@@ -1145,8 +1149,11 @@ async fn collect_claude_hook(
     Ok((outcome, observation))
 }
 
-fn claude_hook_collector(spool_root: &Directory, limits: ActivityLimits) -> ActivityCollector {
-    let session = uuid::Uuid::new_v4();
+fn claude_hook_collector(
+    spool_root: &Directory,
+    session: uuid::Uuid,
+    limits: ActivityLimits,
+) -> ActivityCollector {
     ActivityCollector::new(
         ActivitySpool::create(spool_root, session).unwrap(),
         ActivityContext {
@@ -1173,13 +1180,15 @@ fn claude_hook_collector(spool_root: &Directory, limits: ActivityLimits) -> Acti
 async fn claude_session_start_is_spooled_and_acked_by_the_parent_pump() {
     let (_temporary, root) = fixture_root();
     let (_spool_temporary, spool_root) = fixture_root();
-    let collector = claude_hook_collector(&spool_root, ActivityLimits::default());
+    let collector =
+        claude_hook_collector(&spool_root, uuid::Uuid::new_v4(), ActivityLimits::default());
     let (outcome, child) = collect_claude_hook(
         &root,
         &collector,
         EventV1::SessionStart,
         br#"{"hook_event_name":"SessionStart","session_id":"fixture-session","source":"startup","model":"fixture-model"}"#,
         || Ok(()),
+        |_, _| {},
     )
     .await
     .unwrap();
@@ -1206,12 +1215,159 @@ async fn claude_session_start_is_spooled_and_acked_by_the_parent_pump() {
     );
 }
 
+/// Reopen an independent copy so the real spool stays locked by its writer.
+fn verify_recorded_start_prefix(
+    live: &Directory,
+    snapshot: &Directory,
+    session: uuid::Uuid,
+    provider_session: &str,
+    transcript: &str,
+) -> anyhow::Result<()> {
+    let name = crate::provider_activity::spool::spool_name(session);
+    let copy = snapshot.path().join(&name);
+    std::fs::copy(live.path().join(&name), &copy).context("copy the spool before ACK")?;
+    let encoded = std::fs::read_to_string(&copy)?;
+    anyhow::ensure!(
+        !encoded.contains("transcript_path") && !encoded.contains(transcript),
+        "the spool retained the worker transcript path"
+    );
+    let (prefix, recovery) =
+        ActivitySpool::reopen(snapshot, session).context("verify the pre-ACK spool chain")?;
+    anyhow::ensure!(
+        recovery.torn_tail_bytes == 0 && recovery.delivered_through == 0,
+        "the pre-ACK spool has a torn tail or a delivery cursor"
+    );
+    let pending = prefix.pending(usize::MAX, usize::MAX);
+    let [attached, started, agent] = pending.as_slice() else {
+        anyhow::bail!(
+            "expected attachment, session and root agent before ACK, got {} events",
+            pending.len()
+        );
+    };
+    anyhow::ensure!(
+        attached.event.kind == "activity.channel"
+            && attached.event.provenance == "observed"
+            && attached.event.data["channel"] == "hook"
+            && attached.event.data["state"] == "attached",
+        "the first record is not the observed hook attachment"
+    );
+    let started = &started.event;
+    let agent = &agent.event;
+    anyhow::ensure!(
+        started.kind == "session.declared"
+            && started.data["provider_hook_event"] == "SessionStart"
+            && started.data["session_source"] == "startup"
+            && started.data["provider_session_id"] == provider_session
+            && started.data.get("model").is_none(),
+        "the recorded session declaration or its model provenance changed"
+    );
+    anyhow::ensure!(
+        agent.kind == "agent.declared"
+            && agent.data["agent_role"] == "root"
+            && agent.data["provider_agent_id"] == provider_session
+            && agent.data["provider_parent_agent_id"].is_null()
+            && agent.data["model"].is_null(),
+        "the recorded root agent, parent or model provenance changed"
+    );
+    for event in [started, agent] {
+        anyhow::ensure!(
+            event.source == "claude-adapter"
+                && event.provenance == "declared"
+                && event.coverage == "native",
+            "{} lost its provider provenance",
+            event.kind
+        );
+        anyhow::ensure!(
+            event.session_id.as_deref() == Some("fixture-session")
+                && event.agent_id.as_deref() == Some("fixture-agent")
+                && event.project_id.as_deref() == Some("fixture-project")
+                && event.sandbox_id.as_deref() == Some("fixture-sandbox")
+                && event.parent_agent_id.is_none(),
+            "{} lost its control context",
+            event.kind
+        );
+        let activity = &event.data["activity"];
+        anyhow::ensure!(
+            activity["channel"] == "hook"
+                && activity["record_seq"] == 1
+                && activity["worker_id"] == "fixture-worker"
+                && activity["attempt_id"] == "fixture-attempt",
+            "{} is not bound to the hook record and worker attempt",
+            event.kind
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn recorded_claude_session_start_is_durable_with_control_context_before_ack()
+-> anyhow::Result<()> {
+    let payload = include_str!(
+        "../../tests/adapters_fixtures/recorded/claude-code-2.1.329.offline.hooks.jsonl"
+    )
+    .lines()
+    .next()
+    .context("missing recorded Claude hook")?;
+    let recorded: serde_json::Value = serde_json::from_str(payload)?;
+    let provider_session = recorded["session_id"]
+        .as_str()
+        .context("recorded session ID")?;
+    let transcript = recorded["transcript_path"]
+        .as_str()
+        .context("recorded transcript path")?;
+    assert_eq!(recorded["hook_event_name"], "SessionStart");
+    assert!(recorded.get("model").is_none());
+    assert_ne!(provider_session, "fixture-session");
+    let (_helper_dir, helper) = fixture_root();
+    let (_spool_dir, spool) = fixture_root();
+    let (_snapshot_dir, snapshot) = fixture_root();
+    let session = uuid::Uuid::new_v4();
+    let collector = claude_hook_collector(&spool, session, ActivityLimits::default());
+    let mut receipts = Vec::new();
+    let (outcome, child) = collect_claude_hook(
+        &helper,
+        &collector,
+        EventV1::SessionStart,
+        payload.as_bytes(),
+        || Ok(()),
+        |seq, ack| {
+            let prefix = verify_recorded_start_prefix(
+                &spool,
+                &snapshot,
+                session,
+                provider_session,
+                transcript,
+            );
+            receipts.push((seq, ack, prefix));
+        },
+    )
+    .await?;
+    assert_eq!(receipts.len(), 1, "expected exactly one ACK for the hook");
+    let (seq, ack, prefix) = receipts.pop().unwrap();
+    assert_eq!((seq, ack), (1, HookAck::Recorded));
+    prefix?;
+    assert_eq!(
+        outcome,
+        HookPumpOutcome {
+            hooks: 1,
+            recorded: 1,
+            ..Default::default()
+        }
+    );
+    assert_eq!(child.ack, HookAck::Recorded);
+    assert_eq!(child.result.code, Some(EXIT_CONTINUE));
+    assert!(child.result.stderr.is_empty() && child.result.stdout_after_start.is_empty());
+    assert_eq!(child.loss_entries, 0, "the wrapper must receive the ACK");
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn claude_pre_tool_use_is_refused_when_spool_backlog_is_full() -> anyhow::Result<()> {
     let (_temporary, root) = fixture_root();
     let (_spool_temporary, spool_root) = fixture_root();
     let collector = claude_hook_collector(
         &spool_root,
+        uuid::Uuid::new_v4(),
         ActivityLimits {
             max_events: 1,
             max_backlog_events: 1,
@@ -1246,6 +1402,7 @@ async fn claude_pre_tool_use_is_refused_when_spool_backlog_is_full() -> anyhow::
             before = Some(std::fs::read(&spool_path)?);
             Ok(())
         },
+        |_, _| {},
     )
     .await?;
 
