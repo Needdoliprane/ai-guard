@@ -259,17 +259,8 @@ fn verify_owned_origin_prefix(
     let mut head = AuditHead::empty();
     for columns in rows {
         let encoded = decode_event_columns(columns)?;
+        head = encoded.verify_next_head(head)?;
         let stored = &encoded.stored;
-        ensure!(
-            head.hash == stored.prev_hash,
-            "MySQL audit previous hash mismatch"
-        );
-        let next = head.extended(&stored.received_at, &encoded.payload)?;
-        ensure!(
-            next.seq == stored.seq && next.hash == stored.hash,
-            "MySQL audit chain mismatch"
-        );
-        head = next;
         if head.seq == 1 {
             require_owned_genesis(&stored.event, &request.tenant_id, &namespace)?;
         } else {

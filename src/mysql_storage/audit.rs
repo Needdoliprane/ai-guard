@@ -167,6 +167,28 @@ pub(super) struct EncodedEvent {
     received: DateTime<Utc>,
 }
 
+impl EncodedEvent {
+    /// Extend a verified head with the exact stored bytes of its successor.
+    pub(super) fn verify_next_head(&self, head: AuditHead) -> Result<AuditHead> {
+        let stored = &self.stored;
+        let reason = if head.hash != stored.prev_hash {
+            "MySQL audit previous hash mismatch"
+        } else {
+            let next = head.extended(&stored.received_at, &self.payload)?;
+            if next.seq == stored.seq && next.hash == stored.hash {
+                return Ok(next);
+            }
+            "MySQL audit chain mismatch"
+        };
+        Err(AuditChainMismatch {
+            prefix: head,
+            sequence: stored.seq,
+            reason,
+        }
+        .into())
+    }
+}
+
 pub(super) fn decode_row<T: mysql_async::prelude::FromRow>(row: Row) -> Result<T> {
     from_row_opt(row).map_err(|_| anyhow!("unexpected MySQL audit row"))
 }
@@ -716,29 +738,13 @@ impl MysqlAuditStore {
                 request_hash,
                 worker_request,
             ): ProjectedEventColumns = decode_row(row)?;
+            let encoded = decode_event_columns((seq, id, received, prev, hash, payload))?;
+            head = encoded.verify_next_head(head)?;
             let EncodedEvent {
                 stored,
                 payload,
                 received,
-            } = decode_event_columns((seq, id, received, prev, hash, payload))?;
-            if head.hash != stored.prev_hash {
-                return Err(AuditChainMismatch {
-                    prefix: head,
-                    sequence: stored.seq,
-                    reason: "MySQL audit previous hash mismatch",
-                }
-                .into());
-            }
-            let next = head.extended(&stored.received_at, &payload)?;
-            if next.seq != stored.seq || next.hash != stored.hash {
-                return Err(AuditChainMismatch {
-                    prefix: head,
-                    sequence: stored.seq,
-                    reason: "MySQL audit chain mismatch",
-                }
-                .into());
-            }
-            head = next;
+            } = encoded;
             if let Some(observer) = observer.as_deref_mut() {
                 observer(&stored, &payload)?;
             }
@@ -2165,5 +2171,62 @@ impl MysqlAuditStore {
             hash: head.hash.clone(),
             event,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn audit_link_mismatch_preserves_the_verified_prefix_and_sequence() -> Result<()> {
+        let head = AuditHead {
+            seq: 1,
+            hash: "a".repeat(64),
+            payload_bytes: 128,
+        };
+        let received = "2026-11-25T00:00:01.000Z";
+        let mut event = Event::new("qa.mysql.integrity");
+        event.timestamp = "2026-11-25T00:00:00.000Z".into();
+        let (event, payload) = prepare_event(&Redactor::new(Vec::new()), event)?;
+        let next_hash = digest(2, received, &head.hash, &payload);
+
+        for (sequence, previous, hash, reason) in [
+            (
+                2,
+                "b".repeat(64),
+                next_hash.clone(),
+                "MySQL audit previous hash mismatch",
+            ),
+            (
+                3,
+                head.hash.clone(),
+                next_hash,
+                "MySQL audit chain mismatch",
+            ),
+            (
+                2,
+                head.hash.clone(),
+                "c".repeat(64),
+                "MySQL audit chain mismatch",
+            ),
+        ] {
+            let row = decode_event_columns((
+                sequence,
+                event.id.clone(),
+                received.into(),
+                previous,
+                hash,
+                payload.clone(),
+            ))?;
+            let error = row
+                .verify_next_head(head.clone())
+                .expect_err("divergent audit link must be refused");
+            let mismatch = error.downcast::<AuditChainMismatch>()?;
+            assert_eq!(mismatch.prefix, head);
+            assert_eq!(mismatch.sequence, sequence);
+            assert_eq!(mismatch.to_string(), reason);
+        }
+        Ok(())
     }
 }
