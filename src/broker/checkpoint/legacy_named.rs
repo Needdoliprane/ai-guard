@@ -48,6 +48,12 @@ pub(crate) struct LegacyNamedAdmissionCheckpoint {
         skip_serializing_if = "Option::is_none"
     )]
     import_verification: Option<Box<LegacyNamedImportVerificationPlanV1>>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    import_verification_create: Option<Box<LegacyNamedImportVerificationCreateV1>>,
 }
 
 fn deserialize_present<'de, D, T>(decoder: D) -> Result<Option<T>, D::Error>
@@ -153,6 +159,21 @@ impl LegacyNamedImportVerificationPlanV1 {
     }
 }
 
+/// One durable Create attempt for the exact named ImportVerification plan.
+/// Its presence consumes the only Create opportunity; it contains no runtime
+/// handle and cannot be replayed into another effect.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct LegacyNamedImportVerificationCreateV1 {
+    version: u32,
+    plan_hash: String,
+    spec_hash: String,
+    terminal_receipt: MutationReceiptV1,
+    authority_id: String,
+    runtime_kind: RuntimeKindV1,
+    authority: LegacyNamedImportAuthorityV1,
+}
+
 impl LegacyNamedImportObservationCheckpointV1 {
     pub(crate) fn request(&self) -> &LegacyNamedImportObservationRequestV1 {
         &self.request
@@ -183,6 +204,17 @@ struct LegacyNamedImportCreationCheckpoint {
 struct LegacyNamedImportAuthorityV1 {
     handle_fingerprint: String,
     binding_hash: String,
+}
+
+fn import_verification_spec_hash(policy: &HelperExecutionPolicyV1) -> JournalResult<String> {
+    ensure(policy.purpose == HelperPurposeV1::ImportVerification)?;
+    checked(content_hash(
+        "ai-guard:legacy-named-import-verification-readonly-spec:v1",
+        &(
+            policy.spec_hash().map_err(|_| JournalError::Conflict)?,
+            true,
+        ),
+    ))
 }
 
 impl LegacyNamedImportAuthorityV1 {
@@ -254,6 +286,7 @@ impl LegacyNamedAdmissionCheckpoint {
             import_claim: None,
             import_observations: Vec::new(),
             import_verification: None,
+            import_verification_create: None,
         };
         let namespace = uuid(&value.plan.control_namespace_uuid)?;
         value.validate_shape(namespace)?;
@@ -501,6 +534,12 @@ impl LegacyNamedAdmissionCheckpoint {
         self.import_verification.as_deref()
     }
 
+    pub(crate) fn import_verification_create(
+        &self,
+    ) -> Option<&LegacyNamedImportVerificationCreateV1> {
+        self.import_verification_create.as_deref()
+    }
+
     /// Add the one immutable verification-helper intent after the exact
     /// successful named Import Terminal receipt is retained. Replaying the
     /// same helper id is idempotent; a different id conflicts.
@@ -525,6 +564,62 @@ impl LegacyNamedAdmissionCheckpoint {
         }));
         self.validate_shape(namespace)?;
         Ok(self)
+    }
+
+    /// Append a one-time Create intent for the read-only named verification
+    /// runtime. The caller supplies the exact terminal receipt and admitted
+    /// authority; replay can confirm this record but never reserve another
+    /// Create.
+    pub(crate) fn with_import_verification_create(
+        mut self,
+        terminal_receipt: MutationReceiptV1,
+        binding: &RuntimeAuthority,
+    ) -> JournalResult<Self> {
+        let namespace = uuid(&self.plan.control_namespace_uuid)?;
+        self.validate_shape(namespace)?;
+        let expected = self.expected_import_verification_create(terminal_receipt, binding)?;
+        if let Some(saved) = self.import_verification_create() {
+            ensure(equal(saved, &expected)?)?;
+            return Ok(self);
+        }
+        self.import_verification_create = Some(Box::new(expected));
+        self.validate_shape(namespace)?;
+        Ok(self)
+    }
+
+    fn expected_import_verification_create(
+        &self,
+        terminal_receipt: MutationReceiptV1,
+        binding: &RuntimeAuthority,
+    ) -> JournalResult<LegacyNamedImportVerificationCreateV1> {
+        let plan = self
+            .import_verification_plan()
+            .ok_or(JournalError::Conflict)?;
+        let terminal = match plan.preparation().permission() {
+            HelperPermissionV1::ImportVerification {
+                import_terminal, ..
+            } => import_terminal,
+            _ => return Err(JournalError::Conflict),
+        };
+        ensure(equal(terminal, &terminal_receipt)?)?;
+        ensure(equal(
+            &self.import_verification_permission()?,
+            plan.preparation().permission(),
+        )?)?;
+        let policy = plan.preparation().policy();
+        ensure(policy.purpose == HelperPurposeV1::ImportVerification)?;
+        Ok(LegacyNamedImportVerificationCreateV1 {
+            version: 1,
+            plan_hash: checked(content_hash(
+                "ai-guard:legacy-named-import-verification-plan:v1",
+                plan,
+            ))?,
+            spec_hash: import_verification_spec_hash(policy)?,
+            terminal_receipt,
+            authority_id: policy.authority_id.clone(),
+            runtime_kind: policy.runtime_kind,
+            authority: LegacyNamedImportAuthorityV1::for_policy(policy, binding)?,
+        })
     }
 
     fn import_verification_inputs(&self) -> JournalResult<(WorkerV1, HelperPermissionV1)> {
@@ -641,6 +736,7 @@ impl LegacyNamedAdmissionCheckpoint {
                 .iter()
                 .any(|observation| observation.receipt().is_none())
             || self.import_verification_plan().is_some()
+            || self.import_verification_create().is_some()
     }
 
     #[allow(
@@ -668,7 +764,8 @@ impl LegacyNamedAdmissionCheckpoint {
                     && self.import_creation.is_none()
                     && self.import_claim.is_none()
                     && self.import_observations.is_empty()
-                    && self.import_verification.is_none(),
+                    && self.import_verification.is_none()
+                    && self.import_verification_create.is_none(),
             )?,
             2 => hash(self.archive_digest().ok_or(JournalError::Conflict)?)?,
             _ => return Err(JournalError::UnsupportedVersion),
@@ -748,6 +845,33 @@ impl LegacyNamedAdmissionCheckpoint {
                 _ => return Err(JournalError::Conflict),
             };
             ensure(helper_id != import_helper && helper_id != self.plan.operation_id)?;
+        }
+        if let Some(saved) = self.import_verification_create() {
+            let plan = self
+                .import_verification_plan()
+                .ok_or(JournalError::Conflict)?;
+            let policy = plan.preparation().policy();
+            let terminal = match plan.preparation().permission() {
+                HelperPermissionV1::ImportVerification {
+                    import_terminal, ..
+                } => import_terminal,
+                _ => return Err(JournalError::Conflict),
+            };
+            ensure(
+                saved.version == 1
+                    && saved.terminal_receipt == *terminal
+                    && saved.plan_hash
+                        == checked(content_hash(
+                            "ai-guard:legacy-named-import-verification-plan:v1",
+                            plan,
+                        ))?
+                    && saved.spec_hash == import_verification_spec_hash(policy)?
+                    && saved.authority_id == policy.authority_id
+                    && saved.runtime_kind == policy.runtime_kind,
+            )?;
+            uuid(&saved.authority_id)?;
+            hash(&saved.authority.handle_fingerprint)?;
+            hash(&saved.authority.binding_hash)?;
         }
         ensure(canonical(self)?.len() <= MAX_OPERATION_BYTES)
     }
@@ -920,7 +1044,8 @@ impl LegacyNamedAdmissionCheckpoint {
                     && self.import_arm.is_none()
                     && self.import_creation.is_none()
                     && self.import_claim.is_none()
-                    && self.import_verification.is_none(),
+                    && self.import_verification.is_none()
+                    && self.import_verification_create.is_none(),
             ),
             Some(old) => {
                 ensure(
@@ -1013,6 +1138,19 @@ impl LegacyNamedAdmissionCheckpoint {
                     }
                     (Some(_), None) => return Err(JournalError::Conflict),
                 }
+                match (
+                    old.import_verification_create(),
+                    self.import_verification_create(),
+                ) {
+                    (None, None) => Ok(()),
+                    (None, Some(current)) => ensure(
+                        old.import_verification_plan().is_some()
+                            && current.version == 1
+                            && self.import_verification_plan().is_some(),
+                    ),
+                    (Some(previous), Some(current)) => ensure(equal(previous, current)?),
+                    (Some(_), None) => Err(JournalError::Conflict),
+                }?;
                 match (old.import_arm(), self.import_arm()) {
                     (None, None) => Ok(()),
                     (None, Some(new)) => ensure(
@@ -2805,6 +2943,78 @@ mod tests {
             verification_writer.load(operation).await?.unwrap().head(),
             &planned_head
         );
+        let create_base = verification_writer
+            .load(operation)
+            .await?
+            .ok_or(JournalError::Conflict)?;
+        let create_base_lifecycle = create_base
+            .broker_checkpoint_v3()
+            .ok_or(JournalError::Conflict)?;
+        let create_base_head = create_base.head().clone();
+        let named_create = create_base
+            .broker_checkpoint_v2()
+            .and_then(|checkpoint| checkpoint.supervision().legacy_named_admission())
+            .ok_or(JournalError::Conflict)?
+            .clone()
+            .with_import_verification_create(terminal_receipt.clone(), &authority)?;
+        let create_supervision = create_base_lifecycle
+            .broker()
+            .supervision()
+            .clone()
+            .with_legacy_named_admission(named_create)?;
+        let create_broker = BrokerCheckpointV2::new(
+            create_base_lifecycle.broker().runner().clone(),
+            create_supervision,
+        )?;
+        let exact_pending_create =
+            BrokerCheckpointV3::new(create_broker, create_base_lifecycle.commands().to_vec())?;
+        let (create_one, create_two) = tokio::join!(
+            verification_writer.record_legacy_named_import_verification_create(
+                &plan,
+                &terminal_receipt,
+                &authority,
+            ),
+            verification_writer.record_legacy_named_import_verification_create(
+                &plan,
+                &terminal_receipt,
+                &authority,
+            ),
+        );
+        let create_one = create_one?;
+        let create_two = create_two?;
+        assert_ne!(create_one.is_some(), create_two.is_some());
+        let create_token = create_one.or(create_two).ok_or(JournalError::Conflict)?;
+        let committed_create_lifecycle = verification_writer
+            .load(operation)
+            .await?
+            .and_then(|job| job.broker_checkpoint_v3().cloned())
+            .ok_or(JournalError::Conflict)?;
+        assert_eq!(
+            committed_create_lifecycle.canonical_bytes()?,
+            exact_pending_create.canonical_bytes()?
+        );
+        assert_eq!(create_token.operation_id(), operation);
+        assert_eq!(
+            create_token.confirmed_head(),
+            committed_create_lifecycle.head()
+        );
+        assert_eq!(create_token.facts_hash().len(), 64);
+        assert!(matches!(
+            verification_writer
+                .advance_lifecycle(operation, create_base_head, exact_pending_create)
+                .await,
+            Err(JournalError::Conflict)
+        ));
+        let create_head = verification_writer
+            .load(operation)
+            .await?
+            .unwrap()
+            .head()
+            .clone();
+        assert_eq!(
+            verification_writer.load(operation).await?.unwrap().head(),
+            &create_head
+        );
         let verification_stops = verification_writer.stops();
         verification_stops
             .append_cancel(CancelInputV1::new(operation, Uuid::new_v4())?)
@@ -2824,6 +3034,40 @@ mod tests {
             &stopped_plan,
             verification_plan.import_verification_plan().unwrap()
         )?);
+        assert!(
+            verification_writer
+                .record_legacy_named_import_verification_create(
+                    &plan,
+                    &terminal_receipt,
+                    &authority,
+                )
+                .await?
+                .is_none()
+        );
+        let mut divergent_terminal = terminal_receipt.clone();
+        divergent_terminal.audit_hash = "e".repeat(64);
+        assert!(matches!(
+            verification_writer
+                .record_legacy_named_import_verification_create(
+                    &plan,
+                    &divergent_terminal,
+                    &authority,
+                )
+                .await,
+            Err(JournalError::Conflict)
+        ));
+        let mut divergent_binding = authority.clone();
+        divergent_binding.endpoint.push_str("-different");
+        assert!(matches!(
+            verification_writer
+                .record_legacy_named_import_verification_create(
+                    &plan,
+                    &terminal_receipt,
+                    &divergent_binding,
+                )
+                .await,
+            Err(JournalError::Conflict)
+        ));
         let stopped_head = verification_writer
             .load(operation)
             .await?
@@ -2870,6 +3114,16 @@ mod tests {
                 .head(),
             &stopped_head
         );
+        assert!(
+            cold_verification_writer
+                .record_legacy_named_import_verification_create(
+                    &plan,
+                    &terminal_receipt,
+                    &authority,
+                )
+                .await?
+                .is_none()
+        );
         drop(cold_verification_writer);
 
         // The lifecycle validator must independently fence adding this new
@@ -2899,6 +3153,10 @@ mod tests {
                 terminal_receipt.clone(),
             )
             .await?;
+        let stopped_plan = stopped_plan_writer
+            .record_legacy_named_import_verification_plan(&plan, verification_helper_id)
+            .await?;
+        assert!(stopped_plan.inserted());
         let before_stop = stopped_plan_writer
             .load(operation)
             .await?
@@ -2911,6 +3169,16 @@ mod tests {
             .append_cancel(CancelInputV1::new(operation, Uuid::new_v4())?)
             .await
             .map_err(|failure| failure.error())?;
+        assert!(matches!(
+            stopped_plan_writer
+                .record_legacy_named_import_verification_create(
+                    &plan,
+                    &terminal_receipt,
+                    &authority,
+                )
+                .await,
+            Err(JournalError::Interrupted)
+        ));
         let after_stop = stopped_plan_writer
             .load(operation)
             .await?
@@ -2928,7 +3196,10 @@ mod tests {
             .broker()
             .supervision()
             .clone()
-            .with_legacy_named_admission(stopped_named)?;
+            .with_legacy_named_admission(
+                stopped_named
+                    .with_import_verification_create(terminal_receipt.clone(), &authority)?,
+            )?;
         let forged_broker = BrokerCheckpointV2::new(
             after_stop_lifecycle.broker().runner().clone(),
             forged_supervision,

@@ -49,7 +49,7 @@ mod legacy_named_admission;
     reason = "the named Presence caller is composed separately"
 )]
 pub(in crate::broker) use legacy_named_admission::{
-    NamedImportArmWriteFailure, RecordedLegacyNamedImportArm,
+    AuthorizedLegacyNamedImportCreate, NamedImportArmWriteFailure, RecordedLegacyNamedImportArm,
     RecordedLegacyNamedImportVerificationPlan,
 };
 mod queue;

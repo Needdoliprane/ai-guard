@@ -11,7 +11,7 @@ use crate::{
             DecisionAnswerV1, HelperPreparationV1, LegacyNamedAdmissionCheckpoint,
             LegacyNamedImportVerificationPlanV1, SupervisionCheckpointV1, SupervisionOperationV1,
         },
-        journal::{AcceptedJobV1, RevisionRefV1, canonical},
+        journal::{AcceptedJobV1, RevisionRefV1, canonical, digest},
         lifecycle::LocalCommandRequestV1,
     },
     control::{
@@ -100,6 +100,29 @@ impl RecordedLegacyNamedImportVerificationPlan {
 
     pub(in crate::broker) fn inserted(&self) -> bool {
         self.inserted
+    }
+}
+
+/// One-shot authority for the caller's immediate local Create effect. It is
+/// deliberately non-Clone and cannot be reconstructed from retained journal
+/// state; the caller must keep its generation local to the effect path.
+pub(in crate::broker) struct AuthorizedLegacyNamedImportCreate {
+    operation_id: Uuid,
+    confirmed_head: RevisionRefV1,
+    facts_hash: String,
+}
+
+impl AuthorizedLegacyNamedImportCreate {
+    pub(in crate::broker) fn operation_id(&self) -> Uuid {
+        self.operation_id
+    }
+
+    pub(in crate::broker) fn confirmed_head(&self) -> &RevisionRefV1 {
+        &self.confirmed_head
+    }
+
+    pub(in crate::broker) fn facts_hash(&self) -> &str {
+        &self.facts_hash
     }
 }
 
@@ -597,6 +620,72 @@ impl WriterClient {
                         plan: saved.clone(),
                         inserted: true,
                     });
+                }
+                Err(LifecycleWriteFailure::BeforePublication(JournalError::Conflict)) => continue,
+                Err(failure) => return Err(failure.journal_error()),
+            }
+        }
+        Err(JournalError::Conflict)
+    }
+
+    /// Persist the single read-only ImportVerification Create boundary. Only
+    /// the caller whose exact first append was confirmed receives a one-shot
+    /// token; exact replay and uncertain publication never mint another one.
+    pub(in crate::broker) async fn record_legacy_named_import_verification_create(
+        &self,
+        plan: &LegacyConfirmedPlanV1,
+        terminal_receipt: &MutationReceiptV1,
+        binding: &RuntimeAuthority,
+    ) -> JournalResult<Option<AuthorizedLegacyNamedImportCreate>> {
+        for _ in 0..ACK_CAS_ATTEMPTS {
+            let job = self.load_named_job(plan).await?;
+            let current = super::lifecycle(&job)?;
+            let retained = retained_admission(&job)?;
+            if retained.import_verification_create().is_some() {
+                let replayed = retained
+                    .clone()
+                    .with_import_verification_create(terminal_receipt.clone(), binding)?;
+                if replayed.import_verification_create().is_none() {
+                    return Err(JournalError::Corrupt);
+                }
+                return Ok(None);
+            }
+
+            require_open(&current)?;
+            let pending = retained
+                .clone()
+                .with_import_verification_create(terminal_receipt.clone(), binding)?;
+            let expected = pending
+                .import_verification_create()
+                .ok_or(JournalError::Corrupt)?
+                .clone();
+            let next = with_admission(&current, pending)?;
+            match self
+                .advance_lifecycle_with_publication(plan.operation_id, job.head().clone(), next)
+                .await
+            {
+                Ok(receipt) => {
+                    let saved_job = self
+                        .load(plan.operation_id)
+                        .await?
+                        .ok_or(JournalError::Corrupt)?;
+                    let saved = retained_admission(&saved_job)?
+                        .import_verification_create()
+                        .ok_or(JournalError::Conflict)?;
+                    if saved_job.head() != receipt.head()
+                        || canonical(saved)? != canonical(&expected)?
+                    {
+                        return Err(JournalError::Conflict);
+                    }
+                    let facts_hash = digest(
+                        "legacy-named-import-verification-create-token-v1",
+                        &canonical(saved)?,
+                    );
+                    return Ok(Some(AuthorizedLegacyNamedImportCreate {
+                        operation_id: plan.operation_id,
+                        confirmed_head: receipt.head().clone(),
+                        facts_hash,
+                    }));
                 }
                 Err(LifecycleWriteFailure::BeforePublication(JournalError::Conflict)) => continue,
                 Err(failure) => return Err(failure.journal_error()),
