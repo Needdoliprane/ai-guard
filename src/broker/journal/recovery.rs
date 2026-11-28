@@ -1783,11 +1783,13 @@ impl StopRecoveryReportV1 {
                 let started_at = worker
                     .observed_started_at
                     .as_deref()
-                    .filter(|start| {
-                        chrono::DateTime::parse_from_rfc3339(start)
-                            .is_ok_and(|time| time.timestamp() > 0)
-                    })
+                    .and_then(|start| chrono::DateTime::parse_from_rfc3339(start).ok())
+                    .filter(|time| time.timestamp() > 0)
                     .ok_or(JournalError::Conflict)?;
+                let observed_start = observation
+                    .started_at
+                    .as_deref()
+                    .and_then(|start| chrono::DateTime::parse_from_rfc3339(start).ok());
                 if before.tenant_id != Some(scope.tenant_id())
                     || current.tenant_id != before.tenant_id
                     || current.binding != before.binding
@@ -1805,7 +1807,7 @@ impl StopRecoveryReportV1 {
                     || worker.attempt.start_emitter_id.as_deref()
                         != Some(request.emitter_id.as_str())
                     || worker.revision <= response.worker.revision
-                    || observation.started_at.as_deref() != Some(started_at)
+                    || observed_start != Some(started_at)
                     || canonical(&current.worker)? != canonical(&Some(worker))?
                 {
                     return Err(JournalError::Conflict);
