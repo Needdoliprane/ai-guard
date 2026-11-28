@@ -577,6 +577,10 @@ impl LegacyNamedAdmissionCheckpoint {
     ) -> JournalResult<Self> {
         let namespace = uuid(&self.plan.control_namespace_uuid)?;
         self.validate_shape(namespace)?;
+        // The verification helper must use the exact authority attested by
+        // the original Import Create, not merely another authority accepted
+        // by the verification policy.
+        self.require_import_creation_binding(binding)?;
         let expected = self.expected_import_verification_create(terminal_receipt, binding)?;
         if let Some(saved) = self.import_verification_create() {
             ensure(equal(saved, &expected)?)?;
@@ -850,6 +854,14 @@ impl LegacyNamedAdmissionCheckpoint {
             let plan = self
                 .import_verification_plan()
                 .ok_or(JournalError::Conflict)?;
+            let import_creation = self
+                .import_creation
+                .as_deref()
+                .ok_or(JournalError::Conflict)?;
+            let import_authority = import_creation
+                .authority
+                .as_ref()
+                .ok_or(JournalError::Conflict)?;
             let policy = plan.preparation().policy();
             let terminal = match plan.preparation().permission() {
                 HelperPermissionV1::ImportVerification {
@@ -867,7 +879,13 @@ impl LegacyNamedAdmissionCheckpoint {
                         ))?
                     && saved.spec_hash == import_verification_spec_hash(policy)?
                     && saved.authority_id == policy.authority_id
-                    && saved.runtime_kind == policy.runtime_kind,
+                    && saved.runtime_kind == policy.runtime_kind
+                    // Compare both persisted authority hashes to the original
+                    // V2 Import Create. Old V1 data has no attestation and is
+                    // therefore fail-closed only when this new field exists.
+                    && saved.authority.handle_fingerprint
+                        == import_authority.handle_fingerprint
+                    && saved.authority.binding_hash == import_authority.binding_hash,
             )?;
             uuid(&saved.authority_id)?;
             hash(&saved.authority.handle_fingerprint)?;
@@ -2951,6 +2969,43 @@ mod tests {
             .broker_checkpoint_v3()
             .ok_or(JournalError::Conflict)?;
         let create_base_head = create_base.head().clone();
+        let mut wrong_endpoint = authority.clone();
+        wrong_endpoint.endpoint.push_str("-wrong");
+        assert!(matches!(
+            verification_writer
+                .record_legacy_named_import_verification_create(
+                    &plan,
+                    &terminal_receipt,
+                    &wrong_endpoint,
+                )
+                .await,
+            Err(JournalError::Conflict)
+        ));
+        let mut changed_invocation = serde_json::to_value(&authority)?;
+        changed_invocation["invocation"]["cwd"] = json!(root.join("different-cwd"));
+        let changed_invocation: RuntimeAuthority = serde_json::from_value(changed_invocation)?;
+        assert!(matches!(
+            verification_writer
+                .record_legacy_named_import_verification_create(
+                    &plan,
+                    &terminal_receipt,
+                    &changed_invocation,
+                )
+                .await,
+            Err(JournalError::Conflict)
+        ));
+        let unchanged_after_bad_binding = verification_writer
+            .load(operation)
+            .await?
+            .ok_or(JournalError::Conflict)?;
+        assert_eq!(unchanged_after_bad_binding.head(), &create_base_head);
+        assert!(
+            unchanged_after_bad_binding
+                .broker_checkpoint_v2()
+                .and_then(|checkpoint| checkpoint.supervision().legacy_named_admission())
+                .and_then(|named| named.import_verification_create())
+                .is_none()
+        );
         let named_create = create_base
             .broker_checkpoint_v2()
             .and_then(|checkpoint| checkpoint.supervision().legacy_named_admission())
