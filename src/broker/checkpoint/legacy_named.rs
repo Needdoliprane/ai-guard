@@ -4,7 +4,8 @@ use crate::{
     control::session_control::{
         LegacyConfirmedPlanV1, LegacyNamedAdmissionReceiptV1, LegacyNamedImportArmRequestV1,
         LegacyNamedImportClaimRequestV1, LegacyNamedImportObservationPhaseV1,
-        LegacyNamedImportObservationRequestV1, LegacyNamedSupervisedAdmissionV1,
+        LegacyNamedImportObservationRequestV1, LegacyNamedImportVerificationArmRequestV2,
+        LegacyNamedSupervisedAdmissionV1,
     },
     runtime::{RuntimeAuthority, RuntimeKind},
 };
@@ -196,6 +197,59 @@ struct LegacyNamedImportVerificationCreatedV1 {
     version: u32,
     create_facts_hash: String,
     owned: OwnedContainerSnapshot,
+}
+
+/// Clock-independent facts for a prospective verification Arm. Reading them
+/// after STOP remains possible for reconciliation. The live owner still has
+/// to establish guardian custody and retain a single native deadline before
+/// dispatching an Arm.
+#[allow(
+    dead_code,
+    reason = "the verification Arm owner is composed separately"
+)]
+pub(in crate::broker) struct LegacyNamedImportVerificationArmFacts<'a> {
+    plan: &'a LegacyConfirmedPlanV1,
+    operation_id: String,
+    intent_hash: &'a str,
+    prepared: WorkerV1,
+    preparation: &'a HelperPreparationV1,
+    created: &'a LegacyNamedImportVerificationCreatedV1,
+    inspection: RuntimeInspectionV1,
+    runtime_binding_hash: &'a str,
+}
+
+#[allow(
+    dead_code,
+    reason = "the verification Arm owner is composed separately"
+)]
+impl LegacyNamedImportVerificationArmFacts<'_> {
+    pub(in crate::broker) fn plan(&self) -> &LegacyConfirmedPlanV1 {
+        self.plan
+    }
+    pub(in crate::broker) fn operation_id(&self) -> &str {
+        &self.operation_id
+    }
+    pub(in crate::broker) fn intent_hash(&self) -> &str {
+        self.intent_hash
+    }
+    pub(in crate::broker) fn prepared(&self) -> &WorkerV1 {
+        &self.prepared
+    }
+    pub(in crate::broker) fn preparation(&self) -> &HelperPreparationV1 {
+        self.preparation
+    }
+    pub(in crate::broker) fn owned(&self) -> &OwnedContainerSnapshot {
+        &self.created.owned
+    }
+    pub(in crate::broker) fn create_facts_hash(&self) -> &str {
+        &self.created.create_facts_hash
+    }
+    pub(in crate::broker) fn inspection(&self) -> &RuntimeInspectionV1 {
+        &self.inspection
+    }
+    pub(in crate::broker) fn runtime_binding_hash(&self) -> &str {
+        self.runtime_binding_hash
+    }
 }
 
 impl LegacyNamedImportObservationCheckpointV1 {
@@ -577,6 +631,63 @@ impl LegacyNamedAdmissionCheckpoint {
             .map(|created| &created.owned)
     }
 
+    #[allow(
+        dead_code,
+        reason = "the verification Arm owner is composed separately"
+    )]
+    pub(in crate::broker) fn import_verification_arm_facts(
+        &self,
+    ) -> JournalResult<Option<LegacyNamedImportVerificationArmFacts<'_>>> {
+        self.validate_shape(uuid(&self.plan.control_namespace_uuid)?)?;
+        let Some(created) = self.import_verification_created.as_deref() else {
+            return Ok(None);
+        };
+        let create = self
+            .import_verification_create()
+            .ok_or(JournalError::Conflict)?;
+        let preparation = self
+            .import_verification_plan()
+            .ok_or(JournalError::Conflict)?
+            .preparation();
+        let prepared = self.import_verification_parent()?;
+        let policy = preparation.policy();
+        let operation_id = LegacyNamedImportVerificationArmRequestV2::operation_id(
+            self.plan.binding_ref,
+            uuid(&prepared.attempt.attempt_id)?,
+        );
+        let HelperPermissionV1::ImportVerification {
+            import_arm,
+            import_terminal,
+            ..
+        } = preparation.permission()
+        else {
+            return Err(JournalError::Conflict);
+        };
+        ensure(
+            operation_id != self.plan.operation_id.to_string()
+                && operation_id != policy.helper_id
+                && operation_id != import_arm.arm_id
+                && operation_id != import_terminal.operation_id,
+        )?;
+        let inspection = checked(crate::runner::broker_helper_observation(
+            &prepared,
+            policy,
+            &created.owned.observation,
+        ))?
+        .inspection;
+        checked(policy.validate_inspection(&inspection))?;
+        Ok(Some(LegacyNamedImportVerificationArmFacts {
+            plan: &self.plan,
+            operation_id,
+            intent_hash: &self.request.admission.intent_hash,
+            prepared,
+            preparation,
+            created,
+            inspection,
+            runtime_binding_hash: &create.authority.binding_hash,
+        }))
+    }
+
     /// Add the one immutable verification-helper intent after the exact
     /// successful named Import Terminal receipt is retained. Replaying the
     /// same helper id is idempotent; a different id conflicts.
@@ -694,6 +805,13 @@ impl LegacyNamedAdmissionCheckpoint {
     }
 
     fn import_verification_inputs(&self) -> JournalResult<(WorkerV1, HelperPermissionV1)> {
+        Ok((
+            self.import_verification_parent()?,
+            self.import_verification_permission()?,
+        ))
+    }
+
+    fn import_verification_parent(&self) -> JournalResult<WorkerV1> {
         let reserved = self
             .admission_result()
             .filter(|result| result.accepted)
@@ -713,7 +831,7 @@ impl LegacyNamedAdmissionCheckpoint {
         };
         let parent = checked(crate::audit::expected_worker_transition(reserved, &prepare))?;
         checked(import_arm.arm.validate_for_parent(&parent))?;
-        Ok((parent, self.import_verification_permission()?))
+        Ok(parent)
     }
 
     /// Build the evidence for a separate verification Arm from the exact
@@ -3359,6 +3477,7 @@ mod tests {
             .legacy_named_admission()
             .ok_or(JournalError::Conflict)?;
         assert!(stopped_named.import_verification_created().is_none());
+        assert!(stopped_named.import_verification_arm_facts()?.is_none());
         assert!(matches!(
             stopped_named.clone().with_import_verification_created(
                 &"0".repeat(64),
@@ -3489,6 +3608,64 @@ mod tests {
                 .ok_or(JournalError::Conflict)?,
             &verification_owned,
         )?);
+        let facts = cold_created
+            .import_verification_arm_facts()?
+            .ok_or(JournalError::Conflict)?;
+        assert_eq!(facts.plan(), &plan);
+        assert_eq!(facts.intent_hash(), arm.intent_hash.as_str());
+        assert_eq!(facts.prepared().revision, arm.expected_revision);
+        assert_eq!(facts.prepared().state, WorkerStateV1::Preparing);
+        assert_eq!(facts.prepared().attempt.attempt_id, arm.attempt_id);
+        assert_eq!(
+            facts.operation_id(),
+            LegacyNamedImportVerificationArmRequestV2::operation_id(
+                plan.binding_ref,
+                uuid(&arm.attempt_id)?,
+            )
+            .as_str()
+        );
+        assert_ne!(facts.operation_id(), arm.operation_id.as_str());
+        assert!(equal(
+            facts.preparation().permission(),
+            &HelperPermissionV1::ImportVerification {
+                import_helper_id: helper_id.to_string(),
+                import_arm: arm_result.receipt.clone(),
+                import_terminal: terminal_receipt.clone(),
+                manifest_digest: facts.prepared().launch.workspace_manifest_digest.clone(),
+            },
+        )?);
+        assert_eq!(
+            facts.inspection().spec_hash,
+            verification_policy.spec_hash()?
+        );
+        assert_ne!(
+            facts.inspection().spec_hash,
+            import_verification_spec_hash(verification_policy)?
+        );
+        assert_eq!(
+            facts.inspection().container_id.as_str(),
+            verification_owned.handle.id(),
+        );
+        assert!(equal(facts.owned(), &verification_owned)?);
+        assert_eq!(facts.create_facts_hash(), create_facts_hash.as_str());
+        assert_eq!(
+            facts.runtime_binding_hash(),
+            content_hash(
+                "ai-guard:legacy-named-import-runtime-binding:v1",
+                &authority
+            )?
+            .as_str(),
+        );
+        let mut divergent_created = cold_created.clone();
+        divergent_created
+            .import_verification_created
+            .as_mut()
+            .unwrap()
+            .create_facts_hash = "0".repeat(64);
+        assert!(matches!(
+            divergent_created.import_verification_arm_facts(),
+            Err(JournalError::Conflict)
+        ));
         let repeated = cold_created.clone().with_import_verification_created(
             &create_facts_hash,
             &authority,
