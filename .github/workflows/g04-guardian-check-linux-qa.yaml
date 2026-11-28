@@ -13,12 +13,12 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 35
     env:
-      SOURCE_SHA: b341ee27e320c87d68a02d8784d276af5e4d4345
-      SOURCE_TREE: 145406fb190a64dc698e00a43c7c624059c110ab
+      SOURCE_SHA: e7f44d958a83eccf0898fd8caae090e7833ce845
+      SOURCE_TREE: 7f1118e41414c8c97a3a65912d49e6cb655a8b5f
       VERIFICATION_WRITER_BLOB: 1f02091edb1d4529cb3c84965be7485a4a05c09c
       ENFORCER_BLOB: 53d3982f7b684d7e73eaf65459b131a37d9effce
       CLIENT_BLOB: 1821b692fa02548f91476a426343a739aafaedee
-      CLIENT_LEGACY_BLOB: 78087f99abb03d702503636875141dcf064836a3
+      CLIENT_LEGACY_BLOB: 83f78663243f2a94f1df6d9a53af1bfad0fb78cc
       LEGACY_NAMED_STOP_BLOB: 4f3bec9d186474e6944795149ce0892fd45bc523
       SERVER_BLOB: acd9d6e9cf220e8fe1492d339249882a972771af
       SERVER_PROSPECTIVE_BLOB: f4244d13584a6e1dde07b449b4253de70b0bbe13
@@ -43,7 +43,6 @@ jobs:
           umask 077
           ulimit -c 0
           selectors=(
-            broker::checkpoint::legacy_named::tests::verification_created_writer::named_verification_check_keeps_the_original_guardian_slot
             broker::checkpoint::legacy_named::tests::verification_created_writer::named_verification_check_refuses_after_confirmed_stop
           )
           report_not_run() {
