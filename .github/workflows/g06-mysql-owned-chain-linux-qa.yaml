@@ -1,0 +1,209 @@
+name: G06 MySQL owned chain Linux QA
+
+on:
+  push:
+    branches: [codex/g06-mysql-owned-chain-linux-qa-20261128]
+    paths: [.github/workflows/g06-mysql-owned-chain-linux-qa.yaml]
+
+permissions:
+  contents: read
+
+jobs:
+  mysql-owned-chain:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      SOURCE_SHA: a7146bb85e28040f7f7d7d0471932ec7141da0e3
+      SOURCE_TREE: f43cbf169de09c3ff0c937af0c187b9a562580c5
+      SOURCE_PARENT_SHA: 951cb97f31f2bc44bcf9e9df6c51aec7654e7a2b
+      SOURCE_PUBLIC_BASE_SHA: 8bb03d6e7cd934dbeafced02a6fb016188d6b221
+      MYSQL_STORAGE_BLOB: 87d58f7c19ed6a9277cee798ea65f032f057ae91
+      OWNED_ORIGIN_BLOB: 4513fc9c4f44ee8fb153cb4b142e2c6814a6b86a
+      PREPARATION_BLOB: 7296e1cf444fd8a33370d891f317ea0fe295fb46
+      AUDIT_MANIFEST_BLOB: a5eb9512c6d9b235bba8d3f2e755fec41e2b1af5
+      PUBLICATION_BLOB: 39d6e329f489afd37fb9ff6ecb54c5b81c615307
+      MYSQL_PREPARE_CLI_BLOB: 187218e6509aa7bc14a295305fd684aefea33fc0
+      MAIN_BLOB: 432bfaf705a615afded4fb15c4ce56b0a5b6b6bf
+      PREPARATION_DOC_BLOB: 7ae8c5b00b404250d3fa54f3b062d6a392dd043d
+      CARGO_BUILD_JOBS: '1'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      CARGO_TERM_COLOR: never
+      LC_ALL: C
+      RUST_MIN_STACK: '8388608'
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          fetch-depth: 4
+          persist-credentials: false
+
+      - name: Build separate lib and CLI test harnesses for owned MySQL chain
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          ulimit -c 0
+          lib_selectors=(
+            mysql_storage::owned_origin::preparation::publication::tests::owned_history_rejects_a_coherent_chain_for_another_installation
+            mysql_storage::owned_origin::preparation::publication::tests::owned_history_replay_requires_an_exact_tail_and_durable_head
+            mysql_storage::owned_origin::preparation::audit_manifest::tests::owned_history_table_names_match_each_installed_format
+          )
+          bin_selectors=(
+            tests::mysql_owned_preparation_requires_an_exact_target_and_stable_ids
+            mysql_prepare_cli::tests::owned_operation_error_preserves_only_safe_diagnostics
+          )
+          all_selectors=("${lib_selectors[@]}" "${bin_selectors[@]}")
+          report_not_run() {
+            local selector
+            for selector in "${all_selectors[@]}"; do
+              printf 'test=%s status=NOT_RUN\n' "$selector"
+            done
+          }
+          files=(
+            src/mysql_storage.rs
+            src/mysql_storage/owned_origin.rs
+            src/mysql_storage/owned_origin/preparation.rs
+            src/mysql_storage/owned_origin/preparation/audit_manifest.rs
+            src/mysql_storage/owned_origin/preparation/publication.rs
+            src/mysql_prepare_cli.rs
+            src/main.rs
+            tests/e2e/mysql/OWNED_PREPARATION.md
+          )
+          expected_blobs=(
+            "$MYSQL_STORAGE_BLOB"
+            "$OWNED_ORIGIN_BLOB"
+            "$PREPARATION_BLOB"
+            "$AUDIT_MANIFEST_BLOB"
+            "$PUBLICATION_BLOB"
+            "$MYSQL_PREPARE_CLI_BLOB"
+            "$MAIN_BLOB"
+            "$PREPARATION_DOC_BLOB"
+          )
+          if [[ "${GITHUB_REF:-}" != refs/heads/codex/g06-mysql-owned-chain-linux-qa-20261128 ||
+                "$(git rev-parse HEAD 2>/dev/null)" != "$SOURCE_SHA" ||
+                "$(git rev-parse 'HEAD^{tree}' 2>/dev/null)" != "$SOURCE_TREE" ||
+                "$(git rev-parse 'HEAD^' 2>/dev/null)" != "$SOURCE_PARENT_SHA" ||
+                "$(git rev-parse 'HEAD^^^' 2>/dev/null)" != "$SOURCE_PUBLIC_BASE_SHA" ||
+                "$RUST_MIN_STACK" != 8388608 ]]; then
+            printf 'source=FAIL\n'
+            report_not_run
+            exit 1
+          fi
+          for i in "${!files[@]}"; do
+            file=${files[$i]}
+            expected=${expected_blobs[$i]}
+            if [[ ! -f "$file" || -L "$file" ||
+                  "$(git rev-parse "HEAD:$file" 2>/dev/null)" != "$expected" ||
+                  "$(git hash-object --no-filters -- "$file" 2>/dev/null)" != "$expected" ]]; then
+              printf 'source=FAIL\n'
+              report_not_run
+              exit 1
+            fi
+          done
+          printf 'source=PASS\nsource_sha=%s\nsource_tree=%s\nsource_parent_sha=%s\nsource_public_base_sha=%s\n' \
+            "$SOURCE_SHA" "$SOURCE_TREE" "$SOURCE_PARENT_SHA" "$SOURCE_PUBLIC_BASE_SHA"
+          printf 'mysql_storage_blob=%s\nowned_origin_blob=%s\npreparation_blob=%s\naudit_manifest_blob=%s\npublication_blob=%s\n' \
+            "$MYSQL_STORAGE_BLOB" "$OWNED_ORIGIN_BLOB" "$PREPARATION_BLOB" "$AUDIT_MANIFEST_BLOB" "$PUBLICATION_BLOB"
+          printf 'mysql_prepare_cli_blob=%s\nmain_blob=%s\npreparation_doc_blob=%s\n' \
+            "$MYSQL_PREPARE_CLI_BLOB" "$MAIN_BLOB" "$PREPARATION_DOC_BLOB"
+          printf 'test_stack_bytes=%s\n' "$RUST_MIN_STACK"
+          export AI_GUARD_BUILD_REVISION="$SOURCE_SHA"
+
+          scratch=$(mktemp -d /tmp/aig-g06.XXXXXX)
+          chmod 700 "$scratch"
+          trap 'find "$scratch" -depth -mindepth 1 -delete; rmdir "$scratch"' EXIT
+          export TMPDIR="$scratch"
+          export CARGO_TARGET_DIR="$scratch/target"
+          build_json="$scratch/build.jsonl"
+          if ! cargo fetch --locked >"$scratch/fetch.log" 2>&1; then
+            printf 'fetch=FAIL\nbuild=NOT_RUN\n'
+            report_not_run
+            exit 1
+          fi
+          printf 'fetch=PASS\n'
+          if cargo test --locked --offline --no-default-features --features mysql-storage \
+              --lib --bin agentsandbox --no-run --message-format=json \
+              >"$build_json" 2>"$scratch/build.stderr"; then
+            printf 'build=PASS\n'
+          else
+            rc=$?
+            printf 'build=FAIL\nbuild_exit=%s\n' "$rc"
+            jq -Rr 'fromjson? | objects
+              | select(.reason == "compiler-message" and .message.level == "error")
+              | .message as $message
+              | ($message.code.code // "uncoded") as $code
+              | select($code | test("\\A(E[0-9]{4}|uncoded)\\z"))
+              | ([$message.spans[]? | select(.is_primary)
+                  | recurse(.expansion.span // empty)
+                  | select(.file_name | test("\\A(src|tests)(/[A-Za-z0-9_-]+)+[.]rs\\z"))
+                  | select(.line_start | type == "number")] | .[0]) as $span
+              | if $span then "compiler_error=\($code) file=\($span.file_name) line=\($span.line_start)"
+                else "compiler_error=\($code) scope=outside_product_sources" end' \
+              "$build_json" 2>/dev/null | sort -u | sed -n '1,16p' || true
+            report_not_run
+            exit 1
+          fi
+
+          if ! libtest=$(jq -ers '[.[] | select(.reason == "compiler-artifact"
+              and .target.name == "agentsandbox" and .target.kind == ["lib"]
+              and .profile.test == true and (.executable | type) == "string") | .executable]
+              | unique | select(length == 1) | .[0]' "$build_json" 2>/dev/null) ||
+              [[ "$libtest" != "$CARGO_TARGET_DIR"/debug/deps/agentsandbox-* ||
+                 ! -f "$libtest" || ! -x "$libtest" || -L "$libtest" ]]; then
+            printf 'libtest=FAIL\nbintest=NOT_RUN\n'
+            report_not_run
+            exit 1
+          fi
+          if ! bintest=$(jq -ers '[.[] | select(.reason == "compiler-artifact"
+              and .target.name == "agentsandbox" and .target.kind == ["bin"]
+              and .profile.test == true and (.executable | type) == "string") | .executable]
+              | unique | select(length == 1) | .[0]' "$build_json" 2>/dev/null) ||
+              [[ "$bintest" != "$CARGO_TARGET_DIR"/debug/deps/agentsandbox-* ||
+                 ! -f "$bintest" || ! -x "$bintest" || -L "$bintest" ||
+                 "$bintest" == "$libtest" ]]; then
+            printf 'libtest=PASS\nbintest=FAIL\n'
+            report_not_run
+            exit 1
+          fi
+          lib_sum=$(sha256sum -- "$libtest")
+          bin_sum=$(sha256sum -- "$bintest")
+          lib_sha=${lib_sum%% *}
+          bin_sha=${bin_sum%% *}
+          if [[ ! "$lib_sha" =~ ^[0-9a-f]{64}$ || ! "$bin_sha" =~ ^[0-9a-f]{64}$ ]]; then
+            printf 'libtest=FAIL\nbintest=FAIL\n'
+            report_not_run
+            exit 1
+          fi
+          printf 'libtest=PASS\nlibtest_sha256=%s\nbintest=PASS\nbintest_sha256=%s\n' \
+            "$lib_sha" "$bin_sha"
+
+          failures=0
+          run_exact() {
+            local harness="$1" selector="$2" output="$scratch/test-$3.log" status="FAIL" test_exit=0
+            timeout --kill-after=5s 90s "$harness" --exact "$selector" --test-threads=1 --color never \
+              >"$output" 2>&1 || test_exit=$?
+            if [[ "$test_exit" == 0 &&
+                  "$(grep -Fxc 'running 1 test' "$output" || true)" == 1 &&
+                  "$(grep -Fxc "test $selector ... ok" "$output" || true)" == 1 &&
+                  "$(grep -Ec '^test result: ok[.] 1 passed; 0 failed; 0 ignored; 0 measured; [0-9]+ filtered out;' "$output" || true)" == 1 ]]; then
+              status=PASS
+            fi
+            printf 'test=%s status=%s\ntest_exit=%s\n' "$selector" "$status" "$test_exit"
+            if [[ "$status" == PASS ]]; then
+              printf 'test_pass_count=1\ntest_fail_count=0\n'
+              return 0
+            fi
+            failures=$((failures + 1))
+            if grep -q '^Error: ' "$output"; then printf 'test_error_marker=true\n'; fi
+            grep -m 1 -Eo 'panicked at (src|tests)(/[A-Za-z0-9_-]+)+[.]rs:[0-9]+:[0-9]+' "$output" || true
+            return 0
+          }
+          run_exact "$libtest" "${lib_selectors[0]}" lib-foreign-origin
+          run_exact "$libtest" "${lib_selectors[1]}" lib-exact-replay
+          run_exact "$bintest" "${bin_selectors[0]}" bin-cli-parse
+          run_exact "$bintest" "${bin_selectors[1]}" bin-safe-diagnostics
+          printf 'oracle_count=5\noracle_failures=%s\n' "$failures"
+          [[ "$failures" == 0 ]]
