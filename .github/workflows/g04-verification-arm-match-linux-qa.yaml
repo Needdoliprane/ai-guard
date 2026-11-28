@@ -1,0 +1,256 @@
+name: G04 exact verification Arm validation Linux QA
+
+on:
+  push:
+    branches: [codex/g04-verification-arm-match-linux-qa-20261128]
+    paths: [.github/workflows/g04-verification-arm-match-linux-qa.yaml]
+
+permissions:
+  contents: read
+
+jobs:
+  verification-arm-match:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      SOURCE_SHA: 1751f6a8a808d798f2146094d24660549d9e1a18
+      SOURCE_TREE: 7ca2c9214eaffbe4d59fe07f00b5e2070251c1f4
+      CHECKPOINT_BLOB: 7f54555c6d6309c92d92511a6d6320f03bd21684
+      NAMED_CHECKPOINT_BLOB: 9a7fa4e7ce5716894da06b1548fc345ed821cb81
+      WRITER_BLOB: cbf05fbd3631c17c4e7900accfdc29b9d14ee1d1
+      NAMED_WRITER_BLOB: 599c1ef87463fc000a035513bdd81b02295293a4
+      RUNTIME_BLOB: fa009b4ea4e5768bdc8d66f66b780dbd59098227
+      MANAGED_RUNTIME_BLOB: a38f08d7fae8e4b35aa702818fa465a32ab271be
+      BOOTSTRAP_STDIN_TESTS_BLOB: 3e424b0c74142035803c7316dbe0cc87f328945c
+      VERIFICATION_CREATED_WRITER_TEST_BLOB: 5cac774c9aef2d7015f0382ec94c77dae7847ecd
+      TERMINAL_FIXTURE_BLOB: b86b4ae0fa2c83a6f0fe471176c7597f51cd6e64
+      ARM_DTO_BLOB: ca316127547a9c88efef6566dbbfb010833208dc
+      CARGO_BUILD_JOBS: '1'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      CARGO_TERM_COLOR: never
+      RUST_MIN_STACK: '8388608'
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          persist-credentials: false
+
+      - name: Verify the branch, source tree and owned blobs
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          test "${GITHUB_REF:-}" = refs/heads/codex/g04-verification-arm-match-linux-qa-20261128
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          test "$(git rev-parse 'HEAD^{tree}')" = "$SOURCE_TREE"
+          test "$(git rev-parse HEAD:src/broker/checkpoint.rs)" = "$CHECKPOINT_BLOB"
+          test "$(git rev-parse HEAD:src/broker/checkpoint/legacy_named.rs)" = "$NAMED_CHECKPOINT_BLOB"
+          test "$(git rev-parse HEAD:src/broker/writer.rs)" = "$WRITER_BLOB"
+          test "$(git rev-parse HEAD:src/broker/writer/legacy_named_admission.rs)" = "$NAMED_WRITER_BLOB"
+          test "$(git rev-parse HEAD:src/runtime.rs)" = "$RUNTIME_BLOB"
+          test "$(git rev-parse HEAD:src/runtime/managed.rs)" = "$MANAGED_RUNTIME_BLOB"
+          test "$(git rev-parse HEAD:src/runtime/bootstrap_stdin_tests.rs)" = "$BOOTSTRAP_STDIN_TESTS_BLOB"
+          test "$(git rev-parse HEAD:src/broker/checkpoint/legacy_named/tests/verification_created_writer.rs)" = "$VERIFICATION_CREATED_WRITER_TEST_BLOB"
+          test "$(git rev-parse HEAD:tests/runtime_fixtures/runner_terminal.rs)" = "$TERMINAL_FIXTURE_BLOB"
+          test "$(git rev-parse HEAD:src/control/session_control.rs)" = "$ARM_DTO_BLOB"
+          printf 'source=PASS\nsource_sha=%s\nsource_tree=%s\n' "$SOURCE_SHA" "$SOURCE_TREE"
+
+      - name: Run the exact verification Arm oracle at 8 MiB in one libtest
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          ulimit -c 0
+          [[ "$RUST_MIN_STACK" == 8388608 ]]
+          selectors=(
+            broker::checkpoint::legacy_named::tests::explicit_named_admission_requires_an_immutable_archive_digest
+          )
+          report_not_run() {
+            local selector
+            for selector in "${selectors[@]}"; do
+              printf 'test=%s status=NOT_RUN\n' "$selector"
+            done
+          }
+          clean_line() {
+            sed -E \
+              -e "s#${RUNNER_TEMP//\//\\/}/[^[:space:]\"']+#[runner-temp-path]#g" \
+              -e "s#/home/runner/work/_temp/[^[:space:]\"']+#[runner-temp-path]#g" \
+              -e "s#/home/runner/work/[^[:space:]\"']+#[workspace-path]#g" \
+              -e "s#/tmp/[^[:space:]\"']+#[scratch-path]#g" \
+              -e "s#Bearer[[:space:]]+[A-Za-z0-9._~+/-]+=*#Bearer [REDACTED]#Ig" \
+              -e "s#(token|secret|password|api[_-]?key)[[:space:]\"=:]+[A-Za-z0-9._~+/-]{8,}#[REDACTED]#Ig" \
+              -e "s#sk-[A-Za-z0-9_-]{16,}#[REDACTED]#g" \
+              -e "s#gh[pousr]_[A-Za-z0-9]{20,}#[REDACTED]#g"
+          }
+          emit_cargo_errors() {
+            local report
+            report=$(jq -cs '[.[] | select(.reason == "compiler-message"
+                and .message.level == "error") | .message as $m |
+                ($m.code.code // "") as $code |
+                select($code | test("^E[0-9]{4}$")) |
+                {category: "rustc_error", code: $code,
+                 files: [$m.spans[]? | select(.file_name | test("^(src|tests|examples)/[A-Za-z0-9_./-]+\\.rs$"))
+                   | select(.file_name | (contains("/../") or endswith("/..") | not))
+                   | {file: .file_name, line: .line_start, column: .column_start}]}] | .[0:24]' "$1") || return 1
+            printf 'rust_diagnostics=%s\n' "$report"
+          }
+          emit_link_disk_diagnostics() {
+            local source="$1"
+            if grep -Eiq 'No space left on device|disk quota|failed to write' "$source"; then
+              printf 'build_category=disk_exhaustion\n'
+            fi
+            if grep -Eiq 'linker.*failed|linking with .* failed|ld:|rustc-LLVM ERROR|could not compile' "$source"; then
+              printf 'build_category=linker_or_compiler_failure\n'
+            fi
+          }
+          classify_test_failure() {
+            local selector="$1" exit_code="$2" capture="$3" site path
+            if [[ "$exit_code" == 134 ]] &&
+                grep -Eq "^(test $selector \.\.\. )?fatal runtime error: stack overflow(, aborting)?$" "$capture"; then
+              printf 'stack_overflow\n'
+              return
+            fi
+            while IFS= read -r site; do
+              path=${site%:*}
+              path=${path%:*}
+              if git cat-file -e "$SOURCE_SHA:$path" 2>/dev/null; then
+                printf 'repo_panic %s\n' "$site"
+                return
+              fi
+            done < <(sed -nE "s/^thread '[^']+'( \([0-9]+\))? panicked at ((src|tests|examples)\/([A-Za-z0-9_-][A-Za-z0-9_.-]*\/)*[A-Za-z0-9_-][A-Za-z0-9_.-]*\.rs:[1-9][0-9]*:[1-9][0-9]*):$/\2/p" "$capture")
+            if [[ "$exit_code" == 101 ]] &&
+                grep -Eq "^(test $selector \.\.\. )?Error: .+" "$capture" &&
+                grep -Eq '^test result: FAILED\. 0 passed; 1 failed;' "$capture"; then
+              printf 'error_result\n'
+            elif [[ "$exit_code" == 134 ]]; then
+              printf 'other_sigabrt\n'
+            else
+              printf 'unclassified_failure\n'
+            fi
+          }
+          classify_stack_thread() {
+            local selector="$1" capture="$2" thread
+            thread=$(sed -nE "s/^thread '([^']+)'( \([0-9]+\))? has overflowed its stack$/\1/p" "$capture")
+            case "$thread" in
+              "$selector") printf 'selected_oracle\n' ;;
+              ai-guard-journal-writer) printf 'journal_writer\n' ;;
+              *) printf 'other_or_unknown\n' ;;
+            esac
+          }
+          run_exact_test() {
+            local selector="$1" capture="$2"
+            local test_exit=0 classification category site
+            # Redirect the shell's signal diagnostic as well as libtest output.
+            { "$libtest" --exact "$selector" --test-threads=1 --color never --nocapture; } \
+              >"$capture" 2>&1 || test_exit=$?
+            printf 'test_stack_bytes=%s\n' "$RUST_MIN_STACK"
+            if [[ "$test_exit" == 0 ]] &&
+                [[ "$(grep -Fxc 'running 1 test' "$capture" || true)" == 1 ]] &&
+                [[ "$(grep -Ec '^test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; [0-9]+ filtered out; finished in [0-9]+([.][0-9]+)?s$' "$capture" || true)" == 1 ]]; then
+              printf 'test=%s status=PASS\ntest_exit=0\ntest_pass_count=1\ntest_fail_count=0\n' "$selector"
+              return 0
+            fi
+            classification=$(classify_test_failure "$selector" "$test_exit" "$capture")
+            read -r category site <<<"$classification"
+            printf 'test=%s status=FAIL\ntest_exit=%s\ntest_failure_category=%s\n' "$selector" "$test_exit" "$category"
+            if [[ -n "$site" ]]; then
+              printf 'test_panic_site=%s\n' "$site"
+            fi
+            if [[ "$category" == stack_overflow ]]; then
+              printf 'test_stack_thread=%s\n' "$(classify_stack_thread "$selector" "$capture")"
+            fi
+            return 1
+          }
+          scratch=
+          diagnostic_scratch=$(mktemp -d "$RUNNER_TEMP/g04-diagnostic-filter.XXXXXXXX")
+          chmod 700 "$diagnostic_scratch"
+          trap 'if [[ -n "$scratch" ]]; then rm -rf -- "$scratch"; fi; rm -rf -- "$diagnostic_scratch"' EXIT
+          synthetic_json="$diagnostic_scratch/synthetic.jsonl"
+          jq -nc '{reason:"compiler-message",message:{level:"error",code:{code:"E0001"},message:"synthetic Bearer synthetic-token-secret-1234567890",spans:[{file_name:"src/runtime/managed.rs",line_start:73,column_start:2},{file_name:"/tmp/private.rs",line_start:1,column_start:1}],rendered:"[private rendered compiler output omitted]"}}' >"$synthetic_json"
+          synthetic_report=$(emit_cargo_errors "$synthetic_json")
+          [[ "$synthetic_report" == *E0001* && "$synthetic_report" == *src/runtime/managed.rs* &&
+             "$synthetic_report" != *synthetic-token-secret* && "$synthetic_report" != *'/tmp/'* &&
+             "$synthetic_report" == *rustc_error* ]]
+          synthetic_stderr="$diagnostic_scratch/synthetic.stderr"
+          printf 'rustc-LLVM ERROR: synthetic linker failure at %s\nNo space left on device: %s\n' \
+            "$RUNNER_TEMP/g04-diagnostic-filter/target" "$RUNNER_TEMP/g04-diagnostic-filter/target" >"$synthetic_stderr"
+          synthetic_link_report=$(emit_link_disk_diagnostics "$synthetic_stderr")
+          synthetic_path_report=$(printf '%s\n' "$RUNNER_TEMP/g04-diagnostic-filter/target" | clean_line)
+          synthetic_github_temp_report=$(printf '%s\n' '/home/runner/work/_temp/g04-diagnostic-filter/target' | clean_line)
+          [[ "$synthetic_link_report" == *linker_or_compiler_failure* &&
+             "$synthetic_link_report" == *disk_exhaustion* &&
+             "$synthetic_path_report" == *'[runner-temp-path]'* &&
+             "$synthetic_path_report" != *"$RUNNER_TEMP"* &&
+             "$synthetic_github_temp_report" == *'[runner-temp-path]'* &&
+             "$synthetic_github_temp_report" != *'/home/runner/work/_temp'* ]]
+          printf 'diagnostic_filter_selftest=PASS\n'
+          synthetic_test="$diagnostic_scratch/synthetic-test.log"
+          selector="${selectors[0]}"
+          printf '%s\n' 'fatal runtime error: stack overflow, aborting' \
+            "private message in $RUNNER_TEMP/test-token" >"$synthetic_test"
+          [[ "$(classify_test_failure "$selector" 134 "$synthetic_test")" == stack_overflow &&
+             "$(classify_test_failure "$selector" 101 "$synthetic_test")" == unclassified_failure ]]
+          printf "thread '%s' (123) has overflowed its stack\n" "$selector" >"$synthetic_test"
+          [[ "$(classify_stack_thread "$selector" "$synthetic_test")" == selected_oracle &&
+             "$(classify_test_failure "$selector" 134 "$synthetic_test")" == other_sigabrt ]]
+          printf "%s\n" "thread 'ai-guard-journal-writer' (987) has overflowed its stack" >"$synthetic_test"
+          [[ "$(classify_stack_thread "$selector" "$synthetic_test")" == journal_writer ]]
+          printf "thread 'unlisted private thread' has overflowed its stack\n" >"$synthetic_test"
+          [[ "$(classify_stack_thread "$selector" "$synthetic_test")" == other_or_unknown ]]
+          printf '%s\n' "thread 'test' (123) panicked at src/runtime.rs:42:7:" \
+            "private assertion in $RUNNER_TEMP/test-token" >"$synthetic_test"
+          [[ "$(classify_test_failure "$selector" 101 "$synthetic_test")" == 'repo_panic src/runtime.rs:42:7' ]]
+          printf '%s\n' "thread 'test' panicked at $RUNNER_TEMP/private.rs:42:7:" \
+            "thread 'test' panicked at src/../private.rs:42:7:" \
+            'stack overflow mentioned in a message' >"$synthetic_test"
+          [[ "$(classify_test_failure "$selector" 134 "$synthetic_test")" == other_sigabrt ]]
+          printf '%s\n' "test $selector ... Error: private message in $RUNNER_TEMP/test-token" \
+            'test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.01s' >"$synthetic_test"
+          [[ "$(classify_test_failure "$selector" 101 "$synthetic_test")" == error_result ]]
+          printf 'test_output_filter_selftest=PASS\n'
+          scratch=$(mktemp -d "$RUNNER_TEMP/g04-named-runtime-create.XXXXXXXX")
+          chmod 700 "$scratch"
+          export TMPDIR="$scratch/tmp"
+          mkdir -m 700 "$TMPDIR"
+          export CARGO_TARGET_DIR="$scratch/target"
+          build_json="$scratch/build.jsonl"
+          if ! cargo fetch --locked >"$scratch/fetch.log" 2>&1; then
+            printf 'fetch=FAIL\nbuild=NOT_RUN\n'
+            report_not_run
+            exit 1
+          fi
+          printf 'fetch=PASS\n'
+          if cargo test --locked --offline -j1 --no-default-features --lib --no-run \
+              --message-format=json >"$build_json" 2>"$scratch/build.stderr"; then
+            printf 'build=PASS\n'
+          else
+            rc=$?
+            printf 'build=FAIL\nbuild_exit=%s\n' "$rc"
+            emit_cargo_errors "$build_json" || printf 'rust_diagnostics=unavailable\n'
+            emit_link_disk_diagnostics "$scratch/build.stderr"
+            available_kib=$(df -Pk "$scratch" | awk 'NR == 2 { print $4 }')
+            [[ "$available_kib" =~ ^[0-9]+$ ]] && printf 'disk_available_kib=%s\n' "$available_kib"
+            report_not_run
+            exit 1
+          fi
+          if ! libtest=$(jq -ers '[.[] | select(.reason == "compiler-artifact"
+              and .target.name == "agentsandbox" and .target.kind == ["lib"]
+              and .profile.test == true and (.executable | type) == "string") | .executable]
+              | unique | select(length == 1) | .[0]' "$build_json" 2>/dev/null) ||
+              [[ "$libtest" != "$CARGO_TARGET_DIR"/debug/deps/agentsandbox-* ||
+                 ! -f "$libtest" || ! -x "$libtest" || -L "$libtest" ]]; then
+            printf 'libtest=FAIL\n'
+            report_not_run
+            exit 1
+          fi
+          libtest_sha=$(sha256sum -- "$libtest" | cut -d ' ' -f 1)
+          [[ "$libtest_sha" =~ ^[0-9a-f]{64}$ ]]
+          printf 'libtest=PASS\nlibtest_sha256=%s\n' "$libtest_sha"
+          failed=0
+          for selector in "${selectors[@]}"; do
+            run_exact_test "$selector" "$scratch/test.log" || failed=1
+          done
+          exit "$failed"
