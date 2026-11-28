@@ -226,6 +226,10 @@ fn ensure_cardinality(
     Ok(())
 }
 impl Projection {
+    fn observe(&mut self, stored: &StoredEvent, tenant: &str) -> anyhow::Result<()> {
+        self.apply(&record(stored, tenant)?, stored.seq, tenant)
+    }
+
     fn apply(&mut self, record: &BindingRecordV1, seq: i64, tenant: &str) -> anyhow::Result<()> {
         record.validate(tenant)?;
         require(seq > self.last_seq)?;
@@ -245,6 +249,12 @@ impl Projection {
             .insert(next.binding.binding_id.clone(), (next, seq));
         self.last_seq = seq;
         Ok(())
+    }
+
+    fn rows(&self) -> impl Iterator<Item = anyhow::Result<ReviewBindingRow>> + '_ {
+        self.snapshots
+            .values()
+            .map(|(snapshot, seq)| ReviewBindingRow::from_snapshot(snapshot, *seq))
     }
 }
 
@@ -284,20 +294,53 @@ fn record(stored: &StoredEvent, tenant: &str) -> anyhow::Result<BindingRecordV1>
 }
 
 type SqlRow = Vec<rusqlite::types::Value>;
-fn sql_row(snapshot: &ReviewBindingSnapshotV1, seq: i64) -> anyhow::Result<SqlRow> {
-    snapshot.validate()?;
-    use rusqlite::types::Value as S;
-    Ok(vec![
-        S::Text(snapshot.binding.binding_id.clone()),
-        S::Text(snapshot.binding.credential_id.clone()),
-        S::Text(snapshot.binding.tenant_id.clone()),
-        S::Integer(i64::from(snapshot.binding.active)),
-        S::Integer(i64::try_from(snapshot.binding.revision)?),
-        S::Integer(i64::try_from(snapshot.policy.revision)?),
-        S::Text(serde_json::to_string(snapshot)?),
-        S::Text(snapshot.snapshot_hash()?),
-        S::Integer(seq),
-    ])
+
+/// The columns derived from the verified binding history before SQL encoding.
+struct ReviewBindingRow {
+    binding_id: String,
+    credential_id: String,
+    tenant_id: String,
+    active: bool,
+    binding_revision: i64,
+    policy_revision: i64,
+    snapshot_json: String,
+    snapshot_hash: String,
+    last_event_seq: i64,
+}
+
+impl ReviewBindingRow {
+    fn from_snapshot(
+        snapshot: &ReviewBindingSnapshotV1,
+        last_event_seq: i64,
+    ) -> anyhow::Result<Self> {
+        snapshot.validate()?;
+        Ok(Self {
+            binding_id: snapshot.binding.binding_id.clone(),
+            credential_id: snapshot.binding.credential_id.clone(),
+            tenant_id: snapshot.binding.tenant_id.clone(),
+            active: snapshot.binding.active,
+            binding_revision: i64::try_from(snapshot.binding.revision)?,
+            policy_revision: i64::try_from(snapshot.policy.revision)?,
+            snapshot_json: serde_json::to_string(snapshot)?,
+            snapshot_hash: snapshot.snapshot_hash()?,
+            last_event_seq,
+        })
+    }
+
+    fn into_sqlite_values(self) -> SqlRow {
+        use rusqlite::types::Value as S;
+        vec![
+            S::Text(self.binding_id),
+            S::Text(self.credential_id),
+            S::Text(self.tenant_id),
+            S::Integer(i64::from(self.active)),
+            S::Integer(self.binding_revision),
+            S::Integer(self.policy_revision),
+            S::Text(self.snapshot_json),
+            S::Text(self.snapshot_hash),
+            S::Integer(self.last_event_seq),
+        ]
+    }
 }
 // Closed Review binding ledger target; production wiring pending.
 #[allow(dead_code)]
@@ -330,7 +373,7 @@ fn write_snapshot(
     seq: i64,
     previous: Option<u64>,
 ) -> anyhow::Result<()> {
-    let mut row = sql_row(snapshot, seq)?;
+    let mut row = ReviewBindingRow::from_snapshot(snapshot, seq)?.into_sqlite_values();
     let changed = if let Some(previous) = previous {
         row.push(rusqlite::types::Value::Integer(i64::try_from(previous)?));
         db.execute("UPDATE runner_review_bindings SET credential_id=?2,tenant_id=?3,active=?4,binding_revision=?5,policy_revision=?6,snapshot_json=?7,snapshot_hash=?8,last_event_seq=?9 WHERE binding_id=?1 AND binding_revision=?10",rusqlite::params_from_iter(row))?
@@ -341,9 +384,8 @@ fn write_snapshot(
 }
 fn verify_rows(db: &Connection, projection: &Projection) -> anyhow::Result<()> {
     let expected = projection
-        .snapshots
-        .values()
-        .map(|(snapshot, seq)| sql_row(snapshot, *seq))
+        .rows()
+        .map(|row| row.map(ReviewBindingRow::into_sqlite_values))
         .collect::<anyhow::Result<Vec<_>>>()?;
     let mut statement=db.prepare("SELECT binding_id,credential_id,tenant_id,active,binding_revision,policy_revision,snapshot_json,snapshot_hash,last_event_seq FROM runner_review_bindings ORDER BY binding_id")?;
     let actual = statement
@@ -365,8 +407,7 @@ fn replay(db: &Connection, tenant: &str) -> anyhow::Result<Projection> {
     let events = statement.query_map([], row_event)?;
     let mut projection = Projection::default();
     for stored in events {
-        let stored = stored?;
-        projection.apply(&record(&stored, tenant)?, stored.seq, tenant)?;
+        projection.observe(&stored?, tenant)?;
     }
     verify_rows(db, &projection)?;
     Ok(projection)
@@ -881,3 +922,57 @@ impl Store {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+#[test]
+fn sqlite_projection_refuses_a_different_event_sequence_for_the_same_snapshot() -> anyhow::Result<()>
+{
+    let db = Connection::open_in_memory()?;
+    db.execute_batch("PRAGMA foreign_keys=ON; CREATE TABLE events(seq INTEGER PRIMARY KEY);")?;
+    for (_, _, sql) in SCHEMA {
+        db.execute_batch(sql)?;
+    }
+    db.execute("INSERT INTO events(seq) VALUES(1),(2)", [])?;
+
+    let command = crate::control::review_binding::tests::provision();
+    let change = BindingChangeV1::Provision { command };
+    let snapshot = transition(None, &change)?;
+    let record = BindingRecordV1 {
+        version: 1,
+        authority_source_id: "11000000-0000-4000-8000-000000000020".into(),
+        owner_incarnation: "11000000-0000-4000-8000-000000000021".into(),
+        input_hash: change.input_hash()?,
+        previous_revision: change.expected_revision(),
+        change,
+        snapshot,
+    };
+    let mut event = Event::new(record.change.kind());
+    event.id = record.change.operation_id().into();
+    event.source = "gateway".into();
+    event.provenance = "observed".into();
+    event.coverage = "native".into();
+    event.data = serde_json::to_value(&record)?;
+    let stored = StoredEvent {
+        seq: 2,
+        received_at: event.timestamp.clone(),
+        prev_hash: "a".repeat(64),
+        hash: "b".repeat(64),
+        event,
+    };
+    let mut projection = Projection::default();
+    projection.observe(&stored, &record.snapshot.binding.tenant_id)?;
+    write_snapshot(&db, &record.snapshot, stored.seq, None)?;
+    verify_rows(&db, &projection)?;
+
+    // The foreign key still refers to an existing event. All other columns match.
+    assert_eq!(
+        db.execute("UPDATE runner_review_bindings SET last_event_seq=1", [])?,
+        1
+    );
+    let error = verify_rows(&db, &projection).expect_err("the last event must match the replay");
+    assert_eq!(
+        error.downcast_ref::<ReviewBindingFailureV1>(),
+        Some(&ReviewBindingFailureV1::Integrity)
+    );
+    Ok(())
+}
