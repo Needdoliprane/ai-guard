@@ -83,67 +83,89 @@ impl ValidatedLegacyWorkerTerminal {
         observed: &ContainerObservation,
     ) -> Result<(), Code> {
         let (authority, created) = self.evidence.target();
-        let worker = self.evidence.worker();
         let created_id = created.handle.id();
-        if created.handle.authority_fingerprint() != authority.fingerprint()
-            || worker.admission_operation_id != self.evidence.operation_id().to_string()
-            || worker.attempt.container_id.as_deref() != Some(created_id)
-            || worker
-                .attempt
-                .created_inspection
-                .as_ref()
-                .is_none_or(|inspection| inspection.container_id != created_id)
-        {
+        if created.handle.authority_fingerprint() != authority.fingerprint() {
             return Err(Code::Conflict);
         }
-
-        let terminal_status = observed.process.status.as_deref() == Some("exited")
-            || authority.kind == RuntimeKind::Podman
-                && observed.process.status.as_deref() == Some("stopped");
-        if !terminal_status
-            || observed.process.running != Some(false)
-            || observed.process.exit_code.is_none()
-            || observed.process.started_at.is_none()
-            || observed.process.finished_at.is_none()
-        {
-            return Err(Code::NeedsReconciliation);
-        }
-
-        let claimed_start = worker
-            .observed_started_at
-            .as_deref()
-            .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
-            .filter(|value| value.timestamp() > 0)
-            .ok_or(Code::NeedsReconciliation)?;
-        let claim_observation = worker
-            .last_observation
-            .as_ref()
-            .filter(|observation| {
-                observation.status == RuntimeStatusV1::Running && observation.running == Some(true)
-            })
-            .and_then(|observation| observation.started_at.as_deref())
-            .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
-            .filter(|value| value.timestamp() > 0)
-            .ok_or(Code::NeedsReconciliation)?;
-        if claim_observation != claimed_start {
-            return Err(Code::Conflict);
-        }
-        if observed.process.started_at != Some(claimed_start) {
-            return Err(Code::Conflict);
-        }
-
-        observed
-            .validate_terminal(authority.kind, &created.observation)
-            .map_err(|_| Code::Conflict)?;
-        let finished_at = observed
-            .process
-            .finished_at
-            .ok_or(Code::NeedsReconciliation)?;
-        if observed.observed_at < finished_at.with_timezone(&chrono::Utc) {
-            return Err(Code::Conflict);
-        }
-        Ok(())
+        validate_worker_terminal_observation(
+            self.evidence.worker(),
+            &self.evidence.operation_id().to_string(),
+            authority.kind,
+            created_id,
+            &created.observation,
+            observed,
+        )
     }
+}
+
+/// Validate runtime terminal facts against the retained Worker Running claim
+/// and its exact Created snapshot. This is shared with other observation
+/// consumers; it returns no runtime handle, mutation, or execution authority.
+pub(super) fn validate_worker_terminal_observation(
+    worker: &WorkerV1,
+    admission_operation_id: &str,
+    runtime_kind: RuntimeKind,
+    created_container_id: &str,
+    created_observation: &ContainerObservation,
+    observed: &ContainerObservation,
+) -> Result<(), Code> {
+    if worker.admission_operation_id != admission_operation_id
+        || worker.attempt.container_id.as_deref() != Some(created_container_id)
+        || worker
+            .attempt
+            .created_inspection
+            .as_ref()
+            .is_none_or(|inspection| inspection.container_id != created_container_id)
+    {
+        return Err(Code::Conflict);
+    }
+
+    let terminal_status = observed.process.status.as_deref() == Some("exited")
+        || runtime_kind == RuntimeKind::Podman
+            && observed.process.status.as_deref() == Some("stopped");
+    if !terminal_status
+        || observed.process.running != Some(false)
+        || observed.process.exit_code.is_none()
+        || observed.process.started_at.is_none()
+        || observed.process.finished_at.is_none()
+    {
+        return Err(Code::NeedsReconciliation);
+    }
+
+    let claimed_start = worker
+        .observed_started_at
+        .as_deref()
+        .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+        .filter(|value| value.timestamp() > 0)
+        .ok_or(Code::NeedsReconciliation)?;
+    let claim_observation = worker
+        .last_observation
+        .as_ref()
+        .filter(|observation| {
+            observation.status == RuntimeStatusV1::Running && observation.running == Some(true)
+        })
+        .and_then(|observation| observation.started_at.as_deref())
+        .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+        .filter(|value| value.timestamp() > 0)
+        .ok_or(Code::NeedsReconciliation)?;
+    if claim_observation != claimed_start {
+        return Err(Code::Conflict);
+    }
+    if observed.process.started_at != Some(claimed_start) {
+        return Err(Code::Conflict);
+    }
+
+    observed
+        .validate_terminal(runtime_kind, created_observation)
+        .map_err(|_| Code::Conflict)?;
+    let finished_at = observed
+        .process
+        .finished_at
+        .ok_or(Code::NeedsReconciliation)?;
+    if observed.observed_at < finished_at.with_timezone(&chrono::Utc) {
+        return Err(Code::Conflict);
+    }
+    Ok(())
 }
 
 impl Service {
