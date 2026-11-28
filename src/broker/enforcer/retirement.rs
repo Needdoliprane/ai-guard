@@ -112,7 +112,11 @@ struct ActorState {
 enum RetainedTerminalObservation {
     #[default]
     Pending,
-    Observed(Box<ContainerObservation>),
+    Observed {
+        observation: Box<ContainerObservation>,
+        observed_for_current_stop: bool,
+        known_oom_killed: Option<bool>,
+    },
     Conflicting,
 }
 
@@ -131,18 +135,35 @@ impl ActorState {
         let terminal = observation
             .validate_terminal(registration.authority.kind, &registration.owned.observation)
             .is_ok();
-        match &self.retained_terminal {
+        match &mut self.retained_terminal {
             RetainedTerminalObservation::Pending if terminal => {
-                self.retained_terminal =
-                    RetainedTerminalObservation::Observed(Box::new(observation.clone()));
+                self.retained_terminal = RetainedTerminalObservation::Observed {
+                    observation: Box::new(observation.clone()),
+                    observed_for_current_stop: true,
+                    known_oom_killed: observation.process.oom_killed,
+                };
             }
-            RetainedTerminalObservation::Observed(previous)
+            RetainedTerminalObservation::Observed {
+                observation: previous,
+                observed_for_current_stop,
+                known_oom_killed,
+            } => {
                 if !terminal
                     || previous.process.started_at != observation.process.started_at
                     || previous.process.finished_at != observation.process.finished_at
-                    || previous.process.exit_code != observation.process.exit_code =>
-            {
-                self.retained_terminal = RetainedTerminalObservation::Conflicting;
+                    || previous.process.exit_code != observation.process.exit_code
+                    || known_oom_killed
+                        .zip(observation.process.oom_killed)
+                        .is_some_and(|(previous, current)| previous != current)
+                {
+                    self.retained_terminal = RetainedTerminalObservation::Conflicting;
+                } else {
+                    if !*observed_for_current_stop {
+                        **previous = observation.clone();
+                        *observed_for_current_stop = true;
+                    }
+                    *known_oom_killed = known_oom_killed.or(observation.process.oom_killed);
+                }
             }
             _ => {}
         }
@@ -668,8 +689,14 @@ impl FullState {
             return Err(EnforcerError::NotReady);
         }
         let observation = match &state.retained_terminal {
-            RetainedTerminalObservation::Observed(observation) => observation.as_ref(),
-            RetainedTerminalObservation::Pending => return Err(EnforcerError::NotReady),
+            RetainedTerminalObservation::Observed {
+                observation,
+                observed_for_current_stop: true,
+                ..
+            } => observation.as_ref(),
+            RetainedTerminalObservation::Pending | RetainedTerminalObservation::Observed { .. } => {
+                return Err(EnforcerError::NotReady);
+            }
             RetainedTerminalObservation::Conflicting => return Err(EnforcerError::Conflict),
         };
         let mut value = state.status.clone();
@@ -1333,13 +1360,14 @@ impl FullState {
         }
         if generation != state.status.generation || cancel.is_some() {
             state.durable_stop = cancel.cloned().map(|cancel| (generation, cancel));
-            // A conflicting incarnation cannot be qualified in this
-            // original actor, even after another STOP or recovery generation.
-            if !matches!(
-                state.retained_terminal,
-                RetainedTerminalObservation::Conflicting
-            ) {
-                state.retained_terminal = RetainedTerminalObservation::Pending;
+            // Preserve the earlier facts for comparison, but require a new
+            // observation captured after the current STOP was installed.
+            if let RetainedTerminalObservation::Observed {
+                observed_for_current_stop,
+                ..
+            } = &mut state.retained_terminal
+            {
+                *observed_for_current_stop = false;
             }
         }
         state.status.generation = generation;
