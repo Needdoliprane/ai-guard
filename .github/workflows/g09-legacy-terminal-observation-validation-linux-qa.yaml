@@ -1,0 +1,112 @@
+name: G09 Legacy terminal observation validation Linux QA
+
+on:
+  push:
+    branches: [codex/g09-legacy-terminal-observation-validation-linux-qa-20261128]
+    paths: [.github/workflows/g09-legacy-terminal-observation-validation-linux-qa.yaml]
+
+permissions:
+  contents: read
+
+jobs:
+  legacy-terminal-observation:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      SOURCE_SHA: 28b6b7229b5f62610f80108bae46413f9ad93604
+      SOURCE_TREE: 4e47cde7d5ef77196d46c957fd39babeb630e56f
+      VALIDATION_BLOB: d7e550676391ee9061476cdd8833bf9eb0bf3ed3
+      TEST_BLOB: a8cd2bfcb4f8d17edb81fd7ef0fdd88a922d62ed
+      CARGO_BUILD_JOBS: '1'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      CARGO_TERM_COLOR: never
+      RUST_MIN_STACK: '8388608'
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          persist-credentials: false
+
+      - name: Build one libtest and validate the retained terminal observation
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          # Uses a private SQLite fixture and in-process loopback control only.
+          # Terminal runtime facts are synthetic; no engine or provider is started.
+          selector=broker::service::server::legacy_worker_terminal::tests::legacy_terminal_observation_must_match_the_retained_created_and_claim_facts
+          report_not_run() {
+            printf 'test=%s status=NOT_RUN\n' "$selector"
+          }
+
+          if [[ "${GITHUB_REF:-}" != refs/heads/codex/g09-legacy-terminal-observation-validation-linux-qa-20261128 ||
+                "$(git rev-parse HEAD)" != "$SOURCE_SHA" ||
+                "$(git rev-parse 'HEAD^{tree}')" != "$SOURCE_TREE" ||
+                "$(git rev-parse HEAD:src/broker/service/legacy_worker_terminal.rs)" != "$VALIDATION_BLOB" ||
+                "$(git rev-parse HEAD:src/broker/service/legacy_worker_terminal_tests.rs)" != "$TEST_BLOB" ]]; then
+            printf 'source=FAIL\n'
+            report_not_run
+            exit 1
+          fi
+          printf 'source=PASS\nsource_sha=%s\nsource_tree=%s\nvalidation_blob=%s\ntest_blob=%s\n' \
+            "$SOURCE_SHA" "$SOURCE_TREE" "$VALIDATION_BLOB" "$TEST_BLOB"
+          export AI_GUARD_BUILD_REVISION="$SOURCE_SHA"
+
+          scratch=$(mktemp -d /tmp/aig-g09-legacy-observation.XXXXXX)
+          trap 'rm -rf -- "$scratch"' EXIT
+          export TMPDIR="$scratch"
+          export CARGO_TARGET_DIR="$scratch/target"
+          build_json="$scratch/build.jsonl"
+
+          if ! cargo fetch --locked >"$scratch/fetch.log" 2>&1; then
+            printf 'fetch=FAIL\nbuild=NOT_RUN\n'
+            report_not_run
+            exit 1
+          fi
+          printf 'fetch=PASS\n'
+
+          if cargo test --locked --offline -j1 --no-default-features --lib --no-run \
+              --message-format=json >"$build_json" 2>"$scratch/build.stderr"; then
+            printf 'build=PASS\n'
+          else
+            rc=$?
+            printf 'build=FAIL\nbuild_exit=%s\n' "$rc"
+            report_not_run
+            exit 1
+          fi
+
+          if ! libtest=$(jq -ers '[.[] | select(.reason == "compiler-artifact"
+              and .target.name == "agentsandbox" and .target.kind == ["lib"]
+              and .profile.test == true and (.executable | type) == "string") | .executable]
+              | unique | select(length == 1) | .[0]' "$build_json" 2>/dev/null) ||
+              [[ "$libtest" != "$CARGO_TARGET_DIR"/debug/deps/agentsandbox-* ||
+                 ! -f "$libtest" || ! -x "$libtest" || -L "$libtest" ]]; then
+            printf 'libtest=FAIL\n'
+            report_not_run
+            exit 1
+          fi
+          checksum=$(sha256sum -- "$libtest")
+          libtest_sha=${checksum%% *}
+          if [[ ! "$libtest_sha" =~ ^[0-9a-f]{64}$ ]]; then
+            printf 'libtest=FAIL\n'
+            report_not_run
+            exit 1
+          fi
+          printf 'libtest=PASS\nlibtest_sha256=%s\n' "$libtest_sha"
+
+          test_log="$scratch/test.log"
+          test_exit=0
+          "$libtest" --exact "$selector" --test-threads=1 --color never >"$test_log" 2>&1 || test_exit=$?
+          if [[ "$test_exit" == 0 ]] &&
+              [[ "$(grep -Fxc 'running 1 test' "$test_log" || true)" == 1 ]] &&
+              [[ "$(grep -Fxc "test $selector ... ok" "$test_log" || true)" == 1 ]] &&
+              [[ "$(grep -Ec '^test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; [0-9]+ filtered out; finished in [0-9]+([.][0-9]+)?s$' "$test_log" || true)" == 1 ]]; then
+            printf 'test=%s status=PASS\ntest_exit=0\ntest_pass_count=1\ntest_fail_count=0\n' "$selector"
+          else
+            printf 'test=%s status=FAIL\ntest_exit=%s\n' "$selector" "$test_exit"
+            grep -Eo 'panicked at src/[A-Za-z0-9_./-]+[.]rs:[0-9]+:[0-9]+' "$test_log" || true
+            exit 1
+          fi
