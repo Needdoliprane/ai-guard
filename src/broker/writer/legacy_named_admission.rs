@@ -207,7 +207,7 @@ impl AuthorizedLegacyNamedImportCreate {
         &self.confirmed_head
     }
 
-    pub(in crate::broker) fn facts_hash(&self) -> &str {
+    pub(crate) fn facts_hash(&self) -> &str {
         &self.facts_hash
     }
 }

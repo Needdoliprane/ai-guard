@@ -437,6 +437,29 @@ pub struct OwnedContainerSnapshot {
     pub handle: ContainerHandle,
     pub observation: ContainerObservation,
 }
+
+/// Fresh Created evidence for a named ImportVerification helper. It is
+/// produced only after strict runtime inspection and consumed as one value by
+/// the Writer acknowledgement; it grants no start or cleanup authority.
+pub(crate) struct NamedImportVerificationCreated {
+    parent_operation: Uuid,
+    create_facts_hash: String,
+    authority: RuntimeAuthority,
+    owned: OwnedContainerSnapshot,
+}
+
+impl NamedImportVerificationCreated {
+    pub(crate) fn into_writer_parts(
+        self,
+    ) -> (Uuid, String, RuntimeAuthority, OwnedContainerSnapshot) {
+        (
+            self.parent_operation,
+            self.create_facts_hash,
+            self.authority,
+            self.owned,
+        )
+    }
+}
 /// Only the first durable control claim may produce EmitOnce. A replay must
 /// return ObserveOnly; this directive is consumed and the callback is FnOnce.
 #[derive(Debug)]
@@ -1845,7 +1868,7 @@ impl ManagedRuntime {
         parent_operation: Uuid,
         policy: &crate::control::HelperExecutionPolicyV1,
         authorization: crate::broker::writer::AuthorizedLegacyNamedImportCreate,
-    ) -> Result<OwnedContainerSnapshot> {
+    ) -> Result<NamedImportVerificationCreated> {
         authorization.validate_runtime_request(parent_operation, policy, spec, &self.binding)?;
         let (generation, expected_generation) = authorization.generation();
         generation
@@ -1889,9 +1912,14 @@ impl ManagedRuntime {
             observation.configuration_fingerprint.is_some(),
             "created named ImportVerification lacks a configuration fingerprint"
         );
-        Ok(OwnedContainerSnapshot {
-            handle,
-            observation,
+        Ok(NamedImportVerificationCreated {
+            parent_operation,
+            create_facts_hash: authorization.facts_hash().to_owned(),
+            authority: self.binding.clone(),
+            owned: OwnedContainerSnapshot {
+                handle,
+                observation,
+            },
         })
     }
 
