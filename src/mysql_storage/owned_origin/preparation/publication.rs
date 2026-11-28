@@ -15,8 +15,8 @@ use super::{CheckedEmptyTarget, audit_manifest};
 use crate::audit::event_codec::prepare_event;
 use crate::model::Event;
 use crate::mysql_storage::audit::{
-    AuditChainMismatch, AuditHead, EventColumns, decode_event_columns, owned_genesis_event,
-    require_owned_genesis,
+    AuditChainMismatch, AuditHead, EncodedEvent, EventColumns, decode_event_columns,
+    owned_genesis_event, require_owned_genesis,
 };
 use crate::redaction::Redactor;
 use anyhow::{Context, Result, anyhow, ensure};
@@ -240,12 +240,50 @@ async fn replay_published_prefix(
         )
         .await
         .map_err(driver_error)?;
-    let [genesis, anchor]: [Row; PUBLISHED_EVENTS as usize] = rows
-        .try_into()
-        .map_err(|_| anyhow!("MySQL owned publication chain length mismatch"))?;
-    let head = verify_owned_origin_prefix([decode_row(genesis)?, decode_row(anchor)?], draft)?;
+    ensure!(
+        rows.len() as i64 == PUBLISHED_EVENTS,
+        "MySQL owned publication chain length mismatch"
+    );
+    verify_owned_history(
+        rows.into_iter().map(decode_row::<EventColumns>),
+        bound,
+        draft,
+    )
+}
+
+/// Verify ordered stored rows through the declared head. Only the origin
+/// records and the current head are retained while replay advances.
+fn verify_owned_history(
+    rows: impl IntoIterator<Item = Result<EventColumns>>,
+    bound: &AuditHead,
+    draft: &FreshAnchorDraft<'_>,
+) -> Result<()> {
+    let mut rows = rows.into_iter();
+    let missing_origin = "MySQL owned publication chain length mismatch";
+    let genesis = rows.next().context(missing_origin)??;
+    let anchor = rows.next().context(missing_origin)??;
+    let mut head = verify_owned_origin_prefix([genesis, anchor], draft)?;
+    for columns in rows {
+        let columns = columns?;
+        ensure!(
+            head.seq < bound.seq,
+            "MySQL audit row follows the durable head"
+        );
+        let encoded = decode_event_columns(columns)?;
+        head = verify_owned_link(&encoded, head)?;
+    }
     ensure!(head == *bound, "MySQL audit head mismatch");
     Ok(())
+}
+
+fn verify_owned_link(encoded: &EncodedEvent, head: AuditHead) -> Result<AuditHead> {
+    // Fresh preparation preserves its descriptive mismatch contract.
+    encoded
+        .verify_next_head(head)
+        .map_err(|error| match error.downcast::<AuditChainMismatch>() {
+            Ok(mismatch) => anyhow::Error::msg(mismatch.reason),
+            Err(error) => error,
+        })
 }
 
 /// Verify the two origin records against the expected draft and return their
@@ -260,13 +298,7 @@ fn verify_owned_origin_prefix(
     let mut head = AuditHead::empty();
     for columns in rows {
         let encoded = decode_event_columns(columns)?;
-        // Fresh preparation preserves its descriptive mismatch contract.
-        head = encoded.verify_next_head(head).map_err(|error| {
-            match error.downcast::<AuditChainMismatch>() {
-                Ok(mismatch) => anyhow::Error::msg(mismatch.reason),
-                Err(error) => error,
-            }
-        })?;
+        head = verify_owned_link(&encoded, head)?;
         let stored = &encoded.stored;
         if head.seq == 1 {
             require_owned_genesis(&stored.event, &request.tenant_id, &namespace)?;
@@ -334,6 +366,65 @@ mod tests {
         let genesis = encoded_origin_row(1, "0".repeat(64), genesis)?;
         let anchor = encoded_origin_row(2, genesis.4.clone(), draft.event().clone())?;
         Ok([genesis, anchor])
+    }
+
+    #[test]
+    fn owned_history_replay_requires_an_exact_tail_and_durable_head() -> Result<()> {
+        let request = origin_request(14);
+        let draft = origin_draft(&request)?;
+        let [genesis, anchor] = origin_rows(&draft)?;
+        let fresh_head = AuditHead {
+            seq: 2,
+            hash: anchor.4.clone(),
+            payload_bytes: (genesis.5.len() + anchor.5.len()) as u64,
+        };
+        verify_owned_history(
+            [genesis.clone(), anchor.clone()].map(Ok),
+            &fresh_head,
+            &draft,
+        )?;
+
+        let event = Event::new("qa.mysql.history");
+        let appended = encoded_origin_row(3, anchor.4.clone(), event.clone())?;
+        let head = AuditHead {
+            seq: 3,
+            hash: appended.4.clone(),
+            payload_bytes: fresh_head.payload_bytes + appended.5.len() as u64,
+        };
+        let rows = [genesis.clone(), anchor.clone(), appended];
+        verify_owned_history(rows.clone().map(Ok), &head, &draft)?;
+
+        let other_request = FreshAnchorRequestV1 {
+            installation_id: Uuid::from_u128(6),
+            ..request.clone()
+        };
+        let other = origin_draft(&other_request)?;
+        let other_anchor = encoded_origin_row(2, genesis.4.clone(), other.event().clone())?;
+        let wrong_tail = encoded_origin_row(3, other_anchor.4, event)?;
+        let wrong_head = AuditHead {
+            hash: wrong_tail.4.clone(),
+            ..head.clone()
+        };
+        let error =
+            verify_owned_history([genesis, anchor, wrong_tail].map(Ok), &wrong_head, &draft)
+                .expect_err("a suffix from another origin must be refused");
+        assert_eq!(error.to_string(), "MySQL audit previous hash mismatch");
+
+        let wrong_bytes = AuditHead {
+            payload_bytes: head.payload_bytes + 1,
+            ..head.clone()
+        };
+        let error = verify_owned_history(rows.clone().map(Ok), &wrong_bytes, &draft)
+            .expect_err("the durable head must account for the exact payload bytes");
+        assert_eq!(error.to_string(), "MySQL audit head mismatch");
+
+        let error = verify_owned_history(rows.map(Ok), &fresh_head, &draft)
+            .expect_err("a row beyond the declared durable head must be refused");
+        assert_eq!(
+            error.to_string(),
+            "MySQL audit row follows the durable head"
+        );
+        Ok(())
     }
 
     #[test]
