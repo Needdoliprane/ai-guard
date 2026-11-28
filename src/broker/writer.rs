@@ -15,7 +15,10 @@ use super::{
         JournalStatusV1, RejectionCodeV1, RejectionPhaseV1, RejectionReceiptV1, ReservationMode,
         ReservationTicket, ReserveResult, RevisionRefV1, StopJobSnapshotV1, StopJournal,
         egress_release_fence::{EgressReleaseFenceIssuer, EgressReleaseHeadPermit},
-        recovery::{StopRecoveryReaderV1, StopRecoveryReportV1, inventory::StopInventoryPageV1},
+        recovery::{
+            StopRecoveryReaderV1, StopRecoveryReportV1, inventory::StopInventoryPageV1,
+            legacy_worker_terminal::LegacyWorkerTerminalEvidenceV1,
+        },
     },
     lifecycle::{BrokerCheckpointV3, LocalCommandReceiptV1, LocalCommandRequestV1, LocalCommandV1},
     outbox::{BrokerCheckpointV4, OutboxEventV1, OutboxReceiptV1},
@@ -345,6 +348,11 @@ enum Command {
         operation_id: Uuid,
         command_id: Uuid,
         reply: Reply<Option<CancelStopProjectionV1>>,
+    },
+    LegacyWorkerTerminalEvidence {
+        operation_id: Uuid,
+        command_id: Uuid,
+        reply: Reply<LegacyWorkerTerminalEvidenceV1>,
     },
     AppendCancel {
         input: CancelInputV1,
@@ -695,6 +703,25 @@ impl StopWriterClient {
     ) -> JournalResult<Option<CancelStopProjectionV1>> {
         self.0
             .call(move |reply| Command::CancelStopProjection {
+                operation_id,
+                command_id,
+                reply,
+            })
+            .await
+    }
+    /// Read the exact Legacy Worker and STOP proof from this actor's journal
+    /// scope. The returned head describes the prefix checked by this read.
+    #[allow(
+        dead_code,
+        reason = "the restricted Legacy terminal observer is composed separately"
+    )]
+    pub(in crate::broker) async fn legacy_worker_terminal_evidence(
+        &self,
+        operation_id: Uuid,
+        command_id: Uuid,
+    ) -> JournalResult<LegacyWorkerTerminalEvidenceV1> {
+        self.0
+            .call(move |reply| Command::LegacyWorkerTerminalEvidence {
                 operation_id,
                 command_id,
                 reply,
@@ -2261,6 +2288,27 @@ fn serve_backend(
                     false,
                 );
             }
+            Command::LegacyWorkerTerminalEvidence {
+                operation_id,
+                command_id,
+                reply,
+            } => {
+                let result = match &backend {
+                    Backend::Full(journal) => StopJournal::from_full(journal)
+                        .legacy_worker_terminal_evidence(operation_id, command_id),
+                    Backend::Stops(journal) => {
+                        journal.legacy_worker_terminal_evidence(operation_id, command_id)
+                    }
+                };
+                let _ = respond(
+                    &backend,
+                    &status,
+                    reply,
+                    result,
+                    status_cache::Update::None,
+                    false,
+                );
+            }
             Command::AppendCancel { input, reply } => {
                 let result = match &backend {
                     Backend::Full(journal) => StopJournal::from_full(journal)
@@ -2561,6 +2609,10 @@ fn acknowledge_events(
 #[cfg(all(test, unix))]
 #[path = "writer_inventory_tests.rs"]
 mod inventory_tests;
+
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+#[path = "writer/legacy_worker_terminal_tests.rs"]
+mod legacy_worker_terminal_tests;
 
 #[cfg(all(test, unix))]
 #[path = "writer_status_projection_tests.rs"]
