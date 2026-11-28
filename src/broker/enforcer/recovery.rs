@@ -1399,16 +1399,22 @@ fn dispatch(state: &Arc<RecoveryState>, request: StopRequest) -> EnforcerResult<
                     let order = prefix_order(&slot.cancel_prefix, &value.cancel_prefix)?;
                     let full = state.full_owner()?.ok_or(EnforcerError::Unhealthy)?;
                     let arm_id = &value.registration.arm.operation_id;
-                    if order == std::cmp::Ordering::Less {
-                        full.cancel(arm_id, &value.registration_hash, value.cancel_generation)?;
+                    let retained_cancel = if order == std::cmp::Ordering::Less {
+                        slot.durable_cancel
+                            .as_ref()
+                            .ok_or(EnforcerError::Conflict)?
                     } else {
-                        full.cancel_for_durable_stop(
-                            arm_id,
-                            &value.registration_hash,
-                            value.cancel_generation,
-                            cancel,
-                        )?;
+                        cancel
+                    };
+                    if value.cancel_generation < slot.generation {
+                        return Err(EnforcerError::Conflict);
                     }
+                    full.cancel_for_durable_stop(
+                        arm_id,
+                        &value.registration_hash,
+                        value.cancel_generation,
+                        retained_cancel,
+                    )?;
                     slot.generation = slot.generation.max(value.cancel_generation);
                     if order != std::cmp::Ordering::Less {
                         slot.cancel_command_id = Some(cancel.command_id);
@@ -1459,7 +1465,23 @@ fn reserve(
         .map_err(|_| EnforcerError::Unhealthy)?;
     let full = state.full_owner()?;
     if let Some(full) = &full {
-        full.check_restore(&request.registration.arm.operation_id)?;
+        let arm_id = &request.registration.arm.operation_id;
+        let mut retained = state
+            .full_stops
+            .lock()
+            .map_err(|_| EnforcerError::Unhealthy)?;
+        let prior = retained.get(arm_id);
+        if let Some(prior) = prior {
+            if prior.registration_hash != request.registration_hash
+                || request.durable_cancel.is_some() && request.cancel_generation < prior.generation
+            {
+                return Err(EnforcerError::Conflict);
+            }
+            // A divergent prefix must not advance the native generation or
+            // invalidate an observation associated with the retained STOP.
+            prefix_order(&prior.cancel_prefix, &request.cancel_prefix)?;
+        }
+        full.check_restore(arm_id)?;
         let existing = full.restore_existing(&request.registration, request.cancel_generation)?;
         let existing = match existing {
             Some(status) => Some(status),
@@ -1474,12 +1496,9 @@ fn reserve(
                 &request.registration.arm.operation_id,
                 &request.registration_hash,
             )?;
-            let mut retained = state
-                .full_stops
-                .lock()
-                .map_err(|_| EnforcerError::Unhealthy)?;
-            let arm_id = &request.registration.arm.operation_id;
-            let prior = retained.get(arm_id);
+            if request.durable_cancel.is_some() && status.generation > request.cancel_generation {
+                return Err(EnforcerError::Conflict);
+            }
             let replayed = prior.is_some();
             let mut slot = prior.cloned().unwrap_or_else(|| StopSlotV1 {
                 arm_id: request.registration.arm.operation_id.clone(),
@@ -1492,22 +1511,16 @@ fn reserve(
                 stop_failures: 0,
             });
             update_full_stop(&mut slot, &status);
-            let order = seed_stop_cancel(&mut slot, &request)?;
-            if let Some(cancel) = request.durable_cancel.as_ref() {
-                if order == std::cmp::Ordering::Less {
-                    full.cancel(
-                        arm_id,
-                        &request.registration_hash,
-                        request.cancel_generation,
-                    )?;
-                } else {
-                    full.cancel_for_durable_stop(
-                        arm_id,
-                        &request.registration_hash,
-                        request.cancel_generation,
-                        cancel,
-                    )?;
-                }
+            seed_stop_cancel(&mut slot, &request)?;
+            if let Some(cancel) = slot.durable_cancel.as_ref() {
+                // An older prefix can raise the generation, but cannot
+                // replace the last retained durable command.
+                full.cancel_for_durable_stop(
+                    arm_id,
+                    &request.registration_hash,
+                    slot.generation,
+                    cancel,
+                )?;
             }
             retained.insert(arm_id.clone(), slot.clone());
             return Ok(StopResponse::StopReserved {
@@ -1608,10 +1621,7 @@ fn reserve(
         replayed,
     })
 }
-fn seed_stop_cancel(
-    slot: &mut StopSlotV1,
-    request: &RestoreRequiredStopV1,
-) -> EnforcerResult<std::cmp::Ordering> {
+fn seed_stop_cancel(slot: &mut StopSlotV1, request: &RestoreRequiredStopV1) -> EnforcerResult<()> {
     let order = prefix_order(&slot.cancel_prefix, &request.cancel_prefix)?;
     slot.generation = slot.generation.max(request.cancel_generation);
     if order != std::cmp::Ordering::Less {
@@ -1625,7 +1635,7 @@ fn seed_stop_cancel(
     if slot.durable_cancel.is_some() {
         slot.phase = StopPhaseV1::StopRequested;
     }
-    Ok(order)
+    Ok(())
 }
 fn update_full_stop(slot: &mut StopSlotV1, status: &EnforcerSlotStatusV1) {
     slot.generation = slot.generation.max(status.generation);

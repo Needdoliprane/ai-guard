@@ -724,19 +724,41 @@ async fn full3_terminal_query_requires_more_than_an_acknowledged_stop() -> Enfor
         let _slot = fixture
             .register_new(&client, registration.clone(), CancelGeneration::new())
             .await?;
+        let actor = fixture
+            .full
+            .actor(registration.arm_id(), &registration.digest()?)?;
         let stop =
-            recovery_v3::deliver_synthetic_stop_only_for_test(&fixture.root, registration).await?;
+            recovery_v3::deliver_synthetic_stop_only_for_test(&fixture.root, registration.clone())
+                .await?;
+        let original_cancel = actor.state.lock().unwrap().durable_stop.clone();
+        let restored = recovery_v3::replay_full3_restore_before_cancel_for_fixture(
+            &fixture.root,
+            registration,
+            stop.generation() + 1,
+        )
+        .await?;
+        let new_cancel = actor.state.lock().unwrap().durable_stop.clone();
+        let retained_cancel = matches!(
+            (original_cancel, new_cancel),
+            (Some((old_generation, old)), Some((new_generation, new)))
+                if old == new
+                && old_generation == stop.generation()
+                && new_generation == restored.generation()
+                && new_generation > old_generation
+                && restored.cancel_command_id() == stop.cancel_command_id()
+        );
         let wrong_epoch =
-            recovery_v3::query_full3_terminal_for_fixture(&fixture.root, Uuid::new_v4(), &stop)
+            recovery_v3::query_full3_terminal_for_fixture(&fixture.root, Uuid::new_v4(), &restored)
                 .await;
         let no_observation =
-            recovery_v3::query_full3_terminal_for_fixture(&fixture.root, client.epoch(), &stop)
+            recovery_v3::query_full3_terminal_for_fixture(&fixture.root, client.epoch(), &restored)
                 .await;
-        Ok::<_, EnforcerError>((wrong_epoch, no_observation))
+        Ok::<_, EnforcerError>((retained_cancel, wrong_epoch, no_observation))
     }
     .await;
     fixture.finish().await;
-    let (wrong_epoch, no_observation) = observed?;
+    let (retained_cancel, wrong_epoch, no_observation) = observed?;
+    assert!(retained_cancel);
     assert_eq!(wrong_epoch, Err(EnforcerError::Conflict));
     assert_eq!(no_observation, Err(EnforcerError::NotReady));
     Ok(())
@@ -884,7 +906,7 @@ async fn tombstone_retains_capacity_until_real_handle_returns_then_q_is_replayab
             },
             gate,
             durable_stop: None,
-            observed_after_durable_stop: false,
+            retained_terminal: None,
         }),
         wake: Condvar::new(),
         exit: AtomicBool::new(false),

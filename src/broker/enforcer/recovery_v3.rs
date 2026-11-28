@@ -1219,22 +1219,7 @@ pub(in crate::broker::enforcer) async fn deliver_synthetic_stop_only_for_test(
         input_hash: "c".repeat(64),
         confirmed_head: head.clone(),
     };
-    let value = RestoreRequiredStopV1 {
-        version: 1,
-        request_id: Uuid::new_v4(),
-        registration_hash: registration.digest()?,
-        source: StopSourceV1 {
-            scope_hash: "d".repeat(64),
-            job_id: Uuid::new_v4(),
-            intent_hash: registration.arm.intent_hash.clone(),
-            confirmed_head: head,
-            arm_operation_index: 0,
-        },
-        registration,
-        cancel_generation: 1,
-        durable_cancel: Some(cancel.clone()),
-        cancel_prefix: vec![cancel],
-    };
+    let value = synthetic_full3_restore(registration, 1, Some(cancel), head)?;
     let mut output = None;
     for command in [
         StopRequest::RestoreRequiredStop {
@@ -1253,6 +1238,52 @@ pub(in crate::broker::enforcer) async fn deliver_synthetic_stop_only_for_test(
         }
     }
     output.ok_or(EnforcerError::Unavailable)
+}
+
+#[cfg(test)]
+fn synthetic_full3_restore(
+    registration: RegistrationV1,
+    generation: u64,
+    durable_cancel: Option<CancelReferenceV1>,
+    confirmed_head: RevisionRefV1,
+) -> EnforcerResult<RestoreRequiredStopV1> {
+    Ok(RestoreRequiredStopV1 {
+        version: 1,
+        request_id: Uuid::new_v4(),
+        registration_hash: registration.digest()?,
+        source: StopSourceV1 {
+            scope_hash: "d".repeat(64),
+            job_id: registration.owned.handle.operation_id(),
+            intent_hash: registration.arm.intent_hash.clone(),
+            confirmed_head,
+            arm_operation_index: 0,
+        },
+        registration,
+        cancel_generation: generation,
+        cancel_prefix: durable_cancel.clone().into_iter().collect(),
+        durable_cancel,
+    })
+}
+
+#[cfg(test)]
+pub(in crate::broker::enforcer) async fn replay_full3_restore_before_cancel_for_fixture(
+    root: &Directory,
+    registration: RegistrationV1,
+    generation: u64,
+) -> EnforcerResult<StopSlotV1> {
+    let head = RevisionRefV1::new(0, &"a".repeat(64)).map_err(|_| EnforcerError::InvalidInput)?;
+    let value = synthetic_full3_restore(registration, generation, None, head)?;
+    let command = StopRequest::RestoreRequiredStop {
+        value: Box::new(value),
+    };
+    match request_stop_only_for_fixture(root, command).await? {
+        ReplyValue3::StopReserved {
+            value,
+            replayed: true,
+        } => Ok(value),
+        ReplyValue3::Error { code } => Err(code),
+        _ => Err(EnforcerError::Unauthorized),
+    }
 }
 
 #[cfg(test)]
