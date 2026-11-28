@@ -141,10 +141,7 @@ impl PrearmedStartControl {
         generation: &CancelGeneration,
         expected: u64,
     ) -> Self {
-        self.spawn_generation = Some(GenerationSpawnGuard {
-            generation: generation.clone(),
-            expected,
-        });
+        self.spawn_generation = Some(GenerationSpawnGuard::new(generation, expected));
         self
     }
     /// Forward the batch client stdout live to the activity collector, in
@@ -1246,6 +1243,19 @@ fn record_cli_exit(trace: &Option<observation::Scope>, status: Option<std::proce
 struct GenerationSpawnGuard {
     generation: CancelGeneration,
     expected: u64,
+    capture_admission: Option<CaptureAdmissionCheck>,
+}
+
+type CaptureAdmissionCheck = Box<dyn FnOnce() -> Result<()> + Send>;
+
+impl GenerationSpawnGuard {
+    fn new(generation: &CancelGeneration, expected: u64) -> Self {
+        Self {
+            generation: generation.clone(),
+            expected,
+            capture_admission: None,
+        }
+    }
 }
 
 fn spawn_capture_child(
@@ -1253,18 +1263,23 @@ fn spawn_capture_child(
     kind: RuntimeKind,
     spawn_guard: Option<GenerationSpawnGuard>,
 ) -> Result<tokio::process::Child> {
-    let child = match spawn_guard {
+    let spawn = |command: &mut Command, admission: Option<CaptureAdmissionCheck>| {
+        if let Some(check) = admission {
+            check()?;
+        }
+        command.spawn().with_context(|| {
+            format!(
+                "{kind} is unavailable; install and start a container runtime. No local fallback exists"
+            )
+        })
+    };
+    match spawn_guard {
         Some(guard) => guard
             .generation
-            .with_current_generation(guard.expected, || command.spawn())
+            .with_current_generation(guard.expected, || spawn(command, guard.capture_admission))
             .context("runtime mutation spawn refused by the cancellation gate")?,
-        None => command.spawn(),
-    };
-    child.with_context(|| {
-        format!(
-            "{kind} is unavailable; install and start a container runtime. No local fallback exists"
-        )
-    })
+        None => spawn(command, None),
+    }
 }
 
 impl Runtime {
@@ -3159,6 +3174,29 @@ mod capture_error_tests {
     use super::*;
 
     #[tokio::test]
+    async fn capture_mutation_obeys_admission_veto_at_spawn() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let program = directory.path().join("no-runtime-program");
+        let generation = CancelGeneration::new();
+        let expected = generation.current();
+        let mut command = Command::new(program);
+        let mut guard = GenerationSpawnGuard::new(&generation, expected);
+        guard.capture_admission = Some(Box::new(|| bail!("capture admission closed")));
+        let vetoed = spawn_capture_child(&mut command, RuntimeKind::Docker, Some(guard));
+        assert_eq!(vetoed.unwrap_err().to_string(), "capture admission closed");
+
+        let open = GenerationSpawnGuard::new(&generation, expected);
+        let missing = spawn_capture_child(&mut command, RuntimeKind::Docker, Some(open));
+        assert!(
+            missing
+                .unwrap_err()
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn armed_stop_releases_stdout_backpressure_and_disconnect_does_not() {
         for notified in [true, false] {
             let (enforcer, mut stop) = tokio::sync::watch::channel(false);
@@ -3318,10 +3356,7 @@ mod capture_error_tests {
                     Ok(())
                 },
                 &stop,
-                Some(GenerationSpawnGuard {
-                    generation: generation.clone(),
-                    expected,
-                }),
+                Some(GenerationSpawnGuard::new(&generation, expected)),
             ) else {
                 bail!("the nonexistent test program was unexpectedly spawned");
             };

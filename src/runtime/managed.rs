@@ -1027,10 +1027,7 @@ impl ManagedRuntime {
         self.create_named_volume_inner(
             volume,
             labels,
-            Some(GenerationSpawnGuard {
-                generation: cancel.clone(),
-                expected,
-            }),
+            Some(GenerationSpawnGuard::new(cancel, expected)),
         )
         .await
     }
@@ -1841,10 +1838,7 @@ impl ManagedRuntime {
             .create_owned_handle(
                 spec,
                 false,
-                Some(GenerationSpawnGuard {
-                    generation: cancel.clone(),
-                    expected,
-                }),
+                Some(GenerationSpawnGuard::new(cancel, expected)),
             )
             .await?;
         let observation = scoped
@@ -1868,6 +1862,7 @@ impl ManagedRuntime {
         parent_operation: Uuid,
         policy: &crate::control::HelperExecutionPolicyV1,
         authorization: crate::broker::writer::AuthorizedLegacyNamedImportCreate,
+        check_admission: impl FnOnce() -> Result<()> + Send + 'static,
     ) -> Result<NamedImportVerificationCreated> {
         authorization.validate_runtime_request(parent_operation, policy, spec, &self.binding)?;
         let (generation, expected_generation) = authorization.generation();
@@ -1902,6 +1897,7 @@ impl ManagedRuntime {
                 Some(GenerationSpawnGuard {
                     generation: generation.clone(),
                     expected: expected_generation,
+                    capture_admission: Some(Box::new(check_admission)),
                 }),
             )
             .await?;
@@ -2608,10 +2604,7 @@ impl ManagedRuntime {
         self.cleanup_terminal_inner(
             handle,
             committed,
-            Some(GenerationSpawnGuard {
-                generation: generation.clone(),
-                expected,
-            }),
+            Some(GenerationSpawnGuard::new(generation, expected)),
         )
         .await
     }
