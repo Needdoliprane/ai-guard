@@ -111,6 +111,31 @@ impl RetainedLegacyWorkerTerminalObservationV1 {
         &self.request
     }
 
+    /// Borrow the terminal postimage only for evidence read at the same
+    /// journal head, under the same retained owner and original STOP.
+    pub(in crate::broker) fn expected_worker_for_publication(
+        &self,
+        evidence: &LegacyWorkerTerminalEvidenceV1,
+    ) -> JournalResult<&WorkerV1> {
+        let _owner = self.owner.upgrade().ok_or(JournalError::Interrupted)?;
+        let stop = evidence.cancel_receipt();
+        let worker = evidence.worker();
+        if !Weak::ptr_eq(&self.owner, &evidence.owner)
+            || self.operation != evidence.operation_id()
+            || self.head() != evidence.head()
+            || self.stop.command_id() != stop.command_id()
+            || self.stop.head() != stop.head()
+            || self.stop.input_hash() != stop.input_hash()
+            || self.request.operation_id != evidence.terminal_observation_operation_id()?
+            || self.request.worker_id != worker.worker_id
+            || self.request.attempt_id != worker.attempt.attempt_id
+            || self.request.expected_revision != worker.revision
+        {
+            return Err(JournalError::Conflict);
+        }
+        Ok(&self.expected_worker)
+    }
+
     /// Match a response from the authenticated Core to the first durable body
     /// and the exact parent revision. The audit pair identifies an event for a
     /// separate audit check. This method only validates the response.

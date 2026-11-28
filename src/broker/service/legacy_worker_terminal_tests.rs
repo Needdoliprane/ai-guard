@@ -1,11 +1,21 @@
 use super::super::*;
-use super::{observation_target_facts, require_archived_invocation, require_current_worker};
+use super::{
+    LegacyTerminalPublicationStateV1, ObservedLegacyWorkerTerminal, ValidatedLegacyWorkerTerminal,
+    legacy_terminal_publication_state, observation_target_facts, require_archived_invocation,
+    require_current_worker,
+};
 use crate::{
     audit::Store,
     broker::{
         checkpoint::SupervisionOperationV1,
         discovery::load_endpoint,
-        journal::{StopJournal, recovery::legacy_worker_terminal::LegacyWorkerTerminalEvidenceV1},
+        journal::{
+            StopJournal,
+            recovery::legacy_worker_terminal::{
+                LegacyWorkerTerminalEvidenceV1, ReservedLegacyWorkerTerminalObservationV1,
+            },
+        },
+        writer::CancelInputV1,
     },
     control::{QuotaPolicyV1, RuntimeStatusV1, WorkerStateV1, WorkerTransitionV1, WorkerV1},
     runner::broker::{
@@ -258,6 +268,123 @@ fn synthetic_terminal_observation(
     observed.process.oom_killed = Some(false);
     observed.observed_at = finished_at.with_timezone(&chrono::Utc);
     Ok(observed)
+}
+
+#[tokio::test]
+async fn legacy_terminal_publication_distinguishes_exact_parent_from_possible_replay() -> Result<()>
+{
+    use LegacyTerminalPublicationStateV1::{ExactParent, PossibleReplay};
+
+    let seed = running_seed_for_cold_terminal_test().await;
+    let operation = seed.operation_id;
+    let root = Directory::open_existing(&seed.journal_root)?;
+    let report = StopRecoveryReaderV1::open_existing(
+        &root,
+        seed.scope().clone(),
+        &FsExclusions::new(),
+        JournalLimitsV1::default(),
+        ControlSecrets::new(Vec::new())?,
+    )?
+    .context("existing Legacy journal missing")?
+    .scan();
+    let capabilities =
+        ProfileWriterCapabilities::from_recovery_report(&report, true, 1, Duration::from_secs(10))?;
+    assert!(capabilities.is_stop_only());
+    let stops = capabilities.stops();
+    let command = Uuid::new_v4();
+    stops
+        .append_cancel(CancelInputV1::new(operation, command)?)
+        .await?;
+    let initial = stops
+        .legacy_worker_terminal_evidence(operation, command)
+        .await?;
+    let mut observation = synthetic_terminal_observation(&initial)?;
+    observation.restart_count = Some(0);
+    let observed = ObservedLegacyWorkerTerminal {
+        validated: ValidatedLegacyWorkerTerminal { evidence: initial },
+        observation,
+    };
+    observed
+        .validated
+        .validate_terminal_observation(observed.observation())?;
+    let request = observed.terminal_mutation()?;
+    let terminal =
+        crate::audit::expected_worker_transition(observed.evidence().worker(), &request)?;
+    let stale = stops
+        .legacy_worker_terminal_evidence(operation, command)
+        .await?;
+    let Ok(ReservedLegacyWorkerTerminalObservationV1::Appended(pending)) = stops
+        .reserve_legacy_worker_terminal_observation(observed.validated.evidence, request)
+        .await
+    else {
+        anyhow::bail!("fixture terminal pending missing");
+    };
+    let proof = stops
+        .legacy_worker_terminal_evidence(operation, command)
+        .await?;
+    let other_stop = stops
+        .legacy_worker_terminal_evidence(operation, seed.cancel_id)
+        .await?;
+    assert_eq!(proof.head(), pending.head());
+    assert_eq!(other_stop.head(), pending.head());
+
+    // The remaining checks use only snapshots. Record both stores' positions
+    // after the test fixture has retained the exact pending body.
+    let store = seed.store();
+    let parent = store
+        .worker(&seed.worker_id)?
+        .context("fixture Worker missing")?;
+    let core_head = store.head()?;
+    let quota = canonical(&store.worker_quota(&QuotaPolicyV1::default())?)?;
+    let reads = seed.worker_get_count();
+    let posts = seed.post_count();
+    let calls = fs::read(seed.root().join("calls"))?;
+    let classify = |worker| legacy_terminal_publication_state(&proof, &pending, worker);
+    assert_eq!(classify(&parent), Ok(ExactParent));
+    assert_eq!(classify(&terminal), Ok(PossibleReplay));
+    assert_eq!(terminal.state, WorkerStateV1::Terminal);
+    assert!(!terminal.quota_held);
+
+    let mut wrong_cid = terminal.clone();
+    wrong_cid.attempt.container_id = None;
+    assert_eq!(classify(&wrong_cid), Err(BrokerErrorCodeV1::Conflict));
+    let mut wrong_revision = terminal.clone();
+    wrong_revision.revision += 1;
+    assert_eq!(classify(&wrong_revision), Err(BrokerErrorCodeV1::Conflict));
+    let mut wrong_observation = terminal.clone();
+    wrong_observation.last_observation = parent.last_observation.clone();
+    assert_eq!(
+        classify(&wrong_observation),
+        Err(BrokerErrorCodeV1::Conflict)
+    );
+    let mut wrong_parent = parent.clone();
+    wrong_parent.revision += 1;
+    assert_eq!(classify(&wrong_parent), Err(BrokerErrorCodeV1::Conflict));
+    assert_eq!(
+        legacy_terminal_publication_state(&stale, &pending, &parent),
+        Err(BrokerErrorCodeV1::Conflict)
+    );
+    assert_eq!(
+        legacy_terminal_publication_state(&other_stop, &pending, &terminal),
+        Err(BrokerErrorCodeV1::Conflict)
+    );
+
+    assert_eq!(store.head()?, core_head);
+    assert_eq!(
+        canonical(&store.worker_quota(&QuotaPolicyV1::default())?)?,
+        quota
+    );
+    assert!(store.worker_usage()?.is_empty());
+    assert_eq!(seed.worker_get_count(), reads);
+    assert_eq!(seed.post_count(), posts);
+    assert_eq!(fs::read(seed.root().join("calls"))?, calls);
+    let after = stops
+        .legacy_worker_terminal_observation(operation)
+        .await?
+        .context("fixture pending disappeared")?;
+    assert_eq!(after.head(), pending.head());
+    assert_eq!(canonical(after.request())?, canonical(pending.request())?);
+    Ok(())
 }
 
 #[tokio::test]

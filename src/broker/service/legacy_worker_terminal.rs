@@ -1,7 +1,9 @@
 //! Authenticate and observe an already retained Legacy target.
 use super::*;
 use crate::{
-    broker::journal::recovery::legacy_worker_terminal::LegacyWorkerTerminalEvidenceV1,
+    broker::journal::recovery::legacy_worker_terminal::{
+        LegacyWorkerTerminalEvidenceV1, RetainedLegacyWorkerTerminalObservationV1,
+    },
     control::{RuntimeStatusV1, WorkerMutationV1, WorkerStateV1, WorkerTransitionV1, WorkerV1},
     runner::ColdAuditBudget,
     runtime::{ContainerObservation, InvocationBindingV1, ManagedRuntime, Runtime, RuntimeKind},
@@ -354,6 +356,35 @@ fn require_current_worker(retained: &WorkerV1, current: &WorkerV1) -> Result<(),
         return Err(Code::Conflict);
     }
     Ok(())
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum LegacyTerminalPublicationStateV1 {
+    ExactParent,
+    PossibleReplay,
+}
+
+/// Classify a Worker already read from the authenticated Core in this scope.
+/// A matching terminal snapshot is a candidate for exact replay. The receipt
+/// must still bind the Core operation and outcome to the retained request.
+pub(super) fn legacy_terminal_publication_state(
+    proof: &LegacyWorkerTerminalEvidenceV1,
+    pending: &RetainedLegacyWorkerTerminalObservationV1,
+    current: &WorkerV1,
+) -> Result<LegacyTerminalPublicationStateV1, Code> {
+    let terminal = pending
+        .expected_worker_for_publication(proof)
+        .map_err(jobs::journal_error)?;
+    if current.state == WorkerStateV1::Terminal {
+        if canonical(current).map_err(jobs::journal_error)?
+            != canonical(terminal).map_err(jobs::journal_error)?
+        {
+            return Err(Code::Conflict);
+        }
+        return Ok(LegacyTerminalPublicationStateV1::PossibleReplay);
+    }
+    require_current_worker(proof.worker(), current)?;
+    Ok(LegacyTerminalPublicationStateV1::ExactParent)
 }
 
 #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
