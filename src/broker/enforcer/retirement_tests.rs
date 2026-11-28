@@ -719,6 +719,11 @@ async fn full3_terminal_query_requires_more_than_an_acknowledged_stop() -> Enfor
     let mut fixture = OriginalIpcFixture::start().await;
     let client = fixture.client().await;
     let registration = registration(fixture.root.path());
+    let mut terminal = registration.owned.observation.clone();
+    terminal.process.status = Some("exited".into());
+    terminal.process.running = Some(false);
+    terminal.process.finished_at = terminal.process.started_at;
+    terminal.process.exit_code = Some(0);
     fixture.install(&registration, false);
     let observed = async {
         let _slot = fixture
@@ -739,28 +744,65 @@ async fn full3_terminal_query_requires_more_than_an_acknowledged_stop() -> Enfor
         .await?;
         let new_cancel = actor.state.lock().unwrap().durable_stop.clone();
         let retained_cancel = matches!(
-            (original_cancel, new_cancel),
+            (original_cancel.as_ref(), new_cancel.as_ref()),
             (Some((old_generation, old)), Some((new_generation, new)))
                 if old == new
-                && old_generation == stop.generation()
-                && new_generation == restored.generation()
+                && *old_generation == stop.generation()
+                && *new_generation == restored.generation()
                 && new_generation > old_generation
                 && restored.cancel_command_id() == stop.cancel_command_id()
         );
         let wrong_epoch =
             recovery_v3::query_full3_terminal_for_fixture(&fixture.root, Uuid::new_v4(), &restored)
                 .await;
+        // The synthetic fixture exercises routing and retention only. An
+        // observation completing in the previous generation is ineligible.
+        actor.state.lock().unwrap().retain_terminal_candidate(
+            original_cancel.as_ref(),
+            &terminal,
+            &actor.registration,
+        );
         let no_observation =
             recovery_v3::query_full3_terminal_for_fixture(&fixture.root, client.epoch(), &restored)
                 .await;
-        Ok::<_, EnforcerError>((retained_cancel, wrong_epoch, no_observation))
+        actor.state.lock().unwrap().retain_terminal_candidate(
+            new_cancel.as_ref(),
+            &terminal,
+            &actor.registration,
+        );
+        let exact_observation =
+            recovery_v3::query_full3_terminal_for_fixture(&fixture.root, client.epoch(), &restored)
+                .await;
+        let mut contradictory = terminal.clone();
+        contradictory.process.exit_code = Some(1);
+        {
+            let mut state = actor.state.lock().unwrap();
+            state.retain_terminal_candidate(
+                new_cancel.as_ref(),
+                &contradictory,
+                &actor.registration,
+            );
+            state.retain_terminal_candidate(new_cancel.as_ref(), &terminal, &actor.registration);
+        }
+        let conflict =
+            recovery_v3::query_full3_terminal_for_fixture(&fixture.root, client.epoch(), &restored)
+                .await;
+        Ok::<_, EnforcerError>((
+            retained_cancel,
+            wrong_epoch,
+            no_observation,
+            exact_observation,
+            conflict,
+        ))
     }
     .await;
     fixture.finish().await;
-    let (retained_cancel, wrong_epoch, no_observation) = observed?;
+    let (retained_cancel, wrong_epoch, no_observation, exact_observation, conflict) = observed?;
     assert!(retained_cancel);
-    assert_eq!(wrong_epoch, Err(EnforcerError::Conflict));
-    assert_eq!(no_observation, Err(EnforcerError::NotReady));
+    assert!(matches!(wrong_epoch, Err(EnforcerError::Conflict)));
+    assert!(matches!(no_observation, Err(EnforcerError::NotReady)));
+    assert_eq!(exact_observation?.process.exit_code, Some(0));
+    assert!(matches!(conflict, Err(EnforcerError::Conflict)));
     Ok(())
 }
 
@@ -906,7 +948,7 @@ async fn tombstone_retains_capacity_until_real_handle_returns_then_q_is_replayab
             },
             gate,
             durable_stop: None,
-            retained_terminal: None,
+            retained_terminal: RetainedTerminalObservation::default(),
         }),
         wake: Condvar::new(),
         exit: AtomicBool::new(false),

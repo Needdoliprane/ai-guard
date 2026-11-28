@@ -1291,7 +1291,7 @@ pub(in crate::broker::enforcer) async fn query_full3_terminal_for_fixture(
     root: &Directory,
     original_epoch: Uuid,
     slot: &StopSlotV1,
-) -> EnforcerResult<()> {
+) -> EnforcerResult<ContainerObservation> {
     let command = StopRequest::QueryFull3TerminalObservation {
         arm_id: slot.arm_id.clone(),
         registration_hash: slot.registration_hash.clone(),
@@ -1302,7 +1302,9 @@ pub(in crate::broker::enforcer) async fn query_full3_terminal_for_fixture(
             .ok_or(EnforcerError::InvalidInput)?,
     };
     match request_stop_only_for_fixture(root, command).await? {
-        ReplyValue3::Full3TerminalObservation { .. } => Ok(()),
+        ReplyValue3::Full3TerminalObservation { value } => {
+            value.observation.ok_or(EnforcerError::NotReady)
+        }
         ReplyValue3::Error { code } => Err(code),
         _ => Err(EnforcerError::Unauthorized),
     }

@@ -105,7 +105,48 @@ struct ActorState {
     status: EnforcerSlotStatusV1,
     gate: OriginalGate,
     durable_stop: Option<(u64, CancelReferenceV1)>,
-    retained_terminal: Option<Box<ContainerObservation>>,
+    retained_terminal: RetainedTerminalObservation,
+}
+
+#[derive(Default)]
+enum RetainedTerminalObservation {
+    #[default]
+    Pending,
+    Observed(Box<ContainerObservation>),
+    Conflicting,
+}
+
+impl ActorState {
+    fn retain_terminal_candidate(
+        &mut self,
+        captured_stop: Option<&(u64, CancelReferenceV1)>,
+        observation: &ContainerObservation,
+        registration: &RegistrationV1,
+    ) {
+        if !captured_stop.is_some_and(|captured| {
+            captured.0 == self.status.generation && self.durable_stop.as_ref() == Some(captured)
+        }) {
+            return;
+        }
+        let terminal = observation
+            .validate_terminal(registration.authority.kind, &registration.owned.observation)
+            .is_ok();
+        match &self.retained_terminal {
+            RetainedTerminalObservation::Pending if terminal => {
+                self.retained_terminal =
+                    RetainedTerminalObservation::Observed(Box::new(observation.clone()));
+            }
+            RetainedTerminalObservation::Observed(previous)
+                if !terminal
+                    || previous.process.started_at != observation.process.started_at
+                    || previous.process.finished_at != observation.process.finished_at
+                    || previous.process.exit_code != observation.process.exit_code =>
+            {
+                self.retained_terminal = RetainedTerminalObservation::Conflicting;
+            }
+            _ => {}
+        }
+    }
 }
 struct FullActor {
     registration: RegistrationV1,
@@ -626,10 +667,11 @@ impl FullState {
         {
             return Err(EnforcerError::NotReady);
         }
-        let observation = state
-            .retained_terminal
-            .as_deref()
-            .ok_or(EnforcerError::NotReady)?;
+        let observation = match &state.retained_terminal {
+            RetainedTerminalObservation::Observed(observation) => observation.as_ref(),
+            RetainedTerminalObservation::Pending => return Err(EnforcerError::NotReady),
+            RetainedTerminalObservation::Conflicting => return Err(EnforcerError::Conflict),
+        };
         let mut value = state.status.clone();
         value.observation = Some(observation.clone());
         Ok(value)
@@ -1291,7 +1333,14 @@ impl FullState {
         }
         if generation != state.status.generation || cancel.is_some() {
             state.durable_stop = cancel.cloned().map(|cancel| (generation, cancel));
-            state.retained_terminal = None;
+            // A conflicting incarnation cannot be qualified in this
+            // original actor, even after another STOP or recovery generation.
+            if !matches!(
+                state.retained_terminal,
+                RetainedTerminalObservation::Conflicting
+            ) {
+                state.retained_terminal = RetainedTerminalObservation::Pending;
+            }
         }
         state.status.generation = generation;
         state.status.phase = SlotPhaseV1::Stopping;
@@ -1477,28 +1526,11 @@ impl FullActor {
                         // A result can update diagnostics even if a new STOP
                         // arrived during IO. Only a matching capture may
                         // contribute to the retained terminal candidate.
-                        if state.durable_stop == durable_stop
-                            && durable_stop.as_ref().is_some_and(|(generation, _)| {
-                                *generation == state.status.generation
-                            })
-                        {
-                            let observation = &settled.value.observation;
-                            if observation
-                                .validate_terminal(
-                                    self.registration.authority.kind,
-                                    &self.registration.owned.observation,
-                                )
-                                .is_ok()
-                            {
-                                state
-                                    .retained_terminal
-                                    .get_or_insert_with(|| Box::new(observation.clone()));
-                            } else {
-                                // An explicit newer, non-terminal observation
-                                // contradicts the previous terminal sample.
-                                state.retained_terminal = None;
-                            }
-                        }
+                        state.retain_terminal_candidate(
+                            durable_stop.as_ref(),
+                            &settled.value.observation,
+                            &self.registration,
+                        );
                         self.failures
                             .observed_stop(self.cause_target(), settled.value.observation.clone());
                         state.status.observation = Some(settled.value.observation);
