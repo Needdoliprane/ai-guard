@@ -1,13 +1,18 @@
 //! Private broker transport for the retained Legacy confirmation/admission.
 //! This client has no Runner surface and never starts a runtime.
 use super::*;
+#[cfg(test)]
+use crate::control::MutationReceiptV1;
 use crate::{
     audit::legacy_session_prepare::LegacyNamedCancelReservationV1,
     broker::{
         journal::{CancelStopProjectionV1, JournalError, JournalScopeV1, canonical},
         presence::http::{Client, Limits},
     },
-    control::{AdmissionRefusalV1, MutationResultV1, RuntimeKindV1, WorkerV1, session_control::*},
+    control::{
+        AdmissionRefusalV1, ArmSubjectV1, HelperPermissionV1, MutationResultV1, RuntimeKindV1,
+        WorkerV1, session_control::*,
+    },
 };
 use reqwest::{Method, StatusCode};
 
@@ -46,7 +51,7 @@ pub(super) async fn read_plan(
 ) -> Result<LegacyConfirmedPlanV1> {
     exchange_confirmation(
         presence,
-        Method::GET,
+        (Method::GET, None),
         binding_ref,
         "",
         RESPONSE_BYTES,
@@ -76,7 +81,7 @@ pub(super) async fn read_launch_spec(
     }
     exchange_confirmation(
         presence,
-        Method::GET,
+        (Method::GET, None),
         binding_ref,
         "/launch-spec",
         LEGACY_CONFIRMED_LAUNCH_SPEC_RESPONSE_BYTES as u64,
@@ -101,7 +106,7 @@ pub(super) async fn initial_decision(
         .map_err(named_write_error)?;
     let decision = exchange_confirmation(
         presence,
-        Method::POST,
+        (Method::POST, None),
         binding_ref,
         "/initial-decision",
         LEGACY_CONFIRMED_LAUNCH_SPEC_RESPONSE_BYTES as u64,
@@ -118,7 +123,7 @@ pub(super) async fn initial_decision(
 
 async fn exchange_confirmation<T>(
     presence: &PresenceAuthority,
-    method: Method,
+    (method, body): (Method, Option<Vec<u8>>),
     binding_ref: Uuid,
     suffix: &str,
     success_bytes: u64,
@@ -138,9 +143,9 @@ async fn exchange_confirmation<T>(
             .send_session_bounded(
                 method,
                 &path,
-                None,
+                body,
                 Limits {
-                    request: 0,
+                    request: LEGACY_NAMED_ADMISSION_REQUEST_BYTES as u64,
                     success: success_bytes,
                     error: RESPONSE_BYTES,
                 },
@@ -310,6 +315,99 @@ pub(super) async fn reconcile_import_arm(
             .map_err(|_| PresenceError::AdmissionOutcomeUnknown)?;
     }
     Ok(result)
+}
+
+impl LegacyNamedControl {
+    /// Read the historical receipt of the exact named verification Arm.
+    /// An absent receipt only describes the remote snapshot of this read.
+    #[allow(
+        dead_code,
+        reason = "the named verification Arm recovery caller is composed separately"
+    )]
+    pub(crate) async fn reconcile_legacy_named_import_verification_arm(
+        &self,
+        request: &LegacyNamedImportVerificationArmRequestV2,
+    ) -> Result<Option<ArmResultV1>> {
+        let presence = &self.0;
+        request.validate().map_err(|_| PresenceError::Protocol)?;
+        let inspection = &request.arm.inspection;
+        let runtime = match inspection.runtime_kind {
+            RuntimeKindV1::Docker => BrokerRuntimeKindV1::Docker,
+            RuntimeKindV1::Podman => BrokerRuntimeKindV1::Podman,
+        };
+        if request.namespace != presence.scope.control_namespace_uuid.to_string()
+            || inspection.authority_id != presence.config.authority_id
+            || runtime != presence.scope.runtime_kind
+        {
+            return Err(PresenceError::Forbidden);
+        }
+        presence.revalidate()?;
+        let value = serde_json::to_value(request).map_err(|_| PresenceError::Protocol)?;
+        presence.screen(&value)?;
+        let body = serde_json::to_vec(request).map_err(|_| PresenceError::Protocol)?;
+        if body.len() > LEGACY_NAMED_ADMISSION_REQUEST_BYTES {
+            return Err(PresenceError::Protocol);
+        }
+        exchange_confirmation(
+            presence,
+            (Method::POST, Some(body)),
+            request.binding_ref,
+            "/admission/import-verification-arm/reconcile",
+            LEGACY_NAMED_IMPORT_ARM_RESPONSE_BYTES as u64,
+            None,
+            |status, bytes| {
+                decode_verification_arm_reconciliation(presence, request, status, bytes)
+            },
+        )
+        .await
+    }
+}
+
+fn decode_verification_arm_reconciliation(
+    presence: &PresenceAuthority,
+    request: &LegacyNamedImportVerificationArmRequestV2,
+    status: StatusCode,
+    bytes: &[u8],
+) -> Result<Option<ArmResultV1>> {
+    let value = crate::json::decode_unique(bytes, 64)
+        .map_err(|_| PresenceError::AdmissionOutcomeUnknown)?;
+    presence
+        .screen(&value)
+        .map_err(|_| PresenceError::AdmissionOutcomeUnknown)?;
+    if status == StatusCode::NOT_FOUND
+        && value.as_object().is_some_and(|fields| fields.len() == 1)
+        && value["error"]
+            .as_object()
+            .is_some_and(|fields| fields.len() == 2)
+        && value["error"]["code"] == LEGACY_NAMED_IMPORT_VERIFICATION_ARM_RECEIPT_NOT_FOUND
+        && value["error"]["message"].is_string()
+    {
+        return Ok(None);
+    }
+    let expected_arm =
+        serde_json::to_value(&request.arm).map_err(|_| PresenceError::AdmissionOutcomeUnknown)?;
+    if status != StatusCode::OK || value["arm"] != expected_arm {
+        return Err(PresenceError::AdmissionOutcomeUnknown);
+    }
+    let result: ArmResultV1 =
+        serde_json::from_value(value).map_err(|_| PresenceError::AdmissionOutcomeUnknown)?;
+    let ArmSubjectV1::Helper { permission, .. } = &request.arm.subject else {
+        return Err(PresenceError::AdmissionOutcomeUnknown);
+    };
+    let HelperPermissionV1::ImportVerification {
+        import_terminal, ..
+    } = permission.as_ref()
+    else {
+        return Err(PresenceError::AdmissionOutcomeUnknown);
+    };
+    if !result.replayed
+        || result.receipt.control_namespace_uuid != request.namespace
+        || result.receipt.audit_seq <= import_terminal.audit_seq
+        || result.receipt.validate_for_arm(&request.arm).is_err()
+    {
+        return Err(PresenceError::AdmissionOutcomeUnknown);
+    }
+    Ok(Some(result))
 }
 
 async fn send_import_arm(
@@ -798,6 +896,156 @@ fn response_status(admission: &crate::control::AdmissionResultV1) -> StatusCode 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn verification_arm_reconciliation_requires_an_exact_historical_receipt() -> anyhow::Result<()>
+    {
+        use crate::control::{
+            ArmReceiptV1, ArmSubjectV1, ArmV1, HelperPermissionV1, HelperPurposeV1,
+            HostClockMethodV1, HostClockSampleV1, RuntimeInspectionV1,
+        };
+
+        let (_fixture, presence, material) = launch_material();
+        let binding_ref = material.plan.binding_ref;
+        let namespace = material.plan.control_namespace_uuid;
+        let launch = material.launch;
+        let worker_id = Uuid::new_v4().to_string();
+        let attempt = Uuid::new_v4();
+        let import_arm = ArmReceiptV1 {
+            version: 1,
+            arm_id: LegacyNamedImportArmRequestV1::operation_id(binding_ref, attempt),
+            worker_id: worker_id.clone(),
+            attempt_id: attempt.to_string(),
+            input_hash: "a".repeat(64),
+            control_namespace_uuid: namespace.clone(),
+            audit_seq: 10,
+            audit_hash: "b".repeat(64),
+        };
+        let import_terminal = MutationReceiptV1 {
+            operation_id: Uuid::new_v4().to_string(),
+            worker_id: Some(worker_id.clone()),
+            revision: None,
+            input_hash: "a".repeat(64),
+            audit_seq: 12,
+            audit_hash: "d".repeat(64),
+        };
+        let request = LegacyNamedImportVerificationArmRequestV2 {
+            version: 2,
+            binding_ref,
+            namespace: namespace.clone(),
+            arm: ArmV1 {
+                version: 1,
+                operation_id: LegacyNamedImportVerificationArmRequestV2::operation_id(
+                    binding_ref,
+                    attempt,
+                ),
+                worker_id: worker_id.clone(),
+                attempt_id: attempt.to_string(),
+                expected_revision: 2,
+                intent_hash: "a".repeat(64),
+                subject: ArmSubjectV1::Helper {
+                    helper_id: Uuid::new_v4().to_string(),
+                    purpose: HelperPurposeV1::ImportVerification,
+                    policy_version: 1,
+                    permission: Box::new(HelperPermissionV1::ImportVerification {
+                        import_helper_id: Uuid::new_v4().to_string(),
+                        import_arm,
+                        import_terminal,
+                        manifest_digest: launch.workspace_manifest_digest,
+                    }),
+                },
+                inspection: RuntimeInspectionV1 {
+                    authority_id: launch.authority_id,
+                    runtime_kind: launch.runtime_kind,
+                    container_id: "a".repeat(64),
+                    stable_name: "fixture-verification".into(),
+                    volume_name: "fixture-workspace".into(),
+                    image_id: launch.image_id,
+                    spec_hash: "e".repeat(64),
+                    cpu_millis: launch.cpu_millis,
+                    memory_bytes: launch.memory_bytes,
+                    pids_limit: launch.pids_limit,
+                    network: launch.network,
+                    security_preset: launch.security_preset,
+                    restart_policy: launch.restart_policy,
+                },
+                authority_binding_hash: "a".repeat(64),
+                configuration_fingerprint_version: 2,
+                configuration_fingerprint: "c".repeat(64),
+                clock: HostClockSampleV1 {
+                    version: 1,
+                    method: HostClockMethodV1::LinuxBoottimeV1,
+                    boot_id: Uuid::new_v4().to_string(),
+                    continuous_ns_decimal: "100000000000".into(),
+                    observed_utc: None,
+                },
+                timeout_seconds: 120,
+                deadline_ns_decimal: "220000000000".into(),
+            },
+        };
+        request.validate()?;
+        let response = ArmResultV1 {
+            replayed: true,
+            arm: request.arm.clone(),
+            receipt: ArmReceiptV1 {
+                version: 1,
+                arm_id: request.arm.operation_id.clone(),
+                worker_id,
+                attempt_id: attempt.to_string(),
+                input_hash: request.arm.input_hash()?,
+                control_namespace_uuid: namespace,
+                audit_seq: 13,
+                audit_hash: "f".repeat(64),
+            },
+        };
+        let decode = |status, bytes: &[u8]| {
+            decode_verification_arm_reconciliation(&presence.authority, &request, status, bytes)
+        };
+        let decode_result =
+            |status, reply: &ArmResultV1| decode(status, &serde_json::to_vec(reply).unwrap());
+        let acknowledged = decode_result(StatusCode::OK, &response)?.unwrap();
+        assert!(acknowledged.replayed);
+        assert_eq!(acknowledged.receipt.audit_seq, 13);
+        assert_eq!(acknowledged.receipt.audit_hash, "f".repeat(64));
+        assert!(decode_result(StatusCode::CREATED, &response).is_err());
+
+        let mut fresh = response.clone();
+        fresh.replayed = false;
+        assert!(decode_result(StatusCode::OK, &fresh).is_err());
+        assert!(decode_result(StatusCode::CREATED, &fresh).is_err());
+        let mut divergent_arm = response.clone();
+        divergent_arm.arm.configuration_fingerprint = "e".repeat(64);
+        divergent_arm.receipt.input_hash = divergent_arm.arm.input_hash()?;
+        assert!(decode_result(StatusCode::OK, &divergent_arm).is_err());
+        let mut divergent_receipt = response.clone();
+        divergent_receipt.receipt.input_hash = "a".repeat(64);
+        assert!(decode_result(StatusCode::OK, &divergent_receipt).is_err());
+        let mut foreign = response.clone();
+        foreign.receipt.control_namespace_uuid = Uuid::new_v4().to_string();
+        assert!(decode_result(StatusCode::OK, &foreign).is_err());
+        let mut earlier = response;
+        earlier.receipt.audit_seq = 12;
+        assert!(decode_result(StatusCode::OK, &earlier).is_err());
+
+        let absent = br#"{"error":{"code":"legacy_named_import_verification_arm_receipt_not_found","message":"Missing receipt."}}"#;
+        assert!(decode(StatusCode::NOT_FOUND, absent)?.is_none());
+        assert!(decode(StatusCode::FORBIDDEN, absent).is_err());
+        let unsafe_absence = serde_json::json!({
+            "error": {
+                "code": LEGACY_NAMED_IMPORT_VERIFICATION_ARM_RECEIPT_NOT_FOUND,
+                "message": super::super::preparation_tests::OWN_TOKEN,
+            },
+        });
+        assert!(decode(StatusCode::NOT_FOUND, &serde_json::to_vec(&unsafe_absence)?).is_err());
+        let foreign = br#"{"error":{"code":"not_found","message":"Missing receipt."}}"#;
+        assert!(matches!(
+            decode(StatusCode::NOT_FOUND, foreign),
+            Err(PresenceError::AdmissionOutcomeUnknown)
+        ));
+        let duplicate = br#"{"error":{"code":"not_found","code":"legacy_named_import_verification_arm_receipt_not_found","message":"Missing receipt."}}"#;
+        assert!(decode(StatusCode::NOT_FOUND, duplicate).is_err());
+        Ok(())
+    }
 
     #[tokio::test]
     async fn stopped_generation_never_dispatches_the_named_admission_post() {
