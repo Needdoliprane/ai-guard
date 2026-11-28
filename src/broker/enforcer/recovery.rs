@@ -38,6 +38,9 @@ use super::native_stop_failure::NativeStopFailures;
 use recovery_stop_owner::NativeStopWorker;
 pub(super) use recovery_stop_owner::RecoveryAttemptOwner;
 
+#[path = "recovery_legacy_terminal.rs"]
+mod legacy_terminal;
+
 #[cfg(test)]
 #[path = "recovery_affinity_tests.rs"]
 mod affinity_tests;
@@ -302,6 +305,32 @@ impl RestoreBatchResult {
         }
     }
 }
+fn recovery_registration(
+    scope: &JournalScopeV1,
+    arm: &ArmV1,
+    receipt: &ArmReceiptV1,
+    authority: &RuntimeAuthority,
+    owned: &OwnedContainerSnapshot,
+) -> EnforcerResult<RegistrationV1> {
+    if receipt.control_namespace_uuid != scope.control_namespace_uuid().to_string() {
+        return Err(EnforcerError::InvalidInput);
+    }
+    RegistrationV1::new(
+        hex::encode(Sha256::digest(scope.gateway_origin().as_bytes())),
+        scope.tenant_id().into(),
+        arm.clone(),
+        receipt.clone(),
+        authority.clone(),
+        owned.clone(),
+    )
+}
+
+fn recovery_scope_hash(scope: &JournalScopeV1) -> EnforcerResult<String> {
+    Ok(hex::encode(Sha256::digest(
+        canonical(scope).map_err(|_| EnforcerError::InvalidInput)?,
+    )))
+}
+
 fn retained_restore(
     affinity: &StopAffinity,
     owner: StopOwner,
@@ -313,17 +342,13 @@ fn retained_restore(
 ) -> EnforcerResult<RetainedRestore> {
     let (scope, job_id) = source;
     owner.revalidate()?;
-    let registration = RegistrationV1::new(
-        hex::encode(Sha256::digest(scope.gateway_origin().as_bytes())),
-        scope.tenant_id().into(),
-        target.arm().clone(),
-        target.receipt().clone(),
-        target.authority().clone(),
-        target.owned().clone(),
+    let registration = recovery_registration(
+        scope,
+        target.arm(),
+        target.receipt(),
+        target.authority(),
+        target.owned(),
     )?;
-    if registration.receipt.control_namespace_uuid != scope.control_namespace_uuid().to_string() {
-        return Err(EnforcerError::InvalidInput);
-    }
     let registration_hash = registration.digest()?;
     affinity.check(
         &registration.arm.operation_id,
@@ -352,9 +377,7 @@ fn retained_restore(
         registration_hash,
         registration,
         source: StopSourceV1 {
-            scope_hash: hex::encode(Sha256::digest(
-                canonical(scope).map_err(|_| EnforcerError::InvalidInput)?,
-            )),
+            scope_hash: recovery_scope_hash(scope)?,
             job_id,
             intent_hash: target.arm().intent_hash.clone(),
             confirmed_head: prefix.head().clone(),
@@ -1993,6 +2016,14 @@ impl EnforcerStopClient {
         (revision == entry.revision).then_some(epoch)
     }
     async fn open(&self) -> Result<StopConnection, OpenFailure> {
+        self.open_with_binding(None)
+            .await
+            .map(|(connection, _)| connection)
+    }
+    async fn open_with_binding(
+        &self,
+        expected_epoch: Option<Uuid>,
+    ) -> Result<(StopConnection, String), OpenFailure> {
         let root = &self.0.root;
         root.revalidate()
             .map_err(|_| OpenFailure::Other(EnforcerError::UnsafeFilesystem))?;
@@ -2006,6 +2037,9 @@ impl EnforcerStopClient {
         let endpoint = load_endpoint(root)
             .map_err(|e| OpenFailure::Other(e.into()))?
             .ok_or(OpenFailure::Absent)?;
+        if expected_epoch.is_some_and(|expected| expected != endpoint.epoch()) {
+            return Err(OpenFailure::Other(EnforcerError::Conflict));
+        }
         let endpoints = root
             .persistent_child("endpoints", false)
             .map_err(|_| OpenFailure::Other(EnforcerError::UnsafeFilesystem))?
@@ -2126,11 +2160,14 @@ impl EnforcerStopClient {
                 barrier.pause(endpoint.epoch()).await;
             }
         }
-        Ok(StopConnection {
-            stream,
-            epoch: endpoint.epoch(),
-            v3,
-        })
+        Ok((
+            StopConnection {
+                stream,
+                epoch: endpoint.epoch(),
+                v3,
+            },
+            binding,
+        ))
     }
     async fn request(&self, request: StopRequest) -> EnforcerResult<(Uuid, StopResponse)> {
         let mut connection = self.ensure_open().await?;
@@ -2138,13 +2175,8 @@ impl EnforcerStopClient {
             let response = recovery_v3::request(&mut connection, request).await?;
             return Ok((connection.epoch, response.into_legacy()));
         }
-        write_frame(&mut connection.stream, &request, MAX_FRAME, IO_TIMEOUT).await?;
-        let response: StopResponse =
-            read_frame(&mut connection.stream, MAX_FRAME, IO_TIMEOUT).await?;
-        match response {
-            StopResponse::Error { code } => Err(code),
-            response => Ok((connection.epoch, response)),
-        }
+        let response = request_stops2(&mut connection.stream, request).await?;
+        Ok((connection.epoch, response))
     }
     pub async fn status(&self) -> EnforcerResult<EnforcerStopStatusV2> {
         match self.request(StopRequest::StatusStops {}).await? {
@@ -2715,6 +2747,17 @@ impl EnforcerStopClient {
         }
     }
 }
+async fn request_stops2(
+    stream: &mut UnixStream,
+    request: StopRequest,
+) -> EnforcerResult<StopResponse> {
+    write_frame(stream, &request, MAX_FRAME, IO_TIMEOUT).await?;
+    match read_frame(stream, MAX_FRAME, IO_TIMEOUT).await? {
+        StopResponse::Error { code } => Err(code),
+        response => Ok(response),
+    }
+}
+
 type WatchReader = (
     Uuid,
     tokio::sync::mpsc::Receiver<EnforcerResult<StopResponse>>,
