@@ -11,6 +11,7 @@ use crate::{
         ColdRecoverySeed, running_seed_for_cold_terminal_test,
         terminal_pending_seed_for_cold_audit_test,
     },
+    runtime::{ContainerObservation, RuntimeKind},
 };
 use anyhow::Context;
 use std::{fs::OpenOptions, io::Write, os::unix::fs::OpenOptionsExt, path::Path};
@@ -133,6 +134,123 @@ async fn legacy_terminal_target_reads_the_exact_running_worker_without_effects()
     assert!(service.fenced.load(Ordering::Acquire));
     assert!(std::fs::read(seed.root().join("calls"))? == calls);
     Ok(())
+}
+
+#[tokio::test]
+async fn legacy_terminal_observation_must_match_the_retained_created_and_claim_facts() -> Result<()>
+{
+    let seed = running_seed_for_cold_terminal_test().await;
+    let journal = open_recovery_journal(&seed.journal_root, seed.scope())?;
+    let proof = StopJournal::from_full(&journal)
+        .legacy_worker_terminal_evidence(seed.operation_id, seed.cancel_id)?;
+    let service = read_only_service(seed.root(), seed.config(), &proof)?;
+    let validated = service.validate_legacy_worker_terminal(proof).await?;
+
+    let store = seed.store();
+    let core_head = store.head()?;
+    let posts = seed.post_count();
+    let calls = std::fs::read(seed.root().join("calls"))?;
+    let terminal = synthetic_terminal_observation(validated.evidence())?;
+    assert!(terminal.configuration_fingerprint.as_ref().is_some());
+    let _: () = validated.validate_terminal_observation(&terminal)?;
+
+    let mut missing_start = terminal.clone();
+    missing_start.process.started_at = None;
+    assert_eq!(
+        validated.validate_terminal_observation(&missing_start),
+        Err(BrokerErrorCodeV1::NeedsReconciliation)
+    );
+    let mut missing_finish = terminal.clone();
+    missing_finish.process.finished_at = None;
+    assert_eq!(
+        validated.validate_terminal_observation(&missing_finish),
+        Err(BrokerErrorCodeV1::NeedsReconciliation)
+    );
+    let mut indeterminate = terminal.clone();
+    indeterminate.process.status = Some("running".into());
+    indeterminate.process.running = Some(true);
+    assert_eq!(
+        validated.validate_terminal_observation(&indeterminate),
+        Err(BrokerErrorCodeV1::NeedsReconciliation)
+    );
+
+    let mut changed_start = terminal.clone();
+    changed_start.process.started_at = changed_start
+        .process
+        .started_at
+        .map(|started| started + chrono::Duration::seconds(1));
+    assert_eq!(
+        validated.validate_terminal_observation(&changed_start),
+        Err(BrokerErrorCodeV1::Conflict)
+    );
+    let mut changed_cid = terminal.clone();
+    changed_cid.id = Some("f".repeat(64));
+    assert_eq!(
+        validated.validate_terminal_observation(&changed_cid),
+        Err(BrokerErrorCodeV1::Conflict)
+    );
+    let mut changed_configuration = terminal.clone();
+    changed_configuration.configuration_fingerprint = Some("e".repeat(64));
+    assert_eq!(
+        validated.validate_terminal_observation(&changed_configuration),
+        Err(BrokerErrorCodeV1::Conflict)
+    );
+    let mut changed_allocation = terminal.clone();
+    changed_allocation.allocation.memory_bytes = changed_allocation
+        .allocation
+        .memory_bytes
+        .map(|value| value + 1);
+    assert_eq!(
+        validated.validate_terminal_observation(&changed_allocation),
+        Err(BrokerErrorCodeV1::Conflict)
+    );
+    let mut reversed_time = terminal.clone();
+    reversed_time.process.finished_at = reversed_time
+        .process
+        .started_at
+        .map(|started| started - chrono::Duration::seconds(1));
+    assert_eq!(
+        validated.validate_terminal_observation(&reversed_time),
+        Err(BrokerErrorCodeV1::Conflict)
+    );
+    let mut observed_before_finish = terminal.clone();
+    observed_before_finish.observed_at -= chrono::Duration::seconds(1);
+    assert_eq!(
+        validated.validate_terminal_observation(&observed_before_finish),
+        Err(BrokerErrorCodeV1::Conflict)
+    );
+
+    assert_eq!(store.head()?, core_head);
+    assert_eq!(seed.post_count(), posts);
+    assert_eq!(std::fs::read(seed.root().join("calls"))?, calls);
+    Ok(())
+}
+
+fn synthetic_terminal_observation(
+    proof: &LegacyWorkerTerminalEvidenceV1,
+) -> Result<ContainerObservation> {
+    let (authority, created) = proof.target();
+    let start = proof
+        .worker()
+        .observed_started_at
+        .as_deref()
+        .context("the retained Running Worker has no start instant")?;
+    let started_at = chrono::DateTime::parse_from_rfc3339(start)?;
+    let finished_at = started_at + chrono::Duration::seconds(2);
+    let mut observed = created.observation.clone();
+    observed.process.status = Some(
+        match authority.kind {
+            RuntimeKind::Docker | RuntimeKind::Podman => "exited",
+        }
+        .into(),
+    );
+    observed.process.running = Some(false);
+    observed.process.started_at = Some(started_at);
+    observed.process.finished_at = Some(finished_at);
+    observed.process.exit_code = Some(0);
+    observed.process.oom_killed = Some(false);
+    observed.observed_at = finished_at.with_timezone(&chrono::Utc);
+    Ok(observed)
 }
 
 fn observation_target_facts(proof: &LegacyWorkerTerminalEvidenceV1) -> Result<Vec<u8>> {
