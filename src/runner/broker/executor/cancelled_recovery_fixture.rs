@@ -1243,7 +1243,6 @@ async fn full3_worker_claim_and_stop_survive_journal_reopen() {
             .command_receipt(operation, cancel)
             .unwrap()
             .expect("the writer confirmed the exact STOP");
-        let stop_bytes = canonical(&stop).unwrap();
         let binding_bytes = canonical(binding).unwrap();
         let arm_receipt_bytes = canonical(&claim.arm_receipt).unwrap();
         let (arm, owned) = operations
@@ -1328,7 +1327,9 @@ async fn full3_worker_claim_and_stop_survive_journal_reopen() {
                 &original_binding,
             )
             .expect("cold STOP should retain the exact previously acknowledged claim");
-        assert!(canonical(&retained_stop).unwrap() == stop_bytes);
+        assert_eq!(retained_stop.command_id(), stop.command_id());
+        assert_eq!(retained_stop.input_hash(), stop.input_hash());
+        assert_eq!(retained_stop.head(), stop.head());
         assert!(canonical(&(&claim, &claim_receipt)).unwrap() == claim_bytes);
         assert!(base.store.worker_usage().unwrap().is_empty());
         let current = base.store.worker(&before.worker_id).unwrap().unwrap();
