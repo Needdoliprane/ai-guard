@@ -1,0 +1,137 @@
+name: G04 named verification Claim reconcile Linux QA
+
+on:
+  push:
+    branches: [codex/g04-named-verification-claim-reconcile-linux-qa-20261128]
+    paths: [.github/workflows/g04-named-verification-claim-reconcile-linux-qa.yaml]
+
+permissions:
+  contents: read
+
+jobs:
+  verification-claim-reconcile:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      SOURCE_SHA: 251b9daac984bb51f9ce8c148157a585ecf61577
+      SOURCE_TREE: ae7ea9fd0d6d930e5c55c366135f74fd2712dc51
+      SUPERVISION_API_BLOB: 5138488d929f47e86a5f63c0750d0a9b893f0c65
+      BOOTSTRAP_TESTS_BLOB: ce65075fc1319495b9ec96616c9f9a599c4a002e
+      CLAIM_TESTS_BLOB: 560352b455149f81b18a82c1e251a40a849d2f75
+      CLAIM_BLOB: e4c8a618afe9fc915d65f615dd8f43972905e4dd
+      SESSION_CONTROL_BLOB: 3a1fc40bf1d01936aad7291332e9abb2d65047ed
+      CONTROL_TRANSPORT_BLOB: 7eb6d6065dc7e76267794d41c081334bda36269e
+      CARGO_BUILD_JOBS: '1'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      CARGO_TERM_COLOR: never
+      RUST_MIN_STACK: '8388608'
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          persist-credentials: false
+
+      - name: Build one libtest and verify Claim replay, HTTP reconcile, and Arm regressions
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          selectors=(
+            audit::legacy_session_prepare::bootstrap::tests::verification_claim_tests::legacy_named_import_verification_claim_emits_once_and_replays_exactly
+            control_transport::reconciliation_tests::named_import_verification_claim_allows_only_exact_broker_reconciliation
+            audit::legacy_session_prepare::bootstrap::tests::legacy_named_import_verification_arm_requires_exact_named_terminal_and_authority
+          )
+
+          report_not_run() {
+            for selector in "${selectors[@]}"; do
+              printf 'test=%s status=NOT_RUN\n' "$selector"
+            done
+          }
+
+          if [[ "$(git rev-parse HEAD)" != "$SOURCE_SHA" ||
+                "$(git rev-parse 'HEAD^{tree}')" != "$SOURCE_TREE" ||
+                "$(git rev-parse HEAD:src/api/supervision.rs)" != "$SUPERVISION_API_BLOB" ||
+                "$(git rev-parse HEAD:src/audit/legacy_session_prepare/bootstrap/tests.rs)" != "$BOOTSTRAP_TESTS_BLOB" ||
+                "$(git rev-parse HEAD:src/audit/legacy_session_prepare/bootstrap/verification_claim_tests.rs)" != "$CLAIM_TESTS_BLOB" ||
+                "$(git rev-parse HEAD:src/audit/legacy_session_prepare/confirmation/admission/claim.rs)" != "$CLAIM_BLOB" ||
+                "$(git rev-parse HEAD:src/control/session_control.rs)" != "$SESSION_CONTROL_BLOB" ||
+                "$(git rev-parse HEAD:src/control_transport.rs)" != "$CONTROL_TRANSPORT_BLOB" ]]; then
+            printf 'source=FAIL\n'
+            report_not_run
+            exit 1
+          fi
+          printf 'source=PASS\nsource_sha=%s\nsource_tree=%s\n' "$SOURCE_SHA" "$SOURCE_TREE"
+          printf 'supervision_api_blob=%s\nbootstrap_tests_blob=%s\nclaim_tests_blob=%s\n' \
+            "$SUPERVISION_API_BLOB" "$BOOTSTRAP_TESTS_BLOB" "$CLAIM_TESTS_BLOB"
+          printf 'claim_blob=%s\nsession_control_blob=%s\ncontrol_transport_blob=%s\n' \
+            "$CLAIM_BLOB" "$SESSION_CONTROL_BLOB" "$CONTROL_TRANSPORT_BLOB"
+          export AI_GUARD_BUILD_REVISION="$SOURCE_SHA"
+
+          scratch=$(mktemp -d /tmp/aig-g04-verification-claim-reconcile.XXXXXX)
+          trap 'rm -rf -- "$scratch"' EXIT
+          export TMPDIR="$scratch"
+          export CARGO_TARGET_DIR="$scratch/target"
+          build_json="$scratch/build.jsonl"
+
+          if ! cargo fetch --locked >"$scratch/fetch.log" 2>&1; then
+            printf 'fetch=FAIL\nbuild=NOT_RUN\n'
+            report_not_run
+            exit 1
+          fi
+          printf 'fetch=PASS\n'
+
+          if cargo test --locked --offline -j1 --no-default-features --lib --no-run \
+              --message-format=json >"$build_json" 2>"$scratch/build.stderr"; then
+            printf 'build=PASS\n'
+          else
+            rc=$?
+            printf 'build=FAIL\nbuild_exit=%s\n' "$rc"
+            if grep -Fq 'Error:' "$scratch/build.stderr"; then printf 'build_error_present=true\n'; else printf 'build_error_present=false\n'; fi
+            report_not_run
+            exit 1
+          fi
+
+          if ! libtest=$(jq -ers '[.[] | select(.reason == "compiler-artifact"
+              and .target.name == "agentsandbox" and .target.kind == ["lib"]
+              and .profile.test == true and (.executable | type) == "string") | .executable]
+              | unique | select(length == 1) | .[0]' "$build_json" 2>/dev/null) ||
+              [[ "$libtest" != "$CARGO_TARGET_DIR"/debug/deps/agentsandbox-* ||
+                 ! -f "$libtest" || ! -x "$libtest" || -L "$libtest" ]]; then
+            printf 'libtest=FAIL\n'
+            report_not_run
+            exit 1
+          fi
+          checksum=$(sha256sum -- "$libtest")
+          libtest_sha=${checksum%% *}
+          if [[ ! "$libtest_sha" =~ ^[0-9a-f]{64}$ ]]; then
+            printf 'libtest=FAIL\n'
+            report_not_run
+            exit 1
+          fi
+          printf 'libtest=PASS\nlibtest_sha256=%s\n' "$libtest_sha"
+
+          index=0
+          for selector in "${selectors[@]}"; do
+            index=$((index + 1))
+            log="$scratch/test-$index.log"
+            test_exit=0
+            "$libtest" --exact "$selector" --test-threads=1 --color never >"$log" 2>&1 || test_exit=$?
+            if [[ "$test_exit" == 0 ]] &&
+                [[ "$(grep -Fxc "running 1 test" "$log" || true)" == 1 ]] &&
+                [[ "$(grep -Fxc "test $selector ... ok" "$log" || true)" == 1 ]] &&
+                [[ "$(grep -Ec '^test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; [0-9]+ filtered out; finished in [0-9]+([.][0-9]+)?s$' "$log" || true)" == 1 ]]; then
+              printf 'test=%s status=PASS\ntest_exit=0\ntest_pass_count=1\ntest_fail_count=0\n' "$selector"
+            else
+              printf 'test=%s status=FAIL\ntest_exit=%s\n' "$selector" "$test_exit"
+              panic_at=$(grep -Eo 'panicked at src/[^[:space:]]+:[0-9]+:[0-9]+' "$log" | head -n 1 || true)
+              if [[ -n "$panic_at" ]]; then printf 'panic_at=%s\n' "$panic_at"; else printf 'panic_at=unavailable\n'; fi
+              if grep -Fq 'Error:' "$log"; then printf 'error_present=true\n'; else printf 'error_present=false\n'; fi
+              for remaining in "${selectors[@]:index}"; do
+                printf 'test=%s status=NOT_RUN\n' "$remaining"
+              done
+              exit 1
+            fi
+          done
