@@ -27,6 +27,7 @@ pub(super) enum Case {
     TerminalCleanupWithoutScan,
     StillRunning,
     Full3WorkerClaim,
+    Full3WorkerRunning,
     UnknownContainer,
     ChangedCid,
     ChangedImage,
@@ -91,7 +92,7 @@ impl RecoveryFixture {
         service_layout: bool,
         scope_override: Option<(Uuid, String)>,
     ) -> Self {
-        let full3_worker_claim = matches!(case, Case::Full3WorkerClaim);
+        let full3_worker_claim = matches!(case, Case::Full3WorkerClaim | Case::Full3WorkerRunning);
         eprintln!("cancelled_recovery_fixture phase=seed_begin");
         // Domain proof with writer_timeout=60s; production writer_timeout=10s is NOT qualified.
         eprintln!("cancelled_recovery_fixture budget writer_timeout_seconds=60 domain_only=true");
@@ -321,6 +322,7 @@ impl RecoveryFixture {
                 | Case::TerminalCleanupRecovery
                 | Case::TerminalCleanupWithoutScan
                 | Case::Full3WorkerClaim
+                | Case::Full3WorkerRunning
         ) {
             // The initial snapshot is Created. Cases continuing past claim
             // record their synthetic Running observation separately.
@@ -388,7 +390,7 @@ impl RecoveryFixture {
                 .unwrap();
         }
         eprintln!("cancelled_recovery_fixture phase=arm_claim_ready");
-        let running = if full3_worker_claim {
+        let running = if matches!(case, Case::Full3WorkerClaim) {
             None
         } else {
             let running = handle
@@ -1192,8 +1194,9 @@ async fn full3_worker_claim_and_stop_survive_journal_reopen() {
     };
 
     let driver = tokio::runtime::Handle::current();
-    tokio::task::spawn_blocking(move || {
-        let fixture = RecoveryFixture::seed(Case::Full3WorkerClaim, &driver, true, None);
+    let verify_case = move |case| {
+        let fixture = RecoveryFixture::seed(case, &driver, true, None);
+        let running = matches!(case, Case::Full3WorkerRunning);
         let job = fixture.job();
         let checkpoint = job.broker_checkpoint_v5().expect("confirmed V5 checkpoint");
         let [binding] = checkpoint.bindings() else {
@@ -1205,26 +1208,80 @@ async fn full3_worker_claim_and_stop_survive_journal_reopen() {
             .broker()
             .supervision()
             .operations();
+        let mut claims = operations
+            .iter()
+            .filter(|operation| matches!(operation, Operation::WorkerClaim { .. }));
         let Some(Operation::WorkerClaim {
             request: claim,
             response: Some(acknowledged),
-        }) = operations.last()
+        }) = claims.next()
         else {
-            panic!("the last supervision operation is an acknowledged Worker claim");
+            panic!("an acknowledged Full3 Worker claim");
         };
+        assert!(claims.next().is_none());
         let scope = job.scope().clone();
         let operation = job.operation_id();
         let head = job.head().clone();
         let cancel = fixture.cancel_id();
         let before = fixture.worker();
         assert!(before.quota_held);
-        assert_eq!(before.state, WorkerStateV1::StartIssued);
-        assert_eq!(before.observed_started_at, None);
-        assert!(canonical(&before).unwrap() == canonical(&acknowledged.worker).unwrap());
+        assert_eq!(acknowledged.worker.state, WorkerStateV1::StartIssued);
+        assert_eq!(acknowledged.worker.observed_started_at, None);
         assert_eq!(acknowledged.disposition, Some(ClaimDispositionV1::EmitOnce));
         assert_eq!(acknowledged.receipt.operation_id, claim.operation_id);
         assert_eq!(acknowledged.receipt.input_hash, claim.input_hash().unwrap());
         assert!(acknowledged.receipt.audit_seq > claim.arm_receipt.audit_seq);
+        assert_eq!(
+            before.attempt.start_operation_id.as_deref(),
+            Some(claim.operation_id.as_str())
+        );
+        assert_eq!(
+            before.attempt.start_emitter_id.as_deref(),
+            Some(claim.emitter_id.as_str())
+        );
+        assert_eq!(before.attempt.container_id.as_deref(), Some(CID));
+        if running {
+            let Some(Operation::WorkerMutation {
+                request,
+                response: Some(observed),
+            }) = operations.last()
+            else {
+                panic!("the last operation is an acknowledged Running observation");
+            };
+            let WorkerTransitionV1::Observe { observation } = &request.transition else {
+                panic!("the Running acknowledgement is for Observe");
+            };
+            assert_eq!(request.worker_id, claim.worker_id);
+            assert_eq!(request.attempt_id, claim.attempt_id);
+            assert_eq!(request.expected_revision, acknowledged.worker.revision);
+            assert_eq!(observation.status, RuntimeStatusV1::Running);
+            assert_eq!(observation.inspection.container_id, CID);
+            assert_eq!(observation.started_at.as_deref(), Some(STARTED));
+            assert_eq!(observed.receipt.operation_id, request.operation_id);
+            assert!(observed.receipt.audit_seq > acknowledged.receipt.audit_seq);
+            assert!(canonical(&observed.worker).unwrap() == canonical(&before).unwrap());
+            assert_eq!(before.state, WorkerStateV1::Running);
+            assert!(!before.allocation_inconsistent);
+            let last = before
+                .last_observation
+                .as_ref()
+                .expect("Running observation");
+            assert_eq!(last.status, RuntimeStatusV1::Running);
+            assert_eq!(last.running, Some(true));
+            let parse_start = |value: Option<&str>| {
+                chrono::DateTime::parse_from_rfc3339(value.expect("Running start instant")).unwrap()
+            };
+            let started_at = parse_start(before.observed_started_at.as_deref());
+            assert!(started_at.timestamp() > 0);
+            assert_eq!(started_at, parse_start(Some(STARTED)));
+            assert_eq!(started_at, parse_start(last.started_at.as_deref()));
+        } else {
+            assert!(matches!(
+                operations.last(),
+                Some(Operation::WorkerClaim { .. })
+            ));
+            assert!(canonical(&before).unwrap() == canonical(&acknowledged.worker).unwrap());
+        }
         let original_binding = binding.clone();
         // Use a different typed expected digest without changing the fixture
         // source or claiming that another guardian supplied a binding.
@@ -1275,16 +1332,18 @@ async fn full3_worker_claim_and_stop_survive_journal_reopen() {
             .join(scope.profile_id());
         let base = close_cold_seed_owners(fixture, &driver, &journal_root, &scope);
         let profile = Directory::open_existing(&journal_root).unwrap();
-        let report = StopRecoveryReaderV1::open_existing(
-            &profile,
-            scope.clone(),
-            &FsExclusions::new(),
-            JournalLimitsV1::default(),
-            ControlSecrets::new(Vec::new()).unwrap(),
-        )
-        .unwrap()
-        .unwrap()
-        .scan();
+        let report = Arc::new(
+            StopRecoveryReaderV1::open_existing(
+                &profile,
+                scope.clone(),
+                &FsExclusions::new(),
+                JournalLimitsV1::default(),
+                ControlSecrets::new(Vec::new()).unwrap(),
+            )
+            .unwrap()
+            .unwrap()
+            .scan(),
+        );
         assert!(!report.incomplete());
         assert!(canonical(report.scope()).unwrap() == canonical(&scope).unwrap());
         let [recovered] = report.jobs() else {
@@ -1331,9 +1390,35 @@ async fn full3_worker_claim_and_stop_survive_journal_reopen() {
         assert_eq!(retained_stop.input_hash(), stop.input_hash());
         assert_eq!(retained_stop.head(), stop.head());
         assert!(canonical(&(&claim, &claim_receipt)).unwrap() == claim_bytes);
+        let evidence = report.full3_worker_terminal_evidence_for_test(
+            &scope,
+            operation,
+            &head,
+            cancel,
+            &original_binding,
+        );
+        if running {
+            let (worker, projected_stop, arm, projected_head, binding) =
+                evidence.expect("cold STOP retains the acknowledged Running Worker");
+            assert!(canonical(&worker).unwrap() == canonical(&before).unwrap());
+            assert!(canonical(&arm).unwrap() == canonical(target.arm()).unwrap());
+            assert!(canonical(&binding).unwrap() == binding_bytes);
+            assert_eq!(projected_head, head);
+            assert_eq!(projected_stop.command_id(), stop.command_id());
+            assert_eq!(projected_stop.input_hash(), stop.input_hash());
+            assert_eq!(projected_stop.head(), stop.head());
+        } else {
+            assert!(matches!(evidence, Err(JournalError::Interrupted)));
+        }
         assert!(base.store.worker_usage().unwrap().is_empty());
         let current = base.store.worker(&before.worker_id).unwrap().unwrap();
         assert!(canonical(&current).unwrap() == canonical(&before).unwrap());
+        let calls_after = fs::read_to_string(base.root.path().join("calls")).unwrap();
+        assert!(calls_after.lines().eq(calls.iter().map(String::as_str)));
+    };
+    tokio::task::spawn_blocking(move || {
+        verify_case(Case::Full3WorkerClaim);
+        verify_case(Case::Full3WorkerRunning);
     })
     .await
     .expect("Full3 claim seed and cold journal read must join");
@@ -1393,7 +1478,6 @@ async fn seed_full3_worker_claim(
             fresh && super::super::emits_once(&operation),
             "Full3 Worker claim did not obtain the first SQLite acknowledgement"
         );
-        // The test stops at the durable claim, before Prepare or any Start.
         Ok(())
     })
     .await;
