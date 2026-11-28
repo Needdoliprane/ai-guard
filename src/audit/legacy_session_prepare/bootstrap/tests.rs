@@ -1176,9 +1176,11 @@ async fn named_import_arm_fixture(verify_import_arm: bool) {
             HelperObservationV1, MutationReceiptV1, RuntimeObservationV1, RuntimeStatusV1,
             session_control::{
                 LEGACY_NAMED_IMPORT_ARM_RECEIPT_NOT_FOUND,
-                LEGACY_NAMED_IMPORT_OBSERVATION_RECEIPT_NOT_FOUND, LegacyNamedImportArmRequestV1,
-                LegacyNamedImportClaimRequestV1, LegacyNamedImportObservationPhaseV1,
-                LegacyNamedImportObservationRequestV1, LegacyNamedImportVerificationArmRequestV2,
+                LEGACY_NAMED_IMPORT_OBSERVATION_RECEIPT_NOT_FOUND,
+                LEGACY_NAMED_IMPORT_VERIFICATION_ARM_RECEIPT_NOT_FOUND,
+                LegacyNamedImportArmRequestV1, LegacyNamedImportClaimRequestV1,
+                LegacyNamedImportObservationPhaseV1, LegacyNamedImportObservationRequestV1,
+                LegacyNamedImportVerificationArmRequestV2,
             },
         },
     };
@@ -1853,19 +1855,61 @@ async fn named_import_arm_fixture(verify_import_arm: bool) {
             },
         };
         assert_ne!(verification.arm.operation_id, arm.operation_id);
-        assert!(
-            store
-                .read_legacy_named_import_verification_arm(&broker, &verification)
-                .unwrap()
-                .is_none()
+        let public_arm_path = format!(
+            "/api/v1/control/session-confirmations/{}/admission/import-verification-arm",
+            verification.binding_ref
         );
-        assert_eq!(
-            store
-                .read_legacy_named_import_verification_arm(&other_broker, &verification)
-                .unwrap_err()
-                .downcast_ref::<ControlFailure>(),
-            Some(&ControlFailure::NotFound)
-        );
+        let private_arm_path = format!("/control{public_arm_path}");
+        let public_read = format!("{public_arm_path}/reconcile");
+        let verification_read = format!("{private_arm_path}/reconcile");
+        let head_before_read = store.head().unwrap();
+        for (token, code_path, expected_code) in [
+            (
+                BROKER_TOKEN,
+                "/error/code",
+                LEGACY_NAMED_IMPORT_VERIFICATION_ARM_RECEIPT_NOT_FOUND,
+            ),
+            (OTHER_BROKER, "/code", "worker_not_found"),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(post(&verification_read, token, &verification))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::NOT_FOUND);
+            let body: Value =
+                serde_json::from_slice(&to_bytes(response.into_body(), 1024).await.unwrap())
+                    .unwrap();
+            assert_eq!(
+                body.pointer(code_path).and_then(Value::as_str),
+                Some(expected_code)
+            );
+        }
+        for (path, token, status) in [
+            (public_read.as_str(), BROKER_TOKEN, StatusCode::NOT_FOUND),
+            (
+                private_arm_path.as_str(),
+                BROKER_TOKEN,
+                StatusCode::NOT_FOUND,
+            ),
+            (verification_read.as_str(), RUNNER, StatusCode::FORBIDDEN),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(post(path, token, &verification))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), status);
+        }
+        let mut wrong_binding = verification.clone();
+        wrong_binding.binding_ref = Uuid::new_v4();
+        let invalid_path = app
+            .clone()
+            .oneshot(post(&verification_read, BROKER_TOKEN, &wrong_binding))
+            .await
+            .unwrap();
+        assert_eq!(invalid_path.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(store.head().unwrap(), head_before_read);
         let mut reused_container = verification.clone();
         reused_container.arm.inspection.container_id = arm.inspection.container_id.clone();
         assert_eq!(
@@ -1960,7 +2004,7 @@ async fn named_import_arm_fixture(verify_import_arm: bool) {
                 .is_none()
         );
         assert_eq!(store.head().unwrap(), accepted.receipt.audit_seq);
-        Some((verification, accepted.receipt))
+        Some((verification, verification_read, accepted.receipt))
     } else {
         None
     };
@@ -1981,16 +2025,32 @@ async fn named_import_arm_fixture(verify_import_arm: bool) {
     drop(store);
 
     let reopened = Arc::new(f.reopen());
-    if let Some((verification, expected)) = verification {
-        let read = reopened
-            .read_legacy_named_import_verification_arm(&broker, &verification)
-            .unwrap()
+    if let Some((verification, verification_read, expected)) = verification {
+        let app = router(Arc::clone(&reopened));
+        let response = app
+            .clone()
+            .oneshot(post(&verification_read, BROKER_TOKEN, &verification))
+            .await
             .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let read: ArmResultV1 = serde_json::from_slice(
+            &to_bytes(
+                response.into_body(),
+                crate::control::session_control::LEGACY_NAMED_IMPORT_ARM_RESPONSE_BYTES,
+            )
+            .await
+            .unwrap(),
+        )
+        .unwrap();
         let replay = reopened
             .arm_legacy_named_import_verification(&broker, &verification)
             .unwrap();
         for result in [read, replay] {
             assert!(result.replayed);
+            assert_eq!(
+                serde_json::to_value(result.arm).unwrap(),
+                serde_json::to_value(&verification.arm).unwrap()
+            );
             assert_eq!(
                 serde_json::to_value(result.receipt).unwrap(),
                 serde_json::to_value(&expected).unwrap()
@@ -1998,13 +2058,11 @@ async fn named_import_arm_fixture(verify_import_arm: bool) {
         }
         let mut divergent = verification;
         divergent.arm.configuration_fingerprint = "f".repeat(64);
-        assert_eq!(
-            reopened
-                .read_legacy_named_import_verification_arm(&broker, &divergent)
-                .unwrap_err()
-                .downcast_ref::<ControlFailure>(),
-            Some(&ControlFailure::Conflict)
-        );
+        let refused = app
+            .oneshot(post(&verification_read, BROKER_TOKEN, &divergent))
+            .await
+            .unwrap();
+        assert_eq!(refused.status(), StatusCode::CONFLICT);
         assert!(reopened.integrity().unwrap().valid);
         assert_eq!(reopened.head().unwrap(), revoked.audit_seq);
         assert_eq!(reopened.worker_quota(&quota).unwrap().held_workers, 1);

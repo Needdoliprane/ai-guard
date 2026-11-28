@@ -270,7 +270,7 @@ pub fn control_route(method: &Method, path: &str) -> Option<ControlRouteIdentity
                 "session-confirmations",
                 id,
                 "admission",
-                "import-claim" | "import-observation",
+                "import-claim" | "import-observation" | "import-verification-arm",
                 "reconcile",
             ],
         ) if v1
@@ -314,6 +314,33 @@ mod reconciliation_tests {
     #[test]
     fn named_import_observation_routes_require_broker_session_and_exact_scope_path() {
         assert_named_import_routes_require_broker_session("import-observation");
+    }
+
+    #[test]
+    fn named_import_verification_arm_allows_only_exact_broker_reconciliation() {
+        let binding = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+        let base = format!(
+            "/api/v1/control/session-confirmations/{binding}/admission/import-verification-arm"
+        );
+        let reconcile = format!("{base}/reconcile");
+        assert_eq!(
+            control_route(&Method::POST, &reconcile),
+            Some(ControlRouteIdentity::BrokerSession)
+        );
+        assert_eq!(control_route(&Method::GET, &reconcile), None);
+        assert_eq!(
+            control_query(&Method::POST, &reconcile, Some("tenant=tenant-a")),
+            Err(InvalidControlQuery)
+        );
+        for invalid in [
+            base,
+            reconcile.replacen("/api/v1/", "/api/", 1),
+            reconcile.replace(binding, "00000000-0000-0000-0000-000000000000"),
+            reconcile.replace(binding, &binding.to_uppercase()),
+            format!("{reconcile}/extra"),
+        ] {
+            assert_eq!(control_route(&Method::POST, &invalid), None);
+        }
     }
 
     fn assert_named_import_routes_require_broker_session(operation: &str) {

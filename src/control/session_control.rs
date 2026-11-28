@@ -224,6 +224,8 @@ pub(crate) const LEGACY_NAMED_IMPORT_OBSERVATION_RECEIPT_NOT_FOUND: &str =
     "legacy_named_import_observation_receipt_not_found";
 pub(crate) const LEGACY_NAMED_IMPORT_ARM_RECEIPT_NOT_FOUND: &str =
     "named_import_arm_receipt_not_found";
+pub(crate) const LEGACY_NAMED_IMPORT_VERIFICATION_ARM_RECEIPT_NOT_FOUND: &str =
+    "legacy_named_import_verification_arm_receipt_not_found";
 
 /// The exact server-derived policy input and its durable Initial result.
 #[derive(Serialize, Deserialize)]

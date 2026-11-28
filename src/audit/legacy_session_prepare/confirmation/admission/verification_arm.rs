@@ -254,10 +254,6 @@ impl Store {
     }
 
     /// Reconcile the exact verification Arm under its original broker identity.
-    #[allow(
-        dead_code,
-        reason = "private verification Arm transport is composed separately"
-    )]
     pub(crate) fn read_legacy_named_import_verification_arm(
         &self,
         broker: &BrokerIdentityV1,

@@ -12,10 +12,12 @@ use crate::control::{
         LEGACY_CONFIRMED_LAUNCH_SPEC_RESPONSE_BYTES, LEGACY_NAMED_ADMISSION_RECEIPT_NOT_FOUND,
         LEGACY_NAMED_ADMISSION_REQUEST_BYTES, LEGACY_NAMED_IMPORT_ARM_RECEIPT_NOT_FOUND,
         LEGACY_NAMED_IMPORT_ARM_RESPONSE_BYTES, LEGACY_NAMED_IMPORT_OBSERVATION_RECEIPT_NOT_FOUND,
-        LEGACY_NAMED_IMPORT_OBSERVATION_RESPONSE_BYTES, LegacyConfirmedPlanV1,
+        LEGACY_NAMED_IMPORT_OBSERVATION_RESPONSE_BYTES,
+        LEGACY_NAMED_IMPORT_VERIFICATION_ARM_RECEIPT_NOT_FOUND, LegacyConfirmedPlanV1,
         LegacyNamedAdmissionReceiptV1, LegacyNamedImportArmRequestV1,
         LegacyNamedImportClaimRequestV1, LegacyNamedImportObservationRequestV1,
-        LegacyNamedSupervisedAdmissionV1, canonical_uuid,
+        LegacyNamedImportVerificationArmRequestV2, LegacyNamedSupervisedAdmissionV1,
+        canonical_uuid,
     },
 };
 use crate::tenant_store::StoreHealth;
@@ -67,6 +69,11 @@ pub(super) fn routes() -> Router<GatewayState> {
         .route(
             "/control/session-confirmations/{binding_ref}/admission/import-arm/reconcile",
             post(reconcile_named_import_arm)
+                .layer(DefaultBodyLimit::max(LEGACY_NAMED_ADMISSION_REQUEST_BYTES)),
+        )
+        .route(
+            "/control/session-confirmations/{binding_ref}/admission/import-verification-arm/reconcile",
+            post(reconcile_named_import_verification_arm)
                 .layer(DefaultBodyLimit::max(LEGACY_NAMED_ADMISSION_REQUEST_BYTES)),
         )
         .route(
@@ -570,6 +577,38 @@ async fn reconcile_named_import_arm(
                     .read_legacy_named_import_arm(&identity, &request)
                     .map_err(|error| named_admission_error(&tenant.store, error))?
                     .ok_or_else(named_import_arm_absent)?;
+                named_import_arm_response(result, &store.redactor_union(&redactor))
+            },
+        )
+        .await
+}
+
+async fn reconcile_named_import_verification_arm(
+    _private: PrivateControlTransport,
+    broker: workload::VerifiedBroker,
+    Path(binding_ref): Path<String>,
+    body: Result<Json<LegacyNamedImportVerificationArmRequestV2>, JsonRejection>,
+) -> ApiResult<Response> {
+    let binding_ref = canonical_uuid(&binding_ref).map_err(control_error)?;
+    let request = parse_json(body)?;
+    if request.binding_ref != binding_ref {
+        return Err(control_error(ControlFailure::InvalidRequest.into()));
+    }
+    broker
+        .blocking_on(
+            store_io::Lane::Control,
+            move |tenant, identity, redactor| {
+                let store = named_admission_store(&tenant, &redactor)?;
+                let result = store
+                    .read_legacy_named_import_verification_arm(&identity, &request)
+                    .map_err(|error| named_admission_error(&tenant.store, error))?
+                    .ok_or_else(|| {
+                        workload::response(
+                            StatusCode::NOT_FOUND,
+                            LEGACY_NAMED_IMPORT_VERIFICATION_ARM_RECEIPT_NOT_FOUND,
+                            "Reçu d’armement de vérification d’import introuvable.",
+                        )
+                    })?;
                 named_import_arm_response(result, &store.redactor_union(&redactor))
             },
         )
