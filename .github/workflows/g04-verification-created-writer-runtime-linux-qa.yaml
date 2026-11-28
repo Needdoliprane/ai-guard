@@ -129,6 +129,15 @@ jobs:
               printf 'unclassified_failure\n'
             fi
           }
+          classify_stack_thread() {
+            local selector="$1" capture="$2" thread
+            thread=$(sed -nE "s/^thread '([^']+)'( \([0-9]+\))? has overflowed its stack$/\1/p" "$capture")
+            case "$thread" in
+              "$selector") printf 'selected_oracle\n' ;;
+              ai-guard-journal-writer) printf 'journal_writer\n' ;;
+              *) printf 'other_or_unknown\n' ;;
+            esac
+          }
           run_exact_test() {
             local key="$1" selector="$2" stack_bytes="$3" capture="$4"
             local test_exit=0 classification category site
@@ -149,6 +158,7 @@ jobs:
               printf '%s_panic_site=%s\n' "$key" "$site"
             fi
             if [[ "$category" == stack_overflow ]]; then
+              printf '%s_stack_thread=%s\n' "$key" "$(classify_stack_thread "$selector" "$capture")"
               return 2
             fi
             return 1
@@ -182,6 +192,13 @@ jobs:
             "private message in $RUNNER_TEMP/test-token" >"$synthetic_test"
           [[ "$(classify_test_failure "$selector" 134 "$synthetic_test")" == stack_overflow &&
              "$(classify_test_failure "$selector" 101 "$synthetic_test")" == unclassified_failure ]]
+          printf "thread '%s' (123) has overflowed its stack\n" "$selector" >"$synthetic_test"
+          [[ "$(classify_stack_thread "$selector" "$synthetic_test")" == selected_oracle &&
+             "$(classify_test_failure "$selector" 134 "$synthetic_test")" == other_sigabrt ]]
+          printf "%s\n" "thread 'ai-guard-journal-writer' (987) has overflowed its stack" >"$synthetic_test"
+          [[ "$(classify_stack_thread "$selector" "$synthetic_test")" == journal_writer ]]
+          printf "thread 'unlisted private thread' has overflowed its stack\n" >"$synthetic_test"
+          [[ "$(classify_stack_thread "$selector" "$synthetic_test")" == other_or_unknown ]]
           printf '%s\n' "thread 'test' (123) panicked at src/runtime.rs:42:7:" \
             "private assertion in $RUNNER_TEMP/test-token" >"$synthetic_test"
           [[ "$(classify_test_failure "$selector" 101 "$synthetic_test")" == 'repo_panic src/runtime.rs:42:7' ]]
