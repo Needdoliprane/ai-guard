@@ -378,7 +378,7 @@ impl EnforcerClient {
             .map_err(LegacyNamedProspectiveFailure::StaleAcknowledged)
     }
 
-    /// Check one verified pending against the original named Import custody.
+    /// Check one verified pending by borrowing its original Writer birth.
     /// The response carries no reservation or permission.
     #[allow(
         dead_code,
@@ -386,7 +386,7 @@ impl EnforcerClient {
     )]
     pub(in crate::broker) async fn legacy_check_named_verification_prospective(
         &self,
-        birth: NamedImportVerificationArmBirthV2,
+        birth: &NamedImportVerificationArmBirthV2,
     ) -> Result<(), LegacyNamedProspectiveFailure> {
         use LegacyNamedProspectiveFailure::{
             BeforeSend, OutcomeUnknown, Refused, StaleAcknowledged,
@@ -394,8 +394,8 @@ impl EnforcerClient {
 
         self.legacy_require_new_prearm_identity()
             .map_err(BeforeSend)?;
-        let (facts, prospective, (cancel, generation)) =
-            birth.into_prospective_facts().map_err(BeforeSend)?;
+        let facts = birth.prospective_facts().map_err(BeforeSend)?;
+        let (cancel, generation) = birth.generation();
         let (_, import_arm) = facts.import_predecessor().map_err(BeforeSend)?;
         let (retained, import_custody_nonce) = {
             let entries = self
@@ -443,11 +443,11 @@ impl EnforcerClient {
                         import_custody_nonce,
                         generation,
                         facts,
-                        prospective,
+                        prospective: birth.target().clone(),
                     }),
                 },
                 IO_TIMEOUT,
-                Some((&cancel, generation)),
+                Some((cancel, generation)),
             )
             .await?;
         match reply {
@@ -1487,9 +1487,13 @@ impl EnforcerClient {
         } else {
             None
         };
+        let expected_head = recorded.job().head().clone();
+        let (expected_cancel, expected_generation) = recorded.generation();
+        let expected_cancel = expected_cancel.clone();
+        let expected_target = target.digest()?;
         let birth = NamedImportVerificationArmBirthV2::from_recorded(recorded, target)?;
         let checked = self
-            .legacy_check_named_verification_prospective(birth)
+            .legacy_check_named_verification_prospective(&birth)
             .await;
         if let Some(arm) = arm {
             assert_eq!(
@@ -1502,6 +1506,12 @@ impl EnforcerClient {
         } else {
             checked.map_err(LegacyNamedProspectiveFailure::code)?;
         }
+
+        assert_eq!(birth.job().head(), &expected_head);
+        let (_, target, (cancel, generation)) = birth.into_prospective_facts()?;
+        assert_eq!(target.digest()?, expected_target);
+        assert!(Arc::ptr_eq(&cancel.0, &expected_cancel.0));
+        assert_eq!(generation, expected_generation);
 
         let after = self.legacy_capabilities().await?;
         assert_eq!(after.epoch, before.epoch);

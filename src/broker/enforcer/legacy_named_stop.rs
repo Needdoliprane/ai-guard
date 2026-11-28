@@ -153,16 +153,11 @@ impl NamedImportVerificationArmBirthV2 {
         &self.prospective_hash
     }
 
-    /// Consume the confirmed birth. Keep the exact target and its generation
-    /// gate alongside the DTO in memory, ready for the separate transport.
-    pub(super) fn into_prospective_facts(
-        self,
-    ) -> EnforcerResult<(
-        NamedImportVerificationProspectiveFactsV2,
-        ProspectiveRegistrationV1,
-        (CancelGeneration, u64),
-    )> {
-        let job = self.recorded.job();
+    /// Project the exact wire facts from the still-owned Writer birth.
+    pub(super) fn prospective_facts(
+        &self,
+    ) -> EnforcerResult<NamedImportVerificationProspectiveFactsV2> {
+        let job = self.job();
         let named = job
             .broker_checkpoint_v3()
             .and_then(|checkpoint| checkpoint.broker().supervision().legacy_named_admission())
@@ -186,9 +181,21 @@ impl NamedImportVerificationArmBirthV2 {
             owned_snapshot_hash: named_import_stop_owned_hash(facts.owned())
                 .map_err(|_| EnforcerError::InvalidInput)?,
             runtime_binding_hash: facts.runtime_binding_hash().to_owned(),
-            prospective_hash: self.prospective_hash,
+            prospective_hash: self.prospective_hash.clone(),
         };
         data.validate_target(job.scope(), &self.target)?;
+        Ok(data)
+    }
+
+    #[cfg(test)]
+    pub(super) fn into_prospective_facts(
+        self,
+    ) -> EnforcerResult<(
+        NamedImportVerificationProspectiveFactsV2,
+        ProspectiveRegistrationV1,
+        (CancelGeneration, u64),
+    )> {
+        let data = self.prospective_facts()?;
         let (cancel, generation) = self.recorded.generation();
         Ok((data, self.target, (cancel.clone(), generation)))
     }
