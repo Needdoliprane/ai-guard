@@ -67,6 +67,8 @@ jobs:
           }
           clean_line() {
             sed -E \
+              -e "s#${RUNNER_TEMP//\//\\/}/[^[:space:]\"']+#[runner-temp-path]#g" \
+              -e "s#/home/runner/work/_temp/[^[:space:]\"']+#[runner-temp-path]#g" \
               -e "s#/home/runner/work/[^[:space:]\"']+#[workspace-path]#g" \
               -e "s#/tmp/[^[:space:]\"']+#[scratch-path]#g" \
               -e "s#Bearer[[:space:]]+[A-Za-z0-9._~+/-]+=*#Bearer [REDACTED]#Ig" \
@@ -78,46 +80,45 @@ jobs:
             local report
             report=$(jq -cs '[.[] | select(.reason == "compiler-message"
                 and .message.level == "error") | .message as $m |
-                {code: ($m.code.code // "rustc_or_link"),
-                 message: (($m.message // "")
-                   | gsub("/home/runner/work/[^[:space:]\\\"]+"; "[workspace-path]")
-                   | gsub("/tmp/[^[:space:]\\\"]+"; "[scratch-path]")
-                   | gsub("Bearer[[:space:]]+[A-Za-z0-9._~+/-]+=*"; "Bearer [REDACTED]")
-                   | gsub("(?i)(token|secret|password|api[_-]?key)[[:space:]\\\"=:]+[A-Za-z0-9._~+/-]{8,}"; "[REDACTED]")
-                   | gsub("sk-[A-Za-z0-9_-]{16,}"; "[REDACTED]")
-                   | gsub("gh[pousr]_[A-Za-z0-9]{20,}"; "[REDACTED]") | .[0:240]),
-                 files: [$m.spans[]? | select(.file_name | test("^(src|tests|examples)/"))
+                ($m.code.code // "") as $code |
+                select($code | test("^E[0-9]{4}$")) |
+                {category: "rustc_error", code: $code,
+                 files: [$m.spans[]? | select(.file_name | test("^(src|tests|examples)/[A-Za-z0-9_./-]+\\.rs$"))
+                   | select(.file_name | (contains("/../") or endswith("/..") | not))
                    | {file: .file_name, line: .line_start, column: .column_start}]}] | .[0:24]' "$1") || return 1
             printf 'rust_diagnostics=%s\n' "$report"
           }
           emit_link_disk_diagnostics() {
-            local source="$1" line count=0
-            while IFS= read -r line; do
-              [[ -n "$line" ]] || continue
-              line=$(printf '%s' "$line" | clean_line | cut -c1-240)
-              printf 'build_stderr=%s\n' "$line"
-              count=$((count + 1))
-              [[ "$count" -lt 12 ]] || break
-            done < <(grep -Ei '(^|[[:space:]])error:|linker.*failed|ld:|rustc-LLVM ERROR|No space left on device|disk quota|failed to write|could not compile' "$source" | head -n 12 || true)
+            local source="$1"
+            if grep -Eiq 'No space left on device|disk quota|failed to write' "$source"; then
+              printf 'build_category=disk_exhaustion\n'
+            fi
+            if grep -Eiq 'linker.*failed|linking with .* failed|ld:|rustc-LLVM ERROR|could not compile' "$source"; then
+              printf 'build_category=linker_or_compiler_failure\n'
+            fi
           }
           scratch=
           diagnostic_scratch=$(mktemp -d "$RUNNER_TEMP/g04-diagnostic-filter.XXXXXXXX")
           chmod 700 "$diagnostic_scratch"
           trap 'if [[ -n "$scratch" ]]; then rm -rf -- "$scratch"; fi; rm -rf -- "$diagnostic_scratch"' EXIT
           synthetic_json="$diagnostic_scratch/synthetic.jsonl"
-          jq -nc '{reason:"compiler-message",message:{level:"error",code:{code:"E0001"},message:"synthetic Bearer synthetic-token-secret-1234567890",spans:[{file_name:"src/runtime/managed.rs",line_start:73,column_start:2}],rendered:"[private rendered compiler output omitted]"}}' >"$synthetic_json"
+          jq -nc '{reason:"compiler-message",message:{level:"error",code:{code:"E0001"},message:"synthetic Bearer synthetic-token-secret-1234567890",spans:[{file_name:"src/runtime/managed.rs",line_start:73,column_start:2},{file_name:"/tmp/private.rs",line_start:1,column_start:1}],rendered:"[private rendered compiler output omitted]"}}' >"$synthetic_json"
           synthetic_report=$(emit_cargo_errors "$synthetic_json")
           [[ "$synthetic_report" == *E0001* && "$synthetic_report" == *src/runtime/managed.rs* &&
              "$synthetic_report" != *synthetic-token-secret* && "$synthetic_report" != *'/tmp/'* &&
-             "$synthetic_report" == *REDACTED* ]]
+             "$synthetic_report" == *rustc_error* ]]
           synthetic_stderr="$diagnostic_scratch/synthetic.stderr"
           printf 'rustc-LLVM ERROR: synthetic linker failure at %s\nNo space left on device: %s\n' \
-            "$diagnostic_scratch/target" "$diagnostic_scratch/target" >"$synthetic_stderr"
+            "$RUNNER_TEMP/g04-diagnostic-filter/target" "$RUNNER_TEMP/g04-diagnostic-filter/target" >"$synthetic_stderr"
           synthetic_link_report=$(emit_link_disk_diagnostics "$synthetic_stderr")
-          [[ "$synthetic_link_report" == *'rustc-LLVM ERROR'* &&
-             "$synthetic_link_report" == *'No space left on device'* &&
-             "$synthetic_link_report" != *"$diagnostic_scratch"* &&
-             "$synthetic_link_report" == *'[scratch-path]'* ]]
+          synthetic_path_report=$(printf '%s\n' "$RUNNER_TEMP/g04-diagnostic-filter/target" | clean_line)
+          synthetic_github_temp_report=$(printf '%s\n' '/home/runner/work/_temp/g04-diagnostic-filter/target' | clean_line)
+          [[ "$synthetic_link_report" == *linker_or_compiler_failure* &&
+             "$synthetic_link_report" == *disk_exhaustion* &&
+             "$synthetic_path_report" == *'[runner-temp-path]'* &&
+             "$synthetic_path_report" != *"$RUNNER_TEMP"* &&
+             "$synthetic_github_temp_report" == *'[runner-temp-path]'* &&
+             "$synthetic_github_temp_report" != *'/home/runner/work/_temp'* ]]
           printf 'diagnostic_filter_selftest=PASS\n'
           scratch=$(mktemp -d "$RUNNER_TEMP/g04-named-runtime-create.XXXXXXXX")
           chmod 700 "$scratch"
