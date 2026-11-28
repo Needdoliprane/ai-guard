@@ -38,13 +38,12 @@ async fn named_verification_arm_writer_retains_one_birth_and_only_replays_after_
             lose_reply,
         })))
         .await
-        .map_err(|failure| {
+        .inspect_err(|failure| {
             let phase = failure
                 .downcast_ref::<ArmWriterPhase>()
                 .copied()
                 .unwrap_or(ArmWriterPhase("fixture_prefix"));
             eprintln!("\ng04_oracle_failure_phase={phase}");
-            anyhow::anyhow!("named verification Arm Writer oracle failed")
         })?;
     }
     Ok(())
@@ -476,17 +475,29 @@ async fn exercise_arm_writer(
     if let Some(confirmation) = confirmation {
         assert_eq!(confirmation.generation().0.current(), stopped_generation);
     }
-    let stop = writer
-        .stops()
-        .append_cancel(CancelInputV1::new(operation, Uuid::new_v4())?)
-        .await
-        .map_err(|failure| failure.error())
-        .context(ArmWriterPhase("stop_append"))?;
-    let stop_head = stop.receipt().head().clone();
+    let stop_id = Uuid::new_v4();
+    let stop_head = {
+        let stop = writer
+            .stops()
+            .append_cancel(CancelInputV1::new(operation, stop_id)?)
+            .await
+            .map_err(|failure| failure.error())
+            .context(ArmWriterPhase("stop_append"))?;
+        // The projection shares the writer lock. Keep only the durable head
+        // across reopening so the new writer acquires its own lease.
+        stop.receipt().head().clone()
+    };
     assert_eq!(stop_head.revision(), arm_head.revision() + 1);
     let reopened = reopen_writer(root, writer)
         .await
         .context(ArmWriterPhase("cold_reopen"))?;
+    let cold_stop = reopened
+        .stops()
+        .cancel_stop_projection(operation, stop_id)
+        .await
+        .context(ArmWriterPhase("replay_after_stop"))?
+        .context(ArmWriterPhase("replay_after_stop"))?;
+    assert_eq!(cold_stop.receipt().head(), &stop_head);
     assert_replayed(
         reopened
             .record_legacy_named_import_verification_arm(
