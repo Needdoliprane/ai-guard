@@ -46,10 +46,15 @@ mod cold_audit;
 mod legacy_named_admission;
 #[allow(
     unused_imports,
+    reason = "the named runtime caller consumes the one-shot Create authorization separately"
+)]
+pub(crate) use legacy_named_admission::AuthorizedLegacyNamedImportCreate;
+#[allow(
+    unused_imports,
     reason = "the named Presence caller is composed separately"
 )]
-pub(crate) use legacy_named_admission::{
-    AuthorizedLegacyNamedImportCreate, NamedImportArmWriteFailure, RecordedLegacyNamedImportArm,
+pub(in crate::broker) use legacy_named_admission::{
+    NamedImportArmWriteFailure, RecordedLegacyNamedImportArm,
     RecordedLegacyNamedImportVerificationPlan,
 };
 mod queue;
