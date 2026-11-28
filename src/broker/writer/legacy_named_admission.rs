@@ -12,7 +12,7 @@ use crate::{
             LegacyNamedImportVerificationPlanV1, SupervisionCheckpointV1, SupervisionOperationV1,
         },
         enforcer::CancelGeneration,
-        journal::{AcceptedJobV1, RevisionRefV1, canonical, digest},
+        journal::{AcceptedJobV1, RevisionRefV1, canonical},
         lifecycle::LocalCommandRequestV1,
     },
     control::{
@@ -25,7 +25,7 @@ use crate::{
             LegacyNamedSupervisedAdmissionV1,
         },
     },
-    runtime::{OwnedContainerSnapshot, RuntimeAuthority},
+    runtime::{NamedImportVerificationCreated, OwnedContainerSnapshot, RuntimeAuthority},
 };
 use uuid::Uuid;
 
@@ -775,10 +775,7 @@ impl WriterClient {
                         .policy();
                     let helper_id =
                         Uuid::parse_str(&policy.helper_id).map_err(|_| JournalError::Corrupt)?;
-                    let facts_hash = digest(
-                        "legacy-named-import-verification-create-token-v1",
-                        &canonical(saved)?,
-                    );
+                    let facts_hash = saved.facts_hash()?;
                     let policy_hash = policy.spec_hash().map_err(|_| JournalError::Corrupt)?;
                     let readonly_spec_hash =
                         super::super::checkpoint::import_verification_spec_hash(policy)?;
@@ -812,6 +809,59 @@ impl WriterClient {
                         .map_err(|_| JournalError::Interrupted)?;
                     return Ok(Some(authorization));
                 }
+                Err(LifecycleWriteFailure::BeforePublication(JournalError::Conflict)) => continue,
+                Err(failure) => return Err(failure.journal_error()),
+            }
+        }
+        Err(JournalError::Conflict)
+    }
+
+    /// Retain the exact runtime observation in the original accepted job's
+    /// scope. A concurrent STOP can advance the head while the observation
+    /// remains eligible for retention. Success confirms the snapshot only.
+    #[allow(
+        dead_code,
+        reason = "the named verification Service caller is composed separately"
+    )]
+    pub(in crate::broker) async fn acknowledge_legacy_named_import_verification_created(
+        &self,
+        admitted: &AcceptedJobV1,
+        created: NamedImportVerificationCreated,
+    ) -> JournalResult<()> {
+        let (operation, create_facts_hash, binding, owned) = created.into_writer_parts();
+        let plan = admitted
+            .intent()
+            .legacy_named_plan()
+            .ok_or(JournalError::Conflict)?;
+        let scope = canonical(admitted.scope())?;
+        if operation != admitted.operation_id()
+            || operation != plan.operation_id
+            || canonical(self.scope())? != scope
+        {
+            return Err(JournalError::Conflict);
+        }
+
+        for _ in 0..ACK_CAS_ATTEMPTS {
+            let job = self.load_named_job(plan).await?;
+            if job.intent_hash() != admitted.intent_hash() || canonical(job.scope())? != scope {
+                return Err(JournalError::Conflict);
+            }
+            let current = super::lifecycle(&job)?;
+            let retained = retained_admission(&job)?;
+            let acknowledged = retained.clone().with_import_verification_created(
+                &create_facts_hash,
+                &binding,
+                owned.clone(),
+            )?;
+            if retained.import_verification_created().is_some() {
+                return Ok(());
+            }
+            let next = with_admission(&current, acknowledged)?;
+            match self
+                .advance_lifecycle_with_publication(operation, job.head().clone(), next)
+                .await
+            {
+                Ok(_) => return Ok(()),
                 Err(LifecycleWriteFailure::BeforePublication(JournalError::Conflict)) => continue,
                 Err(failure) => return Err(failure.journal_error()),
             }
