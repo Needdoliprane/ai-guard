@@ -110,10 +110,10 @@ impl fmt::Display for CommitUncertain {
 impl std::error::Error for CommitUncertain {}
 
 #[derive(Debug)]
-struct AuditChainMismatch {
+pub(super) struct AuditChainMismatch {
     prefix: AuditHead,
     sequence: i64,
-    reason: &'static str,
+    pub(super) reason: &'static str,
 }
 
 impl fmt::Display for AuditChainMismatch {

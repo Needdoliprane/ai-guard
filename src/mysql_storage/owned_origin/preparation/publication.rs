@@ -15,7 +15,8 @@ use super::{CheckedEmptyTarget, audit_manifest};
 use crate::audit::event_codec::prepare_event;
 use crate::model::Event;
 use crate::mysql_storage::audit::{
-    AuditHead, EventColumns, decode_event_columns, owned_genesis_event, require_owned_genesis,
+    AuditChainMismatch, AuditHead, EventColumns, decode_event_columns, owned_genesis_event,
+    require_owned_genesis,
 };
 use crate::redaction::Redactor;
 use anyhow::{Context, Result, anyhow, ensure};
@@ -259,7 +260,13 @@ fn verify_owned_origin_prefix(
     let mut head = AuditHead::empty();
     for columns in rows {
         let encoded = decode_event_columns(columns)?;
-        head = encoded.verify_next_head(head)?;
+        // Fresh preparation preserves its descriptive mismatch contract.
+        head = encoded.verify_next_head(head).map_err(|error| {
+            match error.downcast::<AuditChainMismatch>() {
+                Ok(mismatch) => anyhow::Error::msg(mismatch.reason),
+                Err(error) => error,
+            }
+        })?;
         let stored = &encoded.stored;
         if head.seq == 1 {
             require_owned_genesis(&stored.event, &request.tenant_id, &namespace)?;
@@ -387,11 +394,21 @@ mod tests {
         let draft = origin_draft(&request)?;
         let [genesis, anchor] = origin_rows(&draft)?;
         let disconnected = encoded_origin_row(2, "f".repeat(64), draft.event().clone())?;
-        assert!(verify_owned_origin_prefix([genesis.clone(), disconnected], &draft).is_err());
+        let mut changed_sequence = anchor.clone();
+        changed_sequence.0 = 3;
 
         let mut changed_head = anchor;
         changed_head.4 = "f".repeat(64);
-        assert!(verify_owned_origin_prefix([genesis, changed_head], &draft).is_err());
+        for (row, message) in [
+            (disconnected, "MySQL audit previous hash mismatch"),
+            (changed_sequence, "MySQL audit chain mismatch"),
+            (changed_head, "MySQL audit chain mismatch"),
+        ] {
+            let error = verify_owned_origin_prefix([genesis.clone(), row], &draft)
+                .expect_err("divergent audit link must be refused");
+            assert_eq!(error.to_string(), message);
+            assert!(error.downcast_ref::<AuditChainMismatch>().is_none());
+        }
         Ok(())
     }
 
