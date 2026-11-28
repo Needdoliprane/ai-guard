@@ -1936,17 +1936,28 @@ async fn named_import_arm_fixture(verify_import_arm: bool) {
             ..named_claim.claim.clone()
         };
         assert!(store.claim_helper_start(&helper_claim).is_err());
+        let create = WorkerMutationV1 {
+            version: 1,
+            operation_id: Uuid::new_v4().to_string(),
+            worker_id: prepared.worker_id.clone(),
+            attempt_id: prepared.attempt.attempt_id.clone(),
+            expected_revision: prepared.revision,
+            transition: WorkerTransitionV1::CreateIssued,
+        };
+        let blocked = store.mutate_worker(&create).unwrap_err();
+        assert_eq!(
+            blocked.downcast_ref::<ControlFailure>(),
+            Some(&ControlFailure::Conflict)
+        );
+        assert_eq!(
+            blocked.to_string(),
+            "check manual ownership before generic worker creation"
+        );
         assert!(
             store
-                .mutate_worker(&WorkerMutationV1 {
-                    version: 1,
-                    operation_id: Uuid::new_v4().to_string(),
-                    worker_id: prepared.worker_id.clone(),
-                    attempt_id: prepared.attempt.attempt_id.clone(),
-                    expected_revision: prepared.revision,
-                    transition: WorkerTransitionV1::CreateIssued,
-                })
-                .is_err()
+                .worker_operation(&create.operation_id)
+                .unwrap()
+                .is_none()
         );
         assert_eq!(store.head().unwrap(), accepted.receipt.audit_seq);
         Some((verification, accepted.receipt))

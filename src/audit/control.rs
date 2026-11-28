@@ -521,7 +521,9 @@ pub(super) fn validate(db: &Connection) -> anyhow::Result<()> {
                 "invalid control revision or immutable identity"
             );
             if let Some(previous) = previous {
-                if stored.event.kind == "control.worker.transition" && record.action == "prepare" {
+                if stored.event.kind == "control.worker.transition"
+                    && matches!(record.action.as_str(), "prepare" | "create_issued")
+                {
                     super::legacy_session_prepare::protect_manual_at(
                         db,
                         &previous.admission_operation_id,
@@ -1632,6 +1634,12 @@ impl Store {
                 )?;
             }
             if matches!(&mutation.transition, WorkerTransitionV1::CreateIssued) {
+                super::legacy_session_prepare::protect_manual(
+                    &tx,
+                    &worker.admission_operation_id,
+                    &worker.launch.session_id,
+                )
+                .context("check manual ownership before generic worker creation")?;
                 supervision::can_create(&tx, &worker)?;
             }
         }
