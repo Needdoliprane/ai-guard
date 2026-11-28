@@ -10,11 +10,12 @@ use super::{
 use crate::control_fs::Directory;
 use crate::{
     provider_activity::{
-        ActivityClient, ActivityCollector, ActivityContext, ActivityLimits, ActivitySpool, HookAck,
-        HookFrame, HookTransport, pump_hooks,
+        ActivityChannel, ActivityClient, ActivityCollector, ActivityContext, ActivityLimits,
+        ActivitySpool, Admission, HookAck, HookFrame, HookPumpOutcome, HookTransport, pump_hooks,
     },
     redaction::Redactor,
 };
+use anyhow::Context;
 use serde_json::json;
 use std::{
     ffi::OsString,
@@ -511,25 +512,37 @@ impl Broker {
         )
     }
 
-    async fn next(&mut self) -> Option<HelperFrameV1> {
+    async fn read_frame(&mut self) -> Result<Option<HelperFrameV1>, WireError> {
         timeout(WAIT, self.reader.read(&mut self.input))
             .await
-            .expect("helper frame within the harness wait")
-            .expect("valid helper frame")
+            .map_err(|_| WireError::Timeout)?
+    }
+
+    async fn next(&mut self) -> Option<HelperFrameV1> {
+        self.read_frame().await.expect("valid helper frame")
+    }
+
+    async fn write_frame(&mut self, frame: BrokerFrameV1) -> Result<(), WireError> {
+        let output = self.output.as_mut().ok_or(WireError::Closed)?;
+        self.writer.write(output, &frame).await
     }
 
     async fn send(&mut self, frame: BrokerFrameV1) {
-        let output = self.output.as_mut().unwrap();
-        self.writer.write(output, &frame).await.unwrap();
+        self.write_frame(frame).await.unwrap();
+    }
+
+    async fn send_ready(&mut self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.read_frame().await? == Some(HelperFrameV1::Hello(HelloV1 { version: 1 })),
+            "expected the helper hello"
+        );
+        self.write_frame(BrokerFrameV1::Ready(ReadyV1 { version: 1 }))
+            .await?;
+        Ok(())
     }
 
     async fn ready(&mut self) {
-        assert_eq!(
-            self.next().await,
-            Some(HelperFrameV1::Hello(HelloV1 { version: 1 }))
-        );
-        self.send(BrokerFrameV1::Ready(ReadyV1 { version: 1 }))
-            .await;
+        self.send_ready().await.expect("ready helper fixture");
     }
 
     async fn hook(&mut self) -> HookV1 {
@@ -989,33 +1002,34 @@ async fn a_recorded_gate_process_exits_zero_without_any_output() {
     assert_eq!(join(task).await, Ok(()));
 }
 
-/// The parent-side adapter used by the real activity pump in the SessionStart
-/// fixture. It preserves the helper's sequence and payload and routes the
-/// pump's recorded/refused decision back over the real helper socket.
-struct PumpBroker {
+/// Connect the real activity pump to the fixture helper and await the hook
+/// process before closing the helper's input.
+struct PumpBroker<'a> {
     broker: Broker,
     root: PathBuf,
-    child: Option<JoinHandle<ProcessResult>>,
+    child: &'a mut Option<JoinHandle<ProcessResult>>,
     child_result: Option<oneshot::Sender<ChildObservation>>,
-    ack_sent: bool,
+    expected_event: EventV1,
+    sent_ack: Option<HookAck>,
 }
 
 struct ChildObservation {
     result: ProcessResult,
+    ack: HookAck,
     loss_entries: usize,
 }
 
-impl HookTransport for PumpBroker {
+impl HookTransport for PumpBroker<'_> {
     async fn next(&mut self) -> anyhow::Result<Option<HookFrame>> {
-        if self.ack_sent {
-            self.ack_sent = false;
-            let child = self
+        if let Some(ack) = self.sent_ack.take() {
+            let result = self
                 .child
-                .take()
-                .ok_or_else(|| anyhow::anyhow!("fixture child is missing"))?;
-            let result = child
+                .as_mut()
+                .context("fixture child is missing")?
                 .await
-                .map_err(|_| anyhow::anyhow!("fixture child task failed"))?;
+                .map_err(|_| anyhow::anyhow!("fixture child task failed"));
+            *self.child = None;
+            let result = result?;
             let loss_entries = std::fs::read_dir(self.root.join(LOSS_DIRECTORY))?
                 .collect::<std::io::Result<Vec<_>>>()?
                 .len();
@@ -1024,6 +1038,7 @@ impl HookTransport for PumpBroker {
                 .ok_or_else(|| anyhow::anyhow!("fixture child observer is missing"))?
                 .send(ChildObservation {
                     result,
+                    ack,
                     loss_entries,
                 })
                 .map_err(|_| anyhow::anyhow!("fixture child observer was dropped"))?;
@@ -1033,16 +1048,16 @@ impl HookTransport for PumpBroker {
             self.broker.output.take();
         }
 
-        match self.broker.next().await {
+        match self.broker.read_frame().await? {
             Some(HelperFrameV1::Hook(hook)) => {
                 anyhow::ensure!(hook.seq == 1, "expected the first helper sequence");
                 anyhow::ensure!(
                     hook.submit.client == ClientV1::ClaudeCode
-                        && hook.submit.event == EventV1::SessionStart
-                        && !hook.submit.gate
+                        && hook.submit.event == self.expected_event
+                        && hook.submit.gate == self.expected_event.is_gate()
                         && !hook.submit.stdin_truncated
                         && !hook.submit.payload_invalid_utf8,
-                    "expected a complete Claude SessionStart"
+                    "expected one complete Claude hook of the requested kind"
                 );
                 Ok(Some(HookFrame::Hook {
                     seq: hook.seq,
@@ -1057,7 +1072,7 @@ impl HookTransport for PumpBroker {
                 reason: format!("{:?}", loss.reason),
             })),
             None => Ok(None),
-            other => anyhow::bail!("expected one Claude hook frame, got {other:?}"),
+            Some(HelperFrameV1::Hello(_)) => anyhow::bail!("duplicate helper hello"),
         }
     }
 
@@ -1066,40 +1081,74 @@ impl HookTransport for PumpBroker {
             HookAck::Recorded => StatusV1::Recorded,
             HookAck::Refused => StatusV1::Refused,
         };
-        self.broker.ack(seq, status).await;
-        self.ack_sent = true;
+        self.broker
+            .write_frame(BrokerFrameV1::Ack(AckV1 { seq, status }))
+            .await?;
+        self.sent_ack = Some(ack);
         Ok(())
     }
 }
 
-impl Drop for PumpBroker {
-    fn drop(&mut self) {
-        if let Some(child) = self.child.take() {
-            child.abort();
+async fn collect_claude_hook(
+    root: &Directory,
+    collector: &ActivityCollector,
+    event: EventV1,
+    payload: &'static [u8],
+    after_ready: impl FnOnce() -> anyhow::Result<()>,
+) -> anyhow::Result<(HookPumpOutcome, ChildObservation)> {
+    let (mut broker, mut helper) = Broker::start(root.clone());
+    // Keep the task handles outside the exchange timeout for bounded cleanup.
+    let mut child = None;
+    let result = timeout(WAIT, async {
+        broker.send_ready().await?;
+        let socket = root.path().join(SOCKET_NAME);
+        while !socket.exists() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
         }
+        after_ready()?;
+        let hook_root = root.path().to_owned();
+        let arguments = format!("claude-code {}", event.as_str());
+        child = Some(tokio::spawn(async move {
+            hook_process(&hook_root, &arguments, payload).await
+        }));
+        let (child_result_tx, child_result_rx) = oneshot::channel();
+        let transport = PumpBroker {
+            broker,
+            root: root.path().to_owned(),
+            child: &mut child,
+            child_result: Some(child_result_tx),
+            expected_event: event,
+            sent_ack: None,
+        };
+        let outcome = pump_hooks(collector.clone(), transport).await;
+        let observation = child_result_rx
+            .await
+            .context("fixture hook did not complete")?;
+        Ok::<_, anyhow::Error>((outcome, observation))
+    })
+    .await;
+
+    if let Some(mut child) = child {
+        child.abort();
+        let _ = timeout(WAIT, &mut child).await;
     }
+    let helper_result = timeout(WAIT, &mut helper).await;
+    if helper_result.is_err() {
+        helper.abort();
+        let _ = timeout(WAIT, &mut helper).await;
+    }
+
+    let (outcome, observation) = result.context("fixture hook exchange timed out")??;
+    helper_result
+        .context("fixture helper did not close")?
+        .context("fixture helper task failed")??;
+    Ok((outcome, observation))
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn claude_session_start_is_spooled_and_acked_by_the_parent_pump() {
-    let (_temporary, root) = fixture_root();
-    let (_spool_temporary, spool_root) = fixture_root();
-    let (mut broker, helper) = Broker::start(root.clone());
-    broker.ready().await;
-
-    let hook_root = root.path().to_owned();
-    let hook_process = tokio::spawn(async move {
-        hook_process(
-            &hook_root,
-            "claude-code SessionStart",
-            br#"{"hook_event_name":"SessionStart","session_id":"fixture-session","source":"startup","model":"fixture-model"}"#,
-        )
-        .await
-    });
-
+fn claude_hook_collector(spool_root: &Directory, limits: ActivityLimits) -> ActivityCollector {
     let session = uuid::Uuid::new_v4();
-    let collector = ActivityCollector::new(
-        ActivitySpool::create(&spool_root, session).unwrap(),
+    ActivityCollector::new(
+        ActivitySpool::create(spool_root, session).unwrap(),
         ActivityContext {
             session,
             session_id: Some("fixture-session".into()),
@@ -1115,24 +1164,30 @@ async fn claude_session_start_is_spooled_and_acked_by_the_parent_pump() {
             client_version_label: Some("fixture".into()),
         },
         Redactor::new(Vec::new()),
-        ActivityLimits::default(),
+        limits,
     )
-    .unwrap();
-    let (child_result_tx, child_result_rx) = oneshot::channel();
-    let transport = PumpBroker {
-        broker,
-        root: root.path().to_owned(),
-        child: Some(hook_process),
-        child_result: Some(child_result_tx),
-        ack_sent: false,
-    };
+    .unwrap()
+}
 
-    let outcome = pump_hooks(collector.clone(), transport).await;
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn claude_session_start_is_spooled_and_acked_by_the_parent_pump() {
+    let (_temporary, root) = fixture_root();
+    let (_spool_temporary, spool_root) = fixture_root();
+    let collector = claude_hook_collector(&spool_root, ActivityLimits::default());
+    let (outcome, child) = collect_claude_hook(
+        &root,
+        &collector,
+        EventV1::SessionStart,
+        br#"{"hook_event_name":"SessionStart","session_id":"fixture-session","source":"startup","model":"fixture-model"}"#,
+        || Ok(()),
+    )
+    .await
+    .unwrap();
     assert_eq!(outcome.hooks, 1);
     assert_eq!(outcome.recorded, 1);
     assert_eq!(outcome.refused, 0);
     assert!(!outcome.transport_error);
-    let child = child_result_rx.await.unwrap();
+    assert_eq!(child.ack, HookAck::Recorded);
     let result = child.result;
     assert_eq!(result.code, Some(EXIT_CONTINUE));
     assert!(result.stderr.is_empty());
@@ -1149,11 +1204,71 @@ async fn claude_session_start_is_spooled_and_acked_by_the_parent_pump() {
         summary.spooled_events > 0,
         "SessionStart must be durably spooled before ACK"
     );
+}
 
-    // Dropping the transport closes the broker side; the helper must then
-    // finish cleanly after the hook client received the pump's ACK.
-    drop(collector);
-    assert_eq!(join(helper).await, Ok(()));
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn claude_pre_tool_use_is_refused_when_spool_backlog_is_full() -> anyhow::Result<()> {
+    let (_temporary, root) = fixture_root();
+    let (_spool_temporary, spool_root) = fixture_root();
+    let collector = claude_hook_collector(
+        &spool_root,
+        ActivityLimits {
+            max_events: 1,
+            max_backlog_events: 1,
+            ..ActivityLimits::default()
+        },
+    );
+    let mut entries = std::fs::read_dir(spool_root.path())?;
+    let spool_path = entries.next().context("fixture spool is missing")??.path();
+    anyhow::ensure!(entries.next().is_none(), "expected only the fixture spool");
+
+    let mut before = None;
+    let (outcome, child) = collect_claude_hook(
+        &root,
+        &collector,
+        EventV1::PreToolUse,
+        br#"{"hook_event_name":"PreToolUse","session_id":"fixture-session","tool_name":"Read","tool_use_id":"toolu_fixture","tool_input":{"file_path":"fixture.txt"}}"#,
+        || {
+            anyhow::ensure!(!collector.audit_unavailable(), "fixture spool starts available");
+            anyhow::ensure!(
+                collector.channel_state(ActivityChannel::Stdout, "opened", None)
+                    == Admission::Recorded,
+                "seed the fixture backlog with one durable record"
+            );
+            anyhow::ensure!(collector.audit_unavailable(), "fixture backlog must be full");
+            // Retain the reserved exhaustion record before measuring the head.
+            // Later hook lifecycle records cannot advance this exhausted spool.
+            anyhow::ensure!(
+                collector.channel_state(ActivityChannel::Stdout, "closed", None)
+                    == Admission::Dropped,
+                "fixture session budget must be exhausted"
+            );
+            before = Some(std::fs::read(&spool_path)?);
+            Ok(())
+        },
+    )
+    .await?;
+
+    assert_eq!(outcome.hooks, 1);
+    assert_eq!(outcome.recorded, 0);
+    assert_eq!(outcome.refused, 1);
+    assert_eq!(outcome.unrecorded_gates, 0);
+    assert_eq!(outcome.sequence_gaps, 0);
+    assert_eq!(outcome.declared_losses, 0);
+    assert!(!outcome.transport_error);
+    assert_eq!(child.ack, HookAck::Refused);
+    assert_eq!(child.result.code, Some(EXIT_BLOCK));
+    assert!(child.result.stderr.as_slice() == BLOCKED_LINE);
+    assert!(child.result.stdout_after_start.is_empty());
+    assert!(child.result.elapsed < hook::GATE_DEADLINE);
+    assert_eq!(child.loss_entries, 0);
+
+    let summary = collector.summary()?;
+    assert!(summary.audit_unavailable && summary.budget_exhausted);
+    assert_eq!(summary.hook.refused, 1);
+    assert_eq!(summary.hook.dropped, 0);
+    assert!(std::fs::read(&spool_path)? == before.context("fixture spool head was not captured")?);
+    Ok(())
 }
 
 /// Internal child of the process tests above; not a provider qualification.
