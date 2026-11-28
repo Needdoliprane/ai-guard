@@ -713,6 +713,35 @@ async fn full_retire_waiters_and_eof_do_not_exhaust_independent_stop_admission()
     fixture.finish().await;
 }
 
+#[tokio::test]
+async fn full3_terminal_query_requires_more_than_an_acknowledged_stop() -> EnforcerResult<()> {
+    use super::super::recovery::recovery_v3;
+    let mut fixture = OriginalIpcFixture::start().await;
+    let client = fixture.client().await;
+    let registration = registration(fixture.root.path());
+    fixture.install(&registration, false);
+    let observed = async {
+        let _slot = fixture
+            .register_new(&client, registration.clone(), CancelGeneration::new())
+            .await?;
+        let stop =
+            recovery_v3::deliver_synthetic_stop_only_for_test(&fixture.root, registration).await?;
+        let wrong_epoch =
+            recovery_v3::query_full3_terminal_for_fixture(&fixture.root, Uuid::new_v4(), &stop)
+                .await;
+        let no_observation =
+            recovery_v3::query_full3_terminal_for_fixture(&fixture.root, client.epoch(), &stop)
+                .await;
+        Ok::<_, EnforcerError>((wrong_epoch, no_observation))
+    }
+    .await;
+    fixture.finish().await;
+    let (wrong_epoch, no_observation) = observed?;
+    assert_eq!(wrong_epoch, Err(EnforcerError::Conflict));
+    assert_eq!(no_observation, Err(EnforcerError::NotReady));
+    Ok(())
+}
+
 fn registration(root: &Path) -> RegistrationV1 {
     let authority: RuntimeAuthority = serde_json::from_value(json!({
         "authority_id":Uuid::new_v4(),"kind":"docker","endpoint":format!("unix://{}",root.join("absent.sock").display()),
@@ -854,6 +883,8 @@ async fn tombstone_retains_capacity_until_real_handle_returns_then_q_is_replayab
                 stop_failures: 0,
             },
             gate,
+            durable_stop: None,
+            observed_after_durable_stop: false,
         }),
         wake: Condvar::new(),
         exit: AtomicBool::new(false),

@@ -4,7 +4,7 @@ use super::native_stop_failure::{CauseTarget, FailureFacts, NativeStopFailures};
 use super::*;
 use super::{
     ledger::{ClosingCommitted, LedgerCoverageV1, RetirementLedger, TombstoneCommitted},
-    recovery::RecoveryAttemptOwner,
+    recovery::{CancelReferenceV1, RecoveryAttemptOwner},
     server::lifetime::{ActorKey, NativeOwners},
 };
 use crate::{
@@ -104,6 +104,8 @@ fn data<T>(result: crate::broker::journal::JournalResult<T>) -> EnforcerResult<T
 struct ActorState {
     status: EnforcerSlotStatusV1,
     gate: OriginalGate,
+    durable_stop: Option<(u64, CancelReferenceV1)>,
+    observed_after_durable_stop: bool,
 }
 struct FullActor {
     registration: RegistrationV1,
@@ -590,6 +592,53 @@ impl FullState {
     ) -> EnforcerResult<EnforcerSlotStatusV1> {
         let actor = self.actor(arm_id, digest)?;
         let state = actor.state.lock().map_err(|_| EnforcerError::Unhealthy)?;
+        Ok(state.status.clone())
+    }
+
+    /// Return a native observation only if the actor began that inspection
+    /// after taking ownership of this exact durable STOP.
+    pub(super) fn terminal_after_durable_stop(
+        &self,
+        arm_id: &str,
+        digest: &str,
+        cancel: &CancelReferenceV1,
+    ) -> EnforcerResult<EnforcerSlotStatusV1> {
+        if self.admitted.recovery_generation().is_none() {
+            return Err(EnforcerError::NotReady);
+        }
+        let actor = self.actor(arm_id, digest)?;
+        if actor.key.epoch != self.epoch
+            || !matches!(&actor.registration.arm.subject, ArmSubjectV1::Worker)
+        {
+            return Err(EnforcerError::Conflict);
+        }
+        let state = actor.state.lock().map_err(|_| EnforcerError::Unhealthy)?;
+        if state.gate.is_closing()
+            || !state.gate.stop_reserved
+            || self.owners.failed()
+            || !actor.runtime_installed.load(Ordering::SeqCst)
+            || state.status.phase != SlotPhaseV1::Quarantined
+            || state
+                .durable_stop
+                .as_ref()
+                .is_none_or(|(generation, retained)| {
+                    *generation != state.status.generation || retained != cancel
+                })
+            || !state.observed_after_durable_stop
+        {
+            return Err(EnforcerError::NotReady);
+        }
+        let observation = state
+            .status
+            .observation
+            .as_ref()
+            .ok_or(EnforcerError::NotReady)?;
+        observation
+            .validate_terminal(
+                actor.registration.authority.kind,
+                &actor.registration.owned.observation,
+            )
+            .map_err(|_| EnforcerError::NotReady)?;
         Ok(state.status.clone())
     }
 
@@ -1210,12 +1259,45 @@ impl FullState {
     }
 
     pub(super) fn cancel(&self, arm_id: &str, digest: &str, generation: u64) -> EnforcerResult<()> {
+        self.reserve_cancel(arm_id, digest, generation, None)
+    }
+
+    pub(super) fn cancel_for_durable_stop(
+        &self,
+        arm_id: &str,
+        digest: &str,
+        generation: u64,
+        cancel: &CancelReferenceV1,
+    ) -> EnforcerResult<()> {
+        self.reserve_cancel(arm_id, digest, generation, Some(cancel))
+    }
+
+    fn reserve_cancel(
+        &self,
+        arm_id: &str,
+        digest: &str,
+        generation: u64,
+        cancel: Option<&CancelReferenceV1>,
+    ) -> EnforcerResult<()> {
         let actor = self.actor(arm_id, digest)?;
         let mut state = actor.state.lock().map_err(|_| EnforcerError::Unhealthy)?;
         if generation < state.status.generation {
             return Err(EnforcerError::Conflict);
         }
         state.gate.reserve_stop()?;
+        if generation != state.status.generation
+            || cancel.is_some_and(|cancel| {
+                state
+                    .durable_stop
+                    .as_ref()
+                    .is_none_or(|(retained_generation, retained)| {
+                        *retained_generation != generation || retained != cancel
+                    })
+            })
+        {
+            state.durable_stop = cancel.cloned().map(|cancel| (generation, cancel));
+            state.observed_after_durable_stop = false;
+        }
         state.status.generation = generation;
         state.status.phase = SlotPhaseV1::Stopping;
         actor.wake.notify_all();
@@ -1380,6 +1462,11 @@ impl FullActor {
             } else {
                 SlotPhaseV1::Ready
             };
+            let durable_stop = state
+                .durable_stop
+                .as_ref()
+                .filter(|(generation, _)| *generation == state.status.generation)
+                .cloned();
             drop(state);
             if stopping {
                 // The irreversible reservation happened under exactly the
@@ -1390,6 +1477,14 @@ impl FullActor {
                     managed.stop_snapshot_owned_native(&self.registration.owned),
                 );
                 let mut state = self.state.lock().map_err(|_| EnforcerError::Unhealthy)?;
+                // A STOP may have been delivered while native IO was in
+                // progress. The result can update diagnostics, but cannot
+                // attest the later STOP or a superseding generation.
+                state.observed_after_durable_stop = result.is_some()
+                    && state.durable_stop == durable_stop
+                    && durable_stop
+                        .as_ref()
+                        .is_some_and(|(generation, _)| *generation == state.status.generation);
                 match result {
                     Some(settled) => {
                         self.failures

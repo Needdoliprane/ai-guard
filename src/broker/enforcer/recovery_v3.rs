@@ -1244,34 +1244,7 @@ pub(in crate::broker::enforcer) async fn deliver_synthetic_stop_only_for_test(
             value: Box::new(value),
         },
     ] {
-        let endpoint = load_endpoint(root)?.ok_or(EnforcerError::Unavailable)?;
-        let endpoints = root
-            .persistent_child("endpoints", false)
-            .map_err(|_| EnforcerError::UnsafeFilesystem)?
-            .ok_or(EnforcerError::UnsafeFilesystem)?;
-        let mut stream = endpoint.connect_checked(&endpoints).await?;
-        let deadline = Instant::now() + HANDSHAKE_WINDOW;
-        let challenge = read_preface(&mut stream, time_left(deadline)?).await?;
-        if challenge.epoch != endpoint.epoch()
-            || challenge.root_binding != recovery_root_binding(root, &endpoint)?
-        {
-            return Err(EnforcerError::Unauthorized);
-        }
-        let session = client_handshake(
-            &mut stream,
-            &challenge,
-            &capability(root, false)?,
-            deadline,
-            RequestedRole::StopsOnly,
-            8,
-        )
-        .await?;
-        let mut connection = StopConnection {
-            stream,
-            epoch: challenge.epoch,
-            v3: Some(session),
-        };
-        match request(&mut connection, command).await? {
+        match request_stop_only_for_fixture(root, command).await? {
             ReplyValue3::StopReserved { value, .. } | ReplyValue3::StopAccepted { value } => {
                 output = Some(value)
             }
@@ -1280,6 +1253,63 @@ pub(in crate::broker::enforcer) async fn deliver_synthetic_stop_only_for_test(
         }
     }
     output.ok_or(EnforcerError::Unavailable)
+}
+
+#[cfg(test)]
+pub(in crate::broker::enforcer) async fn query_full3_terminal_for_fixture(
+    root: &Directory,
+    original_epoch: Uuid,
+    slot: &StopSlotV1,
+) -> EnforcerResult<()> {
+    let command = StopRequest::QueryFull3TerminalObservation {
+        arm_id: slot.arm_id.clone(),
+        registration_hash: slot.registration_hash.clone(),
+        original_epoch,
+        cancel: slot
+            .durable_cancel
+            .clone()
+            .ok_or(EnforcerError::InvalidInput)?,
+    };
+    match request_stop_only_for_fixture(root, command).await? {
+        ReplyValue3::Full3TerminalObservation { .. } => Ok(()),
+        ReplyValue3::Error { code } => Err(code),
+        _ => Err(EnforcerError::Unauthorized),
+    }
+}
+
+#[cfg(test)]
+async fn request_stop_only_for_fixture(
+    root: &Directory,
+    command: StopRequest,
+) -> EnforcerResult<ReplyValue3> {
+    let endpoint = load_endpoint(root)?.ok_or(EnforcerError::Unavailable)?;
+    let endpoints = root
+        .persistent_child("endpoints", false)
+        .map_err(|_| EnforcerError::UnsafeFilesystem)?
+        .ok_or(EnforcerError::UnsafeFilesystem)?;
+    let mut stream = endpoint.connect_checked(&endpoints).await?;
+    let deadline = Instant::now() + HANDSHAKE_WINDOW;
+    let challenge = read_preface(&mut stream, time_left(deadline)?).await?;
+    if challenge.epoch != endpoint.epoch()
+        || challenge.root_binding != recovery_root_binding(root, &endpoint)?
+    {
+        return Err(EnforcerError::Unauthorized);
+    }
+    let session = client_handshake(
+        &mut stream,
+        &challenge,
+        &capability(root, false)?,
+        deadline,
+        RequestedRole::StopsOnly,
+        8,
+    )
+    .await?;
+    let mut connection = StopConnection {
+        stream,
+        epoch: challenge.epoch,
+        v3: Some(session),
+    };
+    request(&mut connection, command).await
 }
 
 pub(in crate::broker::enforcer) struct FullWatchReader {
@@ -1746,6 +1776,9 @@ pub(super) enum ReplyValue3 {
     StopAccepted {
         value: StopSlotV1,
     },
+    Full3TerminalObservation {
+        value: Box<EnforcerSlotStatusV1>,
+    },
     Error {
         code: EnforcerError,
     },
@@ -1768,6 +1801,9 @@ impl ReplyValue3 {
             }
             StopResponse::StopStatus { value } => Self::StopStatus { value },
             StopResponse::StopAccepted { value } => Self::StopAccepted { value },
+            StopResponse::Full3TerminalObservation { value } => {
+                Self::Full3TerminalObservation { value }
+            }
             StopResponse::Error { code } => Self::Error { code },
         })
     }
@@ -1788,6 +1824,9 @@ impl ReplyValue3 {
             }
             Self::StopStatus { value } => StopResponse::StopStatus { value },
             Self::StopAccepted { value } => StopResponse::StopAccepted { value },
+            Self::Full3TerminalObservation { value } => {
+                StopResponse::Full3TerminalObservation { value }
+            }
             Self::Error { code } => StopResponse::Error { code },
         }
     }
@@ -1915,7 +1954,21 @@ async fn serve_command(
             sequence = sequence.checked_add(1).ok_or(EnforcerError::Capacity)?;
         }
     }
-    let response = match dispatch(&state, request.command.clone()) {
+    let result = match &request.command {
+        StopRequest::QueryFull3TerminalObservation {
+            arm_id,
+            registration_hash,
+            original_epoch,
+            cancel,
+        } => state.query_full3_terminal_observation(
+            arm_id,
+            registration_hash,
+            *original_epoch,
+            cancel,
+        ),
+        _ => dispatch(&state, request.command.clone()),
+    };
+    let response = match result {
         Ok(response) => response,
         Err(code) => StopResponse::Error { code },
     };

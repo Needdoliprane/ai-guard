@@ -167,7 +167,7 @@ struct StopSourceV1 {
 }
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct CancelReferenceV1 {
+pub(super) struct CancelReferenceV1 {
     command_id: Uuid,
     input_hash: String,
     confirmed_head: RevisionRefV1,
@@ -533,6 +533,12 @@ enum StopRequest {
         arm_id: String,
         registration_hash: String,
     },
+    QueryFull3TerminalObservation {
+        arm_id: String,
+        registration_hash: String,
+        original_epoch: Uuid,
+        cancel: CancelReferenceV1,
+    },
     DeliverDurableStop {
         value: Box<RestoreRequiredStopV1>,
     },
@@ -556,6 +562,9 @@ enum StopResponse {
     },
     StopAccepted {
         value: StopSlotV1,
+    },
+    Full3TerminalObservation {
+        value: Box<EnforcerSlotStatusV1>,
     },
     Error {
         code: EnforcerError,
@@ -611,6 +620,36 @@ impl RecoveryState {
             .lock()
             .map_err(|_| EnforcerError::Unhealthy)?
             .clone())
+    }
+
+    fn query_full3_terminal_observation(
+        &self,
+        arm_id: &str,
+        registration_hash: &str,
+        original_epoch: Uuid,
+        cancel: &CancelReferenceV1,
+    ) -> EnforcerResult<StopResponse> {
+        if original_epoch != self.epoch {
+            return Err(EnforcerError::Conflict);
+        }
+        let retained = self
+            .full_stops
+            .lock()
+            .map_err(|_| EnforcerError::Unhealthy)?;
+        let slot = retained.get(arm_id).ok_or(EnforcerError::NotReady)?;
+        if slot.registration_hash != registration_hash
+            || slot.durable_cancel.as_ref() != Some(cancel)
+        {
+            return Err(EnforcerError::Conflict);
+        }
+        let full = self.full_owner()?.ok_or(EnforcerError::NotReady)?;
+        let value = full.terminal_after_durable_stop(arm_id, registration_hash, cancel)?;
+        if value.generation != slot.generation {
+            return Err(EnforcerError::Conflict);
+        }
+        Ok(StopResponse::Full3TerminalObservation {
+            value: Box::new(value),
+        })
     }
     pub(super) fn new(
         epoch: Uuid,
@@ -1302,6 +1341,9 @@ fn dispatch(state: &Arc<RecoveryState>, request: StopRequest) -> EnforcerResult<
             value: state.status()?,
         }),
         StopRequest::WatchStops {} => Err(EnforcerError::InvalidInput),
+        // A V2 peer must never receive a Full3 terminal observation.
+        // V3 handles this request only after its authenticated envelope.
+        StopRequest::QueryFull3TerminalObservation { .. } => Err(EnforcerError::Unauthorized),
         StopRequest::RestoreRequiredStop { value } => reserve(state, *value),
         StopRequest::QueryStop {
             arm_id,
@@ -1356,11 +1398,17 @@ fn dispatch(state: &Arc<RecoveryState>, request: StopRequest) -> EnforcerResult<
                     }
                     let order = prefix_order(&slot.cancel_prefix, &value.cancel_prefix)?;
                     let full = state.full_owner()?.ok_or(EnforcerError::Unhealthy)?;
-                    full.cancel(
-                        &value.registration.arm.operation_id,
-                        &value.registration_hash,
-                        value.cancel_generation,
-                    )?;
+                    let arm_id = &value.registration.arm.operation_id;
+                    if order == std::cmp::Ordering::Less {
+                        full.cancel(arm_id, &value.registration_hash, value.cancel_generation)?;
+                    } else {
+                        full.cancel_for_durable_stop(
+                            arm_id,
+                            &value.registration_hash,
+                            value.cancel_generation,
+                            cancel,
+                        )?;
+                    }
                     slot.generation = slot.generation.max(value.cancel_generation);
                     if order != std::cmp::Ordering::Less {
                         slot.cancel_command_id = Some(cancel.command_id);
@@ -1426,34 +1474,44 @@ fn reserve(
                 &request.registration.arm.operation_id,
                 &request.registration_hash,
             )?;
-            if request.durable_cancel.is_some() {
-                full.cancel(
-                    &request.registration.arm.operation_id,
-                    &request.registration_hash,
-                    request.cancel_generation,
-                )?;
-            }
             let mut retained = state
                 .full_stops
                 .lock()
                 .map_err(|_| EnforcerError::Unhealthy)?;
-            let replayed = retained.contains_key(&request.registration.arm.operation_id);
-            let slot = retained
-                .entry(request.registration.arm.operation_id.clone())
-                .or_insert_with(|| StopSlotV1 {
-                    arm_id: request.registration.arm.operation_id.clone(),
-                    registration_hash: request.registration_hash.clone(),
-                    phase: StopPhaseV1::StopRestoring,
-                    generation: request.cancel_generation,
-                    cancel_command_id: None,
-                    durable_cancel: None,
-                    cancel_prefix: Vec::new(),
-                    stop_failures: 0,
-                });
-            update_full_stop(slot, &status);
-            seed_stop_cancel(slot, &request)?;
+            let arm_id = &request.registration.arm.operation_id;
+            let prior = retained.get(arm_id);
+            let replayed = prior.is_some();
+            let mut slot = prior.cloned().unwrap_or_else(|| StopSlotV1 {
+                arm_id: request.registration.arm.operation_id.clone(),
+                registration_hash: request.registration_hash.clone(),
+                phase: StopPhaseV1::StopRestoring,
+                generation: request.cancel_generation,
+                cancel_command_id: None,
+                durable_cancel: None,
+                cancel_prefix: Vec::new(),
+                stop_failures: 0,
+            });
+            update_full_stop(&mut slot, &status);
+            let order = seed_stop_cancel(&mut slot, &request)?;
+            if let Some(cancel) = request.durable_cancel.as_ref() {
+                if order == std::cmp::Ordering::Less {
+                    full.cancel(
+                        arm_id,
+                        &request.registration_hash,
+                        request.cancel_generation,
+                    )?;
+                } else {
+                    full.cancel_for_durable_stop(
+                        arm_id,
+                        &request.registration_hash,
+                        request.cancel_generation,
+                        cancel,
+                    )?;
+                }
+            }
+            retained.insert(arm_id.clone(), slot.clone());
             return Ok(StopResponse::StopReserved {
-                value: slot.clone(),
+                value: slot,
                 replayed,
             });
         }
@@ -1550,7 +1608,10 @@ fn reserve(
         replayed,
     })
 }
-fn seed_stop_cancel(slot: &mut StopSlotV1, request: &RestoreRequiredStopV1) -> EnforcerResult<()> {
+fn seed_stop_cancel(
+    slot: &mut StopSlotV1,
+    request: &RestoreRequiredStopV1,
+) -> EnforcerResult<std::cmp::Ordering> {
     let order = prefix_order(&slot.cancel_prefix, &request.cancel_prefix)?;
     slot.generation = slot.generation.max(request.cancel_generation);
     if order != std::cmp::Ordering::Less {
@@ -1564,7 +1625,7 @@ fn seed_stop_cancel(slot: &mut StopSlotV1, request: &RestoreRequiredStopV1) -> E
     if slot.durable_cancel.is_some() {
         slot.phase = StopPhaseV1::StopRequested;
     }
-    Ok(())
+    Ok(order)
 }
 fn update_full_stop(slot: &mut StopSlotV1, status: &EnforcerSlotStatusV1) {
     slot.generation = slot.generation.max(status.generation);
