@@ -1,0 +1,131 @@
+name: G06 Review projection replay Linux QA
+
+on:
+  push:
+    branches: [codex/g06-review-projection-replay-linux-qa-20261128]
+    paths: [.github/workflows/g06-review-projection-replay-linux-qa.yaml]
+
+permissions:
+  contents: read
+
+jobs:
+  review-projection-replay:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      SOURCE_SHA: 8bb03d6e7cd934dbeafced02a6fb016188d6b221
+      SOURCE_TREE: 572d5e2b7fd44cbe194d866d0ddf752a8eef00ed
+      REVIEW_BINDING_BLOB: 969be75e34aab25c721c390e6c2d973b8ab30bae
+      CARGO_BUILD_JOBS: '1'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      CARGO_TERM_COLOR: never
+      RUST_MIN_STACK: '8388608'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Build one libtest and verify the SQLite Review projection
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          ulimit -c 0
+          selectors=(
+            audit::review_binding::sqlite_projection_refuses_a_different_event_sequence_for_the_same_snapshot
+          )
+
+          report_not_run() {
+            local selector
+            for selector in "${selectors[@]}"; do
+              printf 'test=%s status=NOT_RUN\n' "$selector"
+            done
+          }
+
+          if [[ "${GITHUB_REF:-}" != refs/heads/codex/g06-review-projection-replay-linux-qa-20261128 ||
+                "$RUST_MIN_STACK" != 8388608 ||
+                "$(git rev-parse HEAD 2>/dev/null)" != "$SOURCE_SHA" ||
+                "$(git rev-parse 'HEAD^{tree}' 2>/dev/null)" != "$SOURCE_TREE" ||
+                "$(git rev-parse HEAD:src/audit/review_binding.rs 2>/dev/null)" != "$REVIEW_BINDING_BLOB" ]]; then
+            printf 'source=FAIL\n'
+            report_not_run
+            exit 1
+          fi
+          printf 'source=PASS\nsource_sha=%s\nsource_tree=%s\nreview_binding_blob=%s\ntest_stack_bytes=%s\n' \
+            "$SOURCE_SHA" "$SOURCE_TREE" "$REVIEW_BINDING_BLOB" "$RUST_MIN_STACK"
+          export AI_GUARD_BUILD_REVISION="$SOURCE_SHA"
+
+          scratch=$(mktemp -d /tmp/aig-g06.XXXXXX)
+          trap 'find "$scratch" -depth -mindepth 1 -delete; rmdir "$scratch"' EXIT
+          export TMPDIR="$scratch"
+          export CARGO_TARGET_DIR="$scratch/target"
+          build_json="$scratch/build.jsonl"
+
+          if ! cargo fetch --locked >"$scratch/fetch.log" 2>&1; then
+            printf 'fetch=FAIL\nbuild=NOT_RUN\n'
+            report_not_run
+            exit 1
+          fi
+          printf 'fetch=PASS\n'
+
+          if cargo test --locked --offline --no-default-features --lib --no-run \
+              --message-format=json >"$build_json" 2>"$scratch/build.stderr"; then
+            printf 'build=PASS\n'
+          else
+            build_rc=$?
+            printf 'build=FAIL\nbuild_exit=%s\n' "$build_rc"
+            jq -Rr 'fromjson? | objects
+              | select(.reason == "compiler-message" and .message.level == "error")
+              | .message as $message
+              | ($message.code.code // "uncoded") as $code
+              | select($code | test("\\A(E[0-9]{4}|uncoded)\\z"))
+              | ([$message.spans[]? | select(.is_primary)
+                  | recurse(.expansion.span // empty)
+                  | select(.file_name | test("\\A(src|tests)(/[A-Za-z0-9_-]+)+[.]rs\\z"))
+                  | select(.line_start | type == "number")] | .[0]) as $span
+              | if $span then "compiler_error=\($code) file=\($span.file_name) line=\($span.line_start)"
+                else "compiler_error=\($code) scope=outside_product_sources" end' "$build_json" 2>/dev/null | sort -u | sed -n '1,16p' || true
+            report_not_run
+            exit 1
+          fi
+
+          if ! libtest=$(jq -ers '[.[] | select(.reason == "compiler-artifact"
+              and .target.name == "agentsandbox" and .target.kind == ["lib"]
+              and .profile.test == true and (.executable | type) == "string") | .executable]
+              | unique | select(length == 1) | .[0]' "$build_json" 2>/dev/null) ||
+              [[ "$libtest" != "$CARGO_TARGET_DIR"/debug/deps/agentsandbox-* ||
+                 ! -f "$libtest" || ! -x "$libtest" || -L "$libtest" ]]; then
+            printf 'libtest=FAIL\n'
+            report_not_run
+            exit 1
+          fi
+          if ! checksum=$(sha256sum -- "$libtest" 2>/dev/null) ||
+              [[ ! ${checksum%% *} =~ ^[0-9a-f]{64}$ ]]; then
+            printf 'libtest=FAIL\n'
+            report_not_run
+            exit 1
+          fi
+          printf 'libtest=PASS\nlibtest_sha256=%s\n' "${checksum%% *}"
+
+          failed=0
+          for selector in "${selectors[@]}"; do
+            log="$scratch/test.log"
+            test_exit=0
+            timeout --kill-after=10s 90s "$libtest" --exact "$selector" --test-threads=1 --color never \
+              >"$log" 2>&1 || test_exit=$?
+            if [[ "$test_exit" == 0 &&
+                  "$(grep -Fxc 'running 1 test' "$log" || true)" == 1 &&
+                  "$(grep -Fxc "test $selector ... ok" "$log" || true)" == 1 &&
+                  "$(grep -Ec '^test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; [0-9]+ filtered out;' "$log" || true)" == 1 ]]; then
+              printf 'test=%s status=PASS\ntest_exit=0\ntest_pass_count=1\ntest_fail_count=0\n' "$selector"
+            else
+              failed=1
+              printf 'test=%s status=FAIL\ntest_exit=%s\n' "$selector" "$test_exit"
+              grep -m 1 -Eo 'panicked at (src|tests)(/[A-Za-z0-9_-]+)+[.]rs:[0-9]+:[0-9]+' "$log" | sed -n '1p' || true
+            fi
+          done
+          exit "$failed"
