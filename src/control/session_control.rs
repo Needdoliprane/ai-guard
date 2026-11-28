@@ -355,6 +355,81 @@ impl LegacyNamedImportArmRequestV1 {
     }
 }
 
+/// A separate verification Arm for one exact, successful named Import.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct LegacyNamedImportVerificationArmRequestV2 {
+    pub(crate) version: u32,
+    pub(crate) binding_ref: Uuid,
+    pub(crate) namespace: String,
+    pub(crate) arm: super::ArmV1,
+}
+
+impl LegacyNamedImportVerificationArmRequestV2 {
+    pub(crate) fn operation_id(binding_ref: Uuid, attempt_id: Uuid) -> String {
+        let domain =
+            format!("ai-guard:legacy-named-import-verification-arm-operation:v2:{binding_ref}");
+        crate::model::bound_event_id(domain.as_bytes(), attempt_id)
+    }
+
+    pub(crate) fn validate(&self) -> anyhow::Result<()> {
+        invalid(self.version == 2)?;
+        Self::validate_arm(self.binding_ref, &self.namespace, &self.arm)
+    }
+
+    pub(crate) fn validate_arm(
+        binding_ref: Uuid,
+        namespace: &str,
+        arm: &super::ArmV1,
+    ) -> anyhow::Result<()> {
+        arm.validate()?;
+        let super::ArmSubjectV1::Helper {
+            helper_id,
+            purpose: super::HelperPurposeV1::ImportVerification,
+            permission,
+            ..
+        } = &arm.subject
+        else {
+            return Err(ControlFailure::InvalidRequest.into());
+        };
+        let super::HelperPermissionV1::ImportVerification {
+            import_helper_id,
+            import_arm,
+            import_terminal,
+            manifest_digest,
+        } = permission.as_ref()
+        else {
+            return Err(ControlFailure::InvalidRequest.into());
+        };
+        let worker = canonical_uuid(&arm.worker_id)?;
+        let attempt = canonical_uuid(&arm.attempt_id)?;
+        import_arm.validate()?;
+        hash(&import_terminal.input_hash)?;
+        hash(&import_terminal.audit_hash)?;
+        hash(manifest_digest)?;
+        invalid(
+            !binding_ref.is_nil()
+                && !canonical_uuid(namespace)?.is_nil()
+                && !worker.is_nil()
+                && !attempt.is_nil()
+                && !canonical_uuid(helper_id)?.is_nil()
+                && !canonical_uuid(import_helper_id)?.is_nil()
+                && !canonical_uuid(&import_terminal.operation_id)?.is_nil()
+                && !canonical_uuid(&import_arm.arm_id)?.is_nil()
+                && helper_id != import_helper_id
+                && arm.operation_id == Self::operation_id(binding_ref, attempt)
+                && arm.operation_id != import_arm.arm_id
+                && arm.operation_id != import_terminal.operation_id
+                && import_arm.control_namespace_uuid == namespace
+                && import_arm.worker_id == arm.worker_id
+                && import_arm.attempt_id == arm.attempt_id
+                && import_terminal.worker_id.as_deref() == Some(arm.worker_id.as_str())
+                && import_terminal.revision.is_none()
+                && import_terminal.audit_seq > import_arm.audit_seq,
+        )
+    }
+}
+
 /// The exact claim for the Import helper of one named Legacy launch. The
 /// retained Arm and current broker/initiator authority are resolved by Core.
 #[derive(Clone, Debug, Serialize, Deserialize)]
