@@ -1,0 +1,138 @@
+name: G09 pinned Stop3 handshake Linux QA
+
+on:
+  push:
+    branches: [codex/g09-stop3-pinned-handshake-linux-qa-20261128]
+    paths: [.github/workflows/g09-stop3-pinned-handshake-linux-qa.yaml]
+
+permissions:
+  contents: read
+
+jobs:
+  stop3-pinned-handshake:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      SOURCE_SHA: ec0346a0a11314a5272fff23b9323d1d8a126d16
+      SOURCE_TREE: a5a04b0a8eceadf760f1ad010cb59a6ecdf83bc1
+      RECOVERY_BLOB: b99d39089d25fdce6ea73fb42ff7fa68fd4dee3b
+      CARGO_BUILD_JOBS: '1'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      CARGO_TERM_COLOR: never
+      LC_ALL: C
+      RUST_MIN_STACK: '8388608'
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          persist-credentials: false
+
+      - name: Build one libtest and verify the pinned Stop3 handshake
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          ulimit -c 0
+          selector=broker::enforcer::recovery::tests::pinned_stop3_open_authenticates_without_beginning_recovery
+          source_file=src/broker/enforcer/recovery.rs
+          report_not_run() {
+            printf 'test=%s status=NOT_RUN\n' "$selector"
+          }
+          if [[ "${GITHUB_REF:-}" != refs/heads/codex/g09-stop3-pinned-handshake-linux-qa-20261128 ||
+                "$(git rev-parse HEAD)" != "$SOURCE_SHA" ||
+                "$(git rev-parse 'HEAD^{tree}')" != "$SOURCE_TREE" ||
+                "$(git rev-parse "HEAD:$source_file")" != "$RECOVERY_BLOB" ||
+                "$(git rev-parse ":$source_file")" != "$RECOVERY_BLOB" ||
+                ! -f "$source_file" || -L "$source_file" ||
+                "$(git hash-object --no-filters -- "$source_file")" != "$RECOVERY_BLOB" ||
+                "$RUST_MIN_STACK" != 8388608 ]]; then
+            printf 'source=FAIL\n'
+            report_not_run
+            exit 1
+          fi
+          printf 'source=PASS\n'
+          printf 'source_sha=%s\n' "$SOURCE_SHA"
+          printf 'source_tree=%s\n' "$SOURCE_TREE"
+          printf 'recovery_blob=%s\n' "$RECOVERY_BLOB"
+          printf 'test_stack_bytes=%s\n' "$RUST_MIN_STACK"
+          export AI_GUARD_BUILD_REVISION="$SOURCE_SHA"
+
+          # Check the fixture's fixed short Unix socket path and isolate build artifacts.
+          scratch=$(mktemp -d /tmp/aig-g09.XXXXXX)
+          chmod 700 "$scratch"
+          trap 'find "$scratch" -depth -mindepth 1 -delete; rmdir "$scratch"' EXIT
+          export TMPDIR="$scratch"
+          fixture_endpoint=/tmp/ag-000000/role/endpoints/i-0000000000000000/s
+          if [[ "$scratch" != "$(realpath -- "$scratch")" || /tmp != "$(realpath -- /tmp)" ]] ||
+              (( ${#fixture_endpoint} > 103 )); then
+            printf 'fixture_socket_path=FAIL\n'
+            report_not_run
+            exit 1
+          fi
+          printf 'fixture_socket_path=PASS\nfixture_socket_bytes=%s\n' "${#fixture_endpoint}"
+          export CARGO_TARGET_DIR="$scratch/target"
+          build_json="$scratch/build.jsonl"
+          if ! cargo fetch --locked >"$scratch/fetch.log" 2>&1; then
+            printf 'fetch=FAIL\nbuild=NOT_RUN\n'
+            report_not_run
+            exit 1
+          fi
+          printf 'fetch=PASS\n'
+          if cargo test --locked --offline -j1 --no-default-features --lib --no-run \
+              --message-format=json >"$build_json" 2>"$scratch/build.stderr"; then
+            printf 'build=PASS\n'
+          else
+            rc=$?
+            printf 'build=FAIL\nbuild_exit=%s\n' "$rc"
+            report=$(jq -cs '[.[] | select(.reason == "compiler-message" and .message.level == "error") | .message |
+              {code: ((.code.code // "uncoded") | if test("^E[0-9]{4}$") then . else "uncoded" end),
+               site: ([.spans[]? | select(.is_primary == true and (.file_name | test("^(src|tests)(/[A-Za-z0-9_-]+)+[.]rs$"))
+                 and (.line_start | type) == "number" and (.column_start | type) == "number")
+                 | {file: .file_name, line: .line_start, column: .column_start}] | .[0])}]
+              | .[0:16]' "$build_json" 2>/dev/null) || report=unavailable
+            printf 'rust_diagnostics=%s\n' "$report"
+            report_not_run
+            exit 1
+          fi
+          if ! libtest=$(jq -ers '[.[] | select(.reason == "compiler-artifact" and .target.name == "agentsandbox"
+              and .target.kind == ["lib"] and .profile.test == true and (.executable | type) == "string") | .executable]
+              | unique | select(length == 1) | .[0]' "$build_json" 2>/dev/null) ||
+              [[ "$libtest" != "$CARGO_TARGET_DIR"/debug/deps/agentsandbox-* || ! -f "$libtest" || ! -x "$libtest" || -L "$libtest" ]]; then
+            printf 'libtest=FAIL\n'
+            report_not_run
+            exit 1
+          fi
+          checksum=$(sha256sum -- "$libtest")
+          libtest_sha=${checksum%% *}
+          if [[ ! "$libtest_sha" =~ ^[0-9a-f]{64}$ ]]; then
+            printf 'libtest=FAIL\n'
+            report_not_run
+            exit 1
+          fi
+          printf 'libtest=PASS\nlibtest_sha256=%s\n' "$libtest_sha"
+
+          if ! timeout --kill-after=2s 15s "$libtest" --exact "$selector" --list --color never >"$scratch/selection.log" 2>&1 ||
+              [[ "$(grep -Fxc "$selector: test" "$scratch/selection.log" || true)" != 1 ]]; then
+            printf 'selection=FAIL\n'
+            report_not_run
+            exit 1
+          fi
+          printf 'selection=PASS\n'
+          log="$scratch/test.log"
+          test_exit=0
+          timeout --kill-after=10s 180s "$libtest" --exact "$selector" --test-threads=1 --color never \
+            >"$log" 2>&1 || test_exit=$?
+          if [[ "$test_exit" == 0 ]] &&
+              [[ "$(grep -Fxc 'running 1 test' "$log" || true)" == 1 ]] &&
+              [[ "$(grep -Fxc "test $selector ... ok" "$log" || true)" == 1 ]] &&
+              [[ "$(grep -Ec '^test result: ok[.] 1 passed; 0 failed; 0 ignored; 0 measured; [0-9]+ filtered out; finished in [0-9]+([.][0-9]+)?s$' "$log" || true)" == 1 ]]; then
+            printf 'test=%s status=PASS\ntest_exit=0\ntest_pass_count=1\ntest_fail_count=0\n' "$selector"
+          else
+            printf 'test=%s status=FAIL\ntest_exit=%s\n' "$selector" "$test_exit"
+            grep -m 1 -Eo 'panicked at (src|tests)(/[A-Za-z0-9_-]+)+[.]rs:[0-9]+:[0-9]+' "$log" || true
+            if grep -q '^Error: ' "$log"; then printf 'libtest_result_error=true\n'; fi
+            exit 1
+          fi
