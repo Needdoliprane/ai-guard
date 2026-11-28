@@ -1,5 +1,5 @@
 use crate::{
-    broker::enforcer::CancelGeneration,
+    broker::enforcer::{CancelGeneration, EnforcerError, EnforcerStageFailure},
     egress::{bootstrap_release::HELD_CHALLENGE_ENV, ids::IdV1},
 };
 use anyhow::{Context, Result, bail, ensure};
@@ -83,7 +83,7 @@ impl std::fmt::Debug for LegacyStartVeto {
 /// Neither this notification nor the transport establishes a worker's terminal state.
 pub struct PrearmedStartControl {
     guard: OwnedSpawnCheck,
-    spawn_generation: Option<GenerationSpawnGuard>,
+    spawn_generation: Option<PrearmedGenerationFence>,
     stop: tokio::sync::watch::Receiver<bool>,
     launch_profile: Option<Box<launch_profile::DockerLaunchProfileBindingV1>>,
     stdout_tap: Option<crate::provider_activity::StdoutTap>,
@@ -92,6 +92,14 @@ pub struct PrearmedStartControl {
 }
 type OwnedSpawnCheck =
     Box<dyn FnOnce(&RuntimeAuthority, &OwnedContainerSnapshot) -> Result<()> + Send>;
+pub(crate) type PrearmedGenerationDiagnosis =
+    Box<dyn FnOnce(EnforcerError) -> Option<EnforcerStageFailure> + Send>;
+
+struct PrearmedGenerationFence {
+    generation: CancelGeneration,
+    expected: u64,
+    diagnose_refusal: Option<PrearmedGenerationDiagnosis>,
+}
 
 impl PrearmedStartControl {
     pub fn new(guard: Box<dyn BeforeSpawnGuard>, stop: tokio::sync::watch::Receiver<bool>) -> Self {
@@ -136,13 +144,24 @@ impl PrearmedStartControl {
     /// Keep the original job generation through the final check and the
     /// actual local spawn. The guard must not re-enter this generation gate.
     pub(crate) fn with_generation_fence(
-        mut self,
+        self,
         generation: &CancelGeneration,
         expected: u64,
     ) -> Self {
-        self.spawn_generation = Some(GenerationSpawnGuard {
+        self.with_generation_fence_diagnosis(generation, expected, None)
+    }
+
+    /// Preserve the enforcer's typed refusal and the precedence of published STOP.
+    pub(crate) fn with_generation_fence_diagnosis(
+        mut self,
+        generation: &CancelGeneration,
+        expected: u64,
+        diagnose_refusal: Option<PrearmedGenerationDiagnosis>,
+    ) -> Self {
+        self.spawn_generation = Some(PrearmedGenerationFence {
             generation: generation.clone(),
             expected,
+            diagnose_refusal,
         });
         self
     }
@@ -1003,7 +1022,7 @@ fn spawn_prearmed_cli<'execution>(
     input: OwnedStartInput<'execution>,
     guard: impl FnOnce(&RuntimeAuthority, &OwnedContainerSnapshot) -> Result<()>,
     stop: &tokio::sync::watch::Receiver<bool>,
-    spawn_generation: Option<GenerationSpawnGuard>,
+    spawn_generation: Option<PrearmedGenerationFence>,
 ) -> Result<(tokio::process::Child, SpawnedPrearmedInput<'execution>)> {
     let target = created.handle.id();
     command.args(["start", "--attach"]);
@@ -1032,10 +1051,23 @@ fn spawn_prearmed_cli<'execution>(
         command.spawn().with_context(spawn_failure)
     };
     let mut child = match spawn_generation {
-        Some(fence) => fence
+        Some(fence) => match fence
             .generation
             .with_current_generation(fence.expected, spawn)
-            .with_context(guard_failure)??,
+        {
+            Ok(result) => result?,
+            Err(error) => {
+                let diagnosed = if let Some(diagnose_refusal) = fence.diagnose_refusal {
+                    // The spawn closure did not get to check the STOP watch.
+                    ensure_prearmed_live(stop).with_context(stop_failure)?;
+                    diagnose_refusal(error)
+                } else {
+                    None
+                };
+                let error = diagnosed.map_or_else(|| anyhow::Error::new(error), anyhow::Error::new);
+                return Err(error.context(guard_failure()));
+            }
+        },
         None => spawn()?,
     };
     let input = match input {
@@ -3245,9 +3277,10 @@ mod capture_error_tests {
                     Ok(())
                 },
                 &stop,
-                Some(GenerationSpawnGuard {
+                Some(PrearmedGenerationFence {
                     generation: generation.clone(),
                     expected,
+                    diagnose_refusal: None,
                 }),
             ) else {
                 bail!("the nonexistent test program was unexpectedly spawned");
@@ -3272,6 +3305,69 @@ mod capture_error_tests {
             })?,
             RuntimePrestartStage::StopBeforeSpawn
         );
+        assert_eq!(
+            refuse(expected, &mut || panic!(
+                "stale generation reached the guard"
+            ))?,
+            RuntimePrestartStage::GuardBeforeSpawn
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn diagnosed_prearmed_spawn_preserves_refusal_and_prioritizes_stop() -> Result<()> {
+        use crate::broker::journal::retirement_live_fixture::live_fixture;
+
+        let fixture = live_fixture();
+        let target = fixture.registration.prospective()?;
+        let temporary = tempfile::tempdir()?;
+        let missing_program = temporary.path().join("no-runtime-program");
+        let generation = CancelGeneration::new();
+        let expected = generation.current();
+        generation.invalidate();
+        let (owner, stop) = tokio::sync::watch::channel(false);
+        for (stopped, expected_stage) in [
+            (false, RuntimePrestartStage::GuardBeforeSpawn),
+            (true, RuntimePrestartStage::StopBeforeSpawn),
+        ] {
+            owner.send_replace(stopped);
+            let arm = fixture.registration.arm().clone();
+            let control = PrearmedStartControl::with_owned_spawn_check(
+                |_, _| panic!("stale generation reached the spawn guard"),
+                stop.clone(),
+                None,
+                None,
+            )
+            .with_generation_fence_diagnosis(
+                &generation,
+                expected,
+                Some(Box::new(move |error| {
+                    assert!(!stopped, "published STOP must take precedence");
+                    assert_eq!(error, EnforcerError::NotReady);
+                    EnforcerStageFailure::registration_failure(&arm, error)
+                })),
+            );
+            let Err(error) = spawn_prearmed_cli(
+                Command::new(&missing_program),
+                target.authority(),
+                target.owned(),
+                OwnedStartInput::Historical(None),
+                control.guard,
+                &control.stop,
+                control.spawn_generation,
+            ) else {
+                bail!("the nonexistent test program was unexpectedly spawned");
+            };
+            let stage = error
+                .downcast_ref::<RuntimePrestartStageFailure>()
+                .context("expected the prestart stage")?;
+            assert_eq!(stage.stage(), expected_stage);
+            assert_eq!(
+                error.downcast_ref::<EnforcerStageFailure>().is_some(),
+                !stopped
+            );
+        }
         Ok(())
     }
 

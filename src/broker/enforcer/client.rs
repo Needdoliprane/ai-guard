@@ -2741,11 +2741,19 @@ impl EnforcedSlot {
             permission,
             clock,
         };
+        let local = Arc::clone(&self.local);
         Ok(PrearmedStartControl::with_owned_spawn_check(
             move |authority, created| guard.check_before_spawn(authority, created),
             self.local.stop.subscribe(),
             registration.authority.docker_launch_profile.clone(),
             native_release,
+        )
+        .with_generation_fence_diagnosis(
+            &self.local.generation,
+            expected_generation,
+            Some(Box::new(move |error| {
+                SpawnGuard::diagnose_generation_refusal(local.registration.arm(), error)
+            })),
         ))
     }
 
@@ -2960,6 +2968,24 @@ struct SpawnGuard {
     clock: Arc<NativeHostClock>,
 }
 impl SpawnGuard {
+    fn diagnose_generation_refusal(
+        arm: &ArmV1,
+        error: EnforcerError,
+    ) -> Option<EnforcerStageFailure> {
+        let reason = match error {
+            EnforcerError::NotReady => EnforcerFailureReason::GenerationChanged,
+            EnforcerError::Unhealthy => EnforcerFailureReason::LockPoisoned,
+            _ => return None,
+        };
+        Some(EnforcerStageFailure::from_arm(
+            arm,
+            EnforcerStage::BeforeSpawn,
+            reason,
+            None,
+        ))
+    }
+
+    /// The runtime holds the original generation gate through the actual spawn.
     fn check_before_spawn(
         self,
         authority: &RuntimeAuthority,
@@ -3609,6 +3635,26 @@ fn peer_pid(stream: &UnixStream) -> Option<u32> {
 #[cfg(test)]
 mod stage_diagnostic_tests {
     use super::*;
+
+    #[test]
+    fn prearmed_generation_refusal_preserves_before_spawn_reasons() -> anyhow::Result<()> {
+        use crate::broker::journal::retirement_live_fixture::live_fixture;
+
+        let fixture = live_fixture();
+        let arm = fixture.registration.arm();
+        for (error, reason) in [
+            (EnforcerError::NotReady, "generation_changed"),
+            (EnforcerError::Unhealthy, "lock_poisoned"),
+        ] {
+            let diagnostic = SpawnGuard::diagnose_generation_refusal(arm, error).unwrap();
+            let value = serde_json::to_value(diagnostic)?;
+            assert_eq!(value["stage"], "before_spawn");
+            assert_eq!(value["reason"], reason);
+            assert!(value["native_sample"].is_null());
+        }
+        assert!(SpawnGuard::diagnose_generation_refusal(arm, EnforcerError::Conflict).is_none());
+        Ok(())
+    }
 
     #[test]
     fn native_release_deadline_rejects_expiry_regression_stale_and_foreign_clock() {
