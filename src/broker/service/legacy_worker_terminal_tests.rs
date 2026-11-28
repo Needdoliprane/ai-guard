@@ -449,7 +449,7 @@ async fn legacy_terminal_publication_replays_a_lost_core_reply_with_one_durable_
     assert!(seed.transition_response_cut_pending_for_test());
     assert!(matches!(
         service
-            .publish_legacy_worker_terminal_observation(scope, operation, pending.head())
+            .reconcile_legacy_worker_terminal(scope, operation, pending.head())
             .await,
         Err(BrokerErrorCodeV1::NeedsReconciliation)
     ));
@@ -490,7 +490,7 @@ async fn legacy_terminal_publication_replays_a_lost_core_reply_with_one_durable_
     drop(writer);
     reopen_writer(&mut service, &seed.journal_root, scope).await?;
     let confirmed = service
-        .publish_legacy_worker_terminal_observation(scope, operation, pending.head())
+        .reconcile_legacy_worker_terminal(scope, operation, pending.head())
         .await?;
     assert_eq!(confirmed.head().revision(), pending.head().revision() + 1);
     pending.validate_response(confirmed.response())?;
@@ -508,8 +508,9 @@ async fn legacy_terminal_publication_replays_a_lost_core_reply_with_one_durable_
     assert_eq!(canonical(&store.worker_usage()?)?, canonical(&usage)?);
 
     reopen_writer(&mut service, &seed.journal_root, scope).await?;
+    let _occupied_execution = service.execution.try_acquire()?;
     let cold = service
-        .publish_legacy_worker_terminal_observation(scope, operation, pending.head())
+        .reconcile_legacy_worker_terminal(scope, operation, pending.head())
         .await?;
     assert_eq!(cold.head(), confirmed.head());
     assert_eq!(
@@ -556,7 +557,7 @@ async fn legacy_terminal_publication_refuses_a_divergent_core_worker_before_post
     let calls = fs::read(&calls_path)?;
     assert!(matches!(
         service
-            .publish_legacy_worker_terminal_observation(scope, operation, pending.head())
+            .reconcile_legacy_worker_terminal(scope, operation, pending.head())
             .await,
         Err(BrokerErrorCodeV1::Conflict)
     ));
@@ -698,7 +699,7 @@ async fn cold_legacy_terminal_read_requires_the_exact_latch_and_preserves_state(
     let before_latch = fs::read(&calls)?;
     assert!(matches!(
         service
-            .observe_legacy_worker_terminal(&profile_id, operation, command)
+            .reconcile_legacy_worker_terminal(proof.scope(), operation, proof.head())
             .await,
         Err(BrokerErrorCodeV1::NeedsReconciliation)
     ));
@@ -725,7 +726,7 @@ async fn cold_legacy_terminal_read_requires_the_exact_latch_and_preserves_state(
     let reads = seed.worker_get_count();
     let posts = seed.post_count();
     let mut observed = service
-        .observe_legacy_worker_terminal(&profile_id, operation, command)
+        .observe_legacy_worker_terminal(&stops, &proof)
         .await?;
     let terminal = observed.observation();
     assert_eq!(terminal.id.as_deref(), Some(cid.as_str()));
@@ -770,6 +771,43 @@ async fn cold_legacy_terminal_read_requires_the_exact_latch_and_preserves_state(
             .context("Legacy journal disappeared")?
             .head(),
         proof.head()
+    );
+
+    // The private flow uses the same guarded read, then reserves and publishes
+    // the observation before returning its exact Core receipt.
+    let confirmed = service
+        .reconcile_legacy_worker_terminal(proof.scope(), operation, proof.head())
+        .await?;
+    assert_eq!(confirmed.head().revision(), proof.head().revision() + 2);
+    assert_eq!(
+        confirmed.response().receipt.operation_id,
+        mutation.operation_id
+    );
+    assert_eq!(confirmed.response().worker.attempt, proof.worker().attempt);
+    assert_eq!(confirmed.response().worker.state, WorkerStateV1::Terminal);
+    assert_eq!(
+        confirmed
+            .response()
+            .worker
+            .last_observation
+            .as_ref()
+            .and_then(|value| value.exit_code),
+        Some(17)
+    );
+    assert_eq!(seed.worker_get_count(), reads + 5);
+    assert_eq!(seed.post_count(), posts + 1);
+    assert_eq!(
+        store.worker_quota(&QuotaPolicyV1::default())?.held_workers,
+        0
+    );
+    assert_eq!(store.worker_usage()?.len(), 1);
+    assert_eq!(
+        canonical(
+            &store
+                .worker(&seed.worker_id)?
+                .context("terminal Worker missing")?
+        )?,
+        canonical(&confirmed.response().worker)?
     );
     drop(service);
     drop(guardian);
