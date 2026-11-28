@@ -3,22 +3,20 @@
 //! publisher. Neither opens credential blobs or constructs a business job,
 //! fresh-start permission, credential handoff or enforcer registration.
 use super::*;
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+use crate::control::{ArmedStartClaimV1, MutationReceiptV1};
 use crate::{
     audit::legacy_session_prepare::LegacyNamedCancelReservationV1,
     broker::{
         checkpoint::{LegacyNamedAdmissionCheckpoint, SupervisionOperationV1},
         lifecycle::{LocalCommandRequestV1, LocalCommandV1},
+        retirement_checkpoint::Full3RegistrationBindingV1,
     },
     control::{
-        ArmReceiptV1, ArmSubjectV1, ArmV1, WorkerMutationV1, WorkerTransitionV1, WorkerV1,
-        session_control::LegacyNamedAdmissionReceiptV1,
+        ArmReceiptV1, ArmSubjectV1, ArmV1, RuntimeStatusV1, WorkerMutationV1, WorkerStateV1,
+        WorkerTransitionV1, WorkerV1, session_control::LegacyNamedAdmissionReceiptV1,
     },
     runtime::{OwnedContainerSnapshot, RuntimeAuthority},
-};
-#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
-use crate::{
-    broker::retirement_checkpoint::Full3RegistrationBindingV1,
-    control::{ArmedStartClaimV1, MutationReceiptV1},
 };
 use std::sync::{
     OnceLock,
@@ -86,6 +84,85 @@ pub struct RecoveredStopV1 {
     birth_index: usize,
     full3_binding: Option<crate::broker::retirement_checkpoint::Full3RegistrationBindingV1>,
     retirement: Option<crate::broker::retirement_checkpoint::RetirementEntryV1>,
+}
+
+/// Verified V5 facts, retained under the startup reader's lease. The claim
+/// was acknowledged before STOP and the same running attempt is still recorded.
+/// This evidence can corroborate a terminal observation. It grants no authority
+/// to publish completion or release the worker's allocation.
+pub(in crate::broker) struct Full3WorkerTerminalEvidenceV1 {
+    report: Arc<StopRecoveryReportV1>,
+    operation: Uuid,
+    head: RevisionRefV1,
+    directory: Directory,
+    target: RecoveredStopV1,
+    binding: Full3RegistrationBindingV1,
+    stop: LocalCommandReceiptV1,
+    worker: WorkerV1,
+}
+
+struct RecoveredFull3WorkerClaim {
+    directory: Directory,
+    target: RecoveredStopV1,
+    binding: Full3RegistrationBindingV1,
+    stop: LocalCommandReceiptV1,
+    running_worker: Option<WorkerV1>,
+    #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+    claim: ArmedStartClaimV1,
+    #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+    claim_receipt: MutationReceiptV1,
+}
+
+impl Full3WorkerTerminalEvidenceV1 {
+    pub(in crate::broker) fn scope(&self) -> &JournalScopeV1 {
+        self.report.scope()
+    }
+
+    pub(in crate::broker) fn operation_id(&self) -> Uuid {
+        self.operation
+    }
+
+    pub(in crate::broker) fn head(&self) -> &RevisionRefV1 {
+        &self.head
+    }
+
+    pub(in crate::broker) fn arm(&self) -> &ArmV1 {
+        self.target.arm()
+    }
+
+    pub(in crate::broker) fn arm_receipt(&self) -> &ArmReceiptV1 {
+        self.target.receipt()
+    }
+
+    pub(in crate::broker) fn authority(&self) -> &RuntimeAuthority {
+        self.target.authority()
+    }
+
+    pub(in crate::broker) fn owned(&self) -> &OwnedContainerSnapshot {
+        self.target.owned()
+    }
+
+    pub(in crate::broker) fn binding(&self) -> &Full3RegistrationBindingV1 {
+        &self.binding
+    }
+
+    pub(in crate::broker) fn cancel_receipt(&self) -> &LocalCommandReceiptV1 {
+        &self.stop
+    }
+
+    pub(in crate::broker) fn worker(&self) -> &WorkerV1 {
+        &self.worker
+    }
+
+    pub(in crate::broker) fn belongs_to(&self, report: &Arc<StopRecoveryReportV1>) -> bool {
+        Arc::ptr_eq(&self.report, report)
+    }
+
+    pub(in crate::broker) fn revalidate(&self) -> JournalResult<()> {
+        self.report.revalidate_full3_observation_lease()?;
+        fscheck(self.directory.revalidate())?;
+        self.report.revalidate_full3_observation_lease()
+    }
 }
 
 /// A verified, immutable cancellation prefix that shares the lock FD of the
@@ -1489,8 +1566,39 @@ impl StopRecoveryReportV1 {
         Ok(projection.named_import().is_some().then_some(projection))
     }
 
-    /// The cold fixture reuses the report's lease to relate the post-STOP
-    /// read to the exact V5 claim acknowledgement already durable before STOP.
+    /// Read the original Running attempt and claim under this report's lease,
+    /// before an admitted writer can change the verified checkpoint.
+    pub(in crate::broker) fn full3_worker_terminal_evidence(
+        self: &Arc<Self>,
+        scope: &JournalScopeV1,
+        operation: Uuid,
+        head: &RevisionRefV1,
+        stop_command: Uuid,
+        expected_binding: &Full3RegistrationBindingV1,
+    ) -> JournalResult<Full3WorkerTerminalEvidenceV1> {
+        let recovered = self.full3_worker_claim_before_stop(
+            scope,
+            operation,
+            head,
+            stop_command,
+            expected_binding,
+        )?;
+        let evidence = Full3WorkerTerminalEvidenceV1 {
+            report: Arc::clone(self),
+            operation,
+            head: head.clone(),
+            directory: recovered.directory,
+            target: recovered.target,
+            binding: recovered.binding,
+            stop: recovered.stop,
+            worker: recovered.running_worker.ok_or(JournalError::Interrupted)?,
+        };
+        evidence.revalidate()?;
+        Ok(evidence)
+    }
+
+    /// The original cold fixture also exercises a claim without a Running
+    /// observation. Both paths use the same exact pre-STOP acknowledgement.
     #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
     pub(crate) fn full3_worker_claim_before_stop_for_test(
         &self,
@@ -1500,9 +1608,35 @@ impl StopRecoveryReportV1 {
         stop_command: Uuid,
         expected_binding: &Full3RegistrationBindingV1,
     ) -> JournalResult<(LocalCommandReceiptV1, ArmedStartClaimV1, MutationReceiptV1)> {
-        if self.incomplete || self.retained_core.get().is_some() {
+        let recovered = self.full3_worker_claim_before_stop(
+            scope,
+            operation,
+            head,
+            stop_command,
+            expected_binding,
+        )?;
+        Ok((recovered.stop, recovered.claim, recovered.claim_receipt))
+    }
+
+    fn revalidate_full3_observation_lease(&self) -> JournalResult<()> {
+        if self.incomplete
+            || self.actor_claimed.load(Ordering::SeqCst)
+            || self.retained_core.get().is_some()
+        {
             return Err(JournalError::Interrupted);
         }
+        self.revalidate()
+    }
+
+    fn full3_worker_claim_before_stop(
+        &self,
+        scope: &JournalScopeV1,
+        operation: Uuid,
+        head: &RevisionRefV1,
+        stop_command: Uuid,
+        expected_binding: &Full3RegistrationBindingV1,
+    ) -> JournalResult<RecoveredFull3WorkerClaim> {
+        self.revalidate_full3_observation_lease()?;
         if canonical(self.scope())? != canonical(scope)?
             || !self
                 .jobs()
@@ -1526,8 +1660,9 @@ impl StopRecoveryReportV1 {
         let mut targets = job
             .stops()
             .iter()
-            .filter(|target| matches!(&target.arm().subject, ArmSubjectV1::Worker));
-        let target = targets.next().ok_or(JournalError::Interrupted)?;
+            .enumerate()
+            .filter(|(_, target)| matches!(&target.arm().subject, ArmSubjectV1::Worker));
+        let (target_index, target) = targets.next().ok_or(JournalError::Interrupted)?;
         let binding = target
             .full3_registration_binding()
             .ok_or(JournalError::Interrupted)?;
@@ -1627,15 +1762,80 @@ impl StopRecoveryReportV1 {
         let prior_claim = prior_operations
             .get(claim_index)
             .ok_or(JournalError::Interrupted)?;
+        let before = prefix.payload.runner().broker_context();
         if canonical(prior_binding)? != canonical(binding)?
             || canonical(prior_claim)? != canonical(claim)?
-            || prefix.payload.runner().broker_context().binding != Some(target.authority())
+            || before.binding != Some(target.authority())
         {
             return Err(JournalError::Conflict);
         }
+        let current = metadata.checkpoint.runner().broker_context();
+        let running_worker = match before.worker {
+            Some(worker) if worker.state == WorkerStateV1::Running => {
+                let observation = worker
+                    .last_observation
+                    .as_ref()
+                    .filter(|observation| {
+                        observation.status == RuntimeStatusV1::Running
+                            && observation.running == Some(true)
+                    })
+                    .ok_or(JournalError::Conflict)?;
+                let started_at = worker
+                    .observed_started_at
+                    .as_deref()
+                    .filter(|start| {
+                        chrono::DateTime::parse_from_rfc3339(start)
+                            .is_ok_and(|time| time.timestamp() > 0)
+                    })
+                    .ok_or(JournalError::Conflict)?;
+                if before.tenant_id != Some(scope.tenant_id())
+                    || current.tenant_id != before.tenant_id
+                    || current.binding != before.binding
+                    || canonical(&before.owned)? != canonical(&Some(target.owned()))?
+                    || canonical(&current.owned)? != canonical(&before.owned)?
+                    || !worker.quota_held
+                    || worker.allocation_inconsistent
+                    || worker.admission_operation_id != operation.to_string()
+                    || worker.worker_id != target.arm().worker_id
+                    || worker.attempt.attempt_id != target.arm().attempt_id
+                    || worker.attempt.created_inspection.as_ref() != Some(&target.arm().inspection)
+                    || worker.attempt != response.worker.attempt
+                    || worker.attempt.start_operation_id.as_deref()
+                        != Some(request.operation_id.as_str())
+                    || worker.attempt.start_emitter_id.as_deref()
+                        != Some(request.emitter_id.as_str())
+                    || worker.revision <= response.worker.revision
+                    || observation.started_at.as_deref() != Some(started_at)
+                    || canonical(&current.worker)? != canonical(&Some(worker))?
+                {
+                    return Err(JournalError::Conflict);
+                }
+                Some(worker.clone())
+            }
+            _ => None,
+        };
         fscheck(directory.revalidate())?;
-        self.revalidate()?;
-        Ok((stop.clone(), request.clone(), response.receipt.clone()))
+        self.revalidate_full3_observation_lease()?;
+        let binding = binding.clone();
+        #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+        let (claim, claim_receipt) = (request.clone(), response.receipt.clone());
+        let stop = stop.clone();
+        let target = job
+            .stops
+            .into_iter()
+            .nth(target_index)
+            .ok_or(JournalError::Corrupt)?;
+        Ok(RecoveredFull3WorkerClaim {
+            directory,
+            target,
+            binding,
+            stop,
+            running_worker,
+            #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+            claim,
+            #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+            claim_receipt,
+        })
     }
 
     pub fn issues(&self) -> &[StopRecoveryIssueV1] {
