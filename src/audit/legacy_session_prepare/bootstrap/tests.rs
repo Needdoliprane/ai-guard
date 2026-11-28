@@ -1862,6 +1862,7 @@ async fn named_import_arm_fixture(verify_import_arm: bool) {
         let private_arm_path = format!("/control{public_arm_path}");
         let public_read = format!("{public_arm_path}/reconcile");
         let verification_read = format!("{private_arm_path}/reconcile");
+        let app = router(Arc::clone(&store));
         let head_before_read = store.head().unwrap();
         for (token, code_path, expected_code) in [
             (
