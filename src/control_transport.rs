@@ -270,7 +270,10 @@ pub fn control_route(method: &Method, path: &str) -> Option<ControlRouteIdentity
                 "session-confirmations",
                 id,
                 "admission",
-                "import-claim" | "import-observation" | "import-verification-arm",
+                "import-claim"
+                | "import-observation"
+                | "import-verification-arm"
+                | "import-verification-claim",
                 "reconcile",
             ],
         ) if v1
@@ -318,10 +321,17 @@ mod reconciliation_tests {
 
     #[test]
     fn named_import_verification_arm_allows_only_exact_broker_reconciliation() {
+        assert_named_import_verification_reconcile_route("import-verification-arm");
+    }
+
+    #[test]
+    fn named_import_verification_claim_allows_only_exact_broker_reconciliation() {
+        assert_named_import_verification_reconcile_route("import-verification-claim");
+    }
+
+    fn assert_named_import_verification_reconcile_route(operation: &str) {
         let binding = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
-        let base = format!(
-            "/api/v1/control/session-confirmations/{binding}/admission/import-verification-arm"
-        );
+        let base = format!("/api/v1/control/session-confirmations/{binding}/admission/{operation}");
         let reconcile = format!("{base}/reconcile");
         assert_eq!(
             control_route(&Method::POST, &reconcile),

@@ -451,10 +451,6 @@ impl Store {
     }
 
     /// Reconcile only the exact verification claim under the original broker.
-    #[allow(
-        dead_code,
-        reason = "the private verification claim reconciliation route is composed separately"
-    )]
     pub(crate) fn read_legacy_named_import_verification_claim(
         &self,
         broker: &BrokerIdentityV1,

@@ -219,6 +219,7 @@ pub(crate) const LEGACY_NAMED_ADMISSION_REQUEST_BYTES: usize = 65_536;
 pub(crate) const LEGACY_NAMED_ADMISSION_RECEIPT_NOT_FOUND: &str =
     "named_admission_receipt_not_found";
 pub(crate) const LEGACY_NAMED_IMPORT_ARM_RESPONSE_BYTES: usize = 128 * 1024;
+pub(crate) const LEGACY_NAMED_IMPORT_CLAIM_RESPONSE_BYTES: usize = 4096;
 pub(crate) const LEGACY_NAMED_IMPORT_OBSERVATION_RESPONSE_BYTES: usize = 4096;
 pub(crate) const LEGACY_NAMED_IMPORT_OBSERVATION_RECEIPT_NOT_FOUND: &str =
     "legacy_named_import_observation_receipt_not_found";
@@ -226,6 +227,8 @@ pub(crate) const LEGACY_NAMED_IMPORT_ARM_RECEIPT_NOT_FOUND: &str =
     "named_import_arm_receipt_not_found";
 pub(crate) const LEGACY_NAMED_IMPORT_VERIFICATION_ARM_RECEIPT_NOT_FOUND: &str =
     "legacy_named_import_verification_arm_receipt_not_found";
+pub(crate) const LEGACY_NAMED_IMPORT_VERIFICATION_CLAIM_RECEIPT_NOT_FOUND: &str =
+    "legacy_named_import_verification_claim_receipt_not_found";
 
 /// The exact server-derived policy input and its durable Initial result.
 #[derive(Serialize, Deserialize)]

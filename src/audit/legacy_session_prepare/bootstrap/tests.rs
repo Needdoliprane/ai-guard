@@ -1177,9 +1177,30 @@ enum ImportArmCase {
     VerificationClaim,
 }
 
+const NAMED_IMPORT_FIXTURE_RUNNER: &str = "synthetic-named-import-arm-runner-fixture";
+const NAMED_IMPORT_FIXTURE_OTHER_BROKER: &str = "synthetic-named-import-arm-other-broker-fixture";
+
+fn named_import_fixture_router(store: std::sync::Arc<Store>) -> axum::Router {
+    use crate::api::{GatewayState, TenantGateway, gateway_router};
+
+    gateway_router(
+        GatewayState::for_tenants(
+            vec![TenantGateway {
+                tenant_id: TENANT.into(),
+                store,
+                runner_token: NAMED_IMPORT_FIXTURE_RUNNER.into(),
+                viewer_token: "synthetic-named-import-arm-viewer-fixture".into(),
+            }],
+            Policy::default(),
+            None,
+            Redactor::new(vec![]),
+        )
+        .unwrap(),
+    )
+}
+
 async fn named_import_arm_fixture(case: ImportArmCase) {
     use crate::{
-        api::{GatewayState, TenantGateway, gateway_router},
         audit::supervision_admission as admission_codec,
         control::{
             ArmResultV1, ClaimDispositionV1, HelperClaimResultV1, HelperCleanupV1,
@@ -1201,24 +1222,8 @@ async fn named_import_arm_fixture(case: ImportArmCase) {
     use std::sync::Arc;
     use tower::ServiceExt;
 
-    const RUNNER: &str = "synthetic-named-import-arm-runner-fixture";
-    const OTHER_BROKER: &str = "synthetic-named-import-arm-other-broker-fixture";
-    let router = |store: Arc<Store>| {
-        gateway_router(
-            GatewayState::for_tenants(
-                vec![TenantGateway {
-                    tenant_id: TENANT.into(),
-                    store,
-                    runner_token: RUNNER.into(),
-                    viewer_token: "synthetic-named-import-arm-viewer-fixture".into(),
-                }],
-                Policy::default(),
-                None,
-                Redactor::new(vec![]),
-            )
-            .unwrap(),
-        )
-    };
+    const RUNNER: &str = NAMED_IMPORT_FIXTURE_RUNNER;
+    const OTHER_BROKER: &str = NAMED_IMPORT_FIXTURE_OTHER_BROKER;
     fn post(path: &str, token: &str, input: &impl serde::Serialize) -> Request<Body> {
         Request::post(path)
             .header(header::AUTHORIZATION, format!("Bearer {token}"))
@@ -1320,7 +1325,7 @@ async fn named_import_arm_fixture(case: ImportArmCase) {
     let private_path = format!("/control{public_path}");
     let reconcile = format!("{private_path}/reconcile");
     let exact = input(&namespace, &arm);
-    let app = router(Arc::clone(&store));
+    let app = named_import_fixture_router(Arc::clone(&store));
     let before = store.head().unwrap();
     for (token, code_path, expected_code) in [
         (
@@ -1872,7 +1877,7 @@ async fn named_import_arm_fixture(case: ImportArmCase) {
         let private_arm_path = format!("/control{public_arm_path}");
         let public_read = format!("{public_arm_path}/reconcile");
         let verification_read = format!("{private_arm_path}/reconcile");
-        let app = router(Arc::clone(&store));
+        let app = named_import_fixture_router(Arc::clone(&store));
         let head_before_read = store.head().unwrap();
         for (token, code_path, expected_code) in [
             (
@@ -1987,7 +1992,8 @@ async fn named_import_arm_fixture(case: ImportArmCase) {
                 &prepared,
                 (&verification, &accepted.receipt),
                 &named_claim,
-            );
+            )
+            .await;
             return;
         }
         assert!(
@@ -2049,7 +2055,7 @@ async fn named_import_arm_fixture(case: ImportArmCase) {
 
     let reopened = Arc::new(f.reopen());
     if let Some((verification, verification_read, expected)) = verification {
-        let app = router(Arc::clone(&reopened));
+        let app = named_import_fixture_router(Arc::clone(&reopened));
         let response = app
             .clone()
             .oneshot(post(&verification_read, BROKER_TOKEN, &verification))
@@ -2095,7 +2101,7 @@ async fn named_import_arm_fixture(case: ImportArmCase) {
         );
         return;
     }
-    let app = router(Arc::clone(&reopened));
+    let app = named_import_fixture_router(Arc::clone(&reopened));
     assert_eq!(
         reopened.observe_helper(&historical).unwrap(),
         historical_receipt

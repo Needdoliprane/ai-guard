@@ -11,13 +11,15 @@ use crate::control::{
     session_control::{
         LEGACY_CONFIRMED_LAUNCH_SPEC_RESPONSE_BYTES, LEGACY_NAMED_ADMISSION_RECEIPT_NOT_FOUND,
         LEGACY_NAMED_ADMISSION_REQUEST_BYTES, LEGACY_NAMED_IMPORT_ARM_RECEIPT_NOT_FOUND,
-        LEGACY_NAMED_IMPORT_ARM_RESPONSE_BYTES, LEGACY_NAMED_IMPORT_OBSERVATION_RECEIPT_NOT_FOUND,
+        LEGACY_NAMED_IMPORT_ARM_RESPONSE_BYTES, LEGACY_NAMED_IMPORT_CLAIM_RESPONSE_BYTES,
+        LEGACY_NAMED_IMPORT_OBSERVATION_RECEIPT_NOT_FOUND,
         LEGACY_NAMED_IMPORT_OBSERVATION_RESPONSE_BYTES,
-        LEGACY_NAMED_IMPORT_VERIFICATION_ARM_RECEIPT_NOT_FOUND, LegacyConfirmedPlanV1,
+        LEGACY_NAMED_IMPORT_VERIFICATION_ARM_RECEIPT_NOT_FOUND,
+        LEGACY_NAMED_IMPORT_VERIFICATION_CLAIM_RECEIPT_NOT_FOUND, LegacyConfirmedPlanV1,
         LegacyNamedAdmissionReceiptV1, LegacyNamedImportArmRequestV1,
         LegacyNamedImportClaimRequestV1, LegacyNamedImportObservationRequestV1,
-        LegacyNamedImportVerificationArmRequestV2, LegacyNamedSupervisedAdmissionV1,
-        canonical_uuid,
+        LegacyNamedImportVerificationArmRequestV2, LegacyNamedImportVerificationClaimRequestV2,
+        LegacyNamedSupervisedAdmissionV1, canonical_uuid,
     },
 };
 use crate::tenant_store::StoreHealth;
@@ -27,7 +29,6 @@ use axum::{
     http::request::Parts,
 };
 
-const LEGACY_NAMED_IMPORT_CLAIM_RESPONSE_BYTES: usize = 4096;
 const LEGACY_NAMED_IMPORT_CLAIM_RECEIPT_NOT_FOUND: &str =
     "legacy_named_import_claim_receipt_not_found";
 
@@ -84,6 +85,11 @@ pub(super) fn routes() -> Router<GatewayState> {
         .route(
             "/control/session-confirmations/{binding_ref}/admission/import-claim/reconcile",
             post(reconcile_named_import_claim)
+                .layer(DefaultBodyLimit::max(LEGACY_NAMED_ADMISSION_REQUEST_BYTES)),
+        )
+        .route(
+            "/control/session-confirmations/{binding_ref}/admission/import-verification-claim/reconcile",
+            post(reconcile_named_import_verification_claim)
                 .layer(DefaultBodyLimit::max(LEGACY_NAMED_ADMISSION_REQUEST_BYTES)),
         )
         .route(
@@ -697,6 +703,44 @@ async fn reconcile_named_import_claim(
                 if result.disposition != ClaimDispositionV1::AlreadyConsumed {
                     return Err(control_error(anyhow::anyhow!(
                         "named import claim reconciliation returned an emitting disposition"
+                    )));
+                }
+                named_import_claim_response(result, &store.redactor_union(&redactor))
+            },
+        )
+        .await
+}
+
+async fn reconcile_named_import_verification_claim(
+    _private: PrivateControlTransport,
+    broker: workload::VerifiedBroker,
+    Path(binding_ref): Path<String>,
+    body: Result<Json<LegacyNamedImportVerificationClaimRequestV2>, JsonRejection>,
+) -> ApiResult<Response> {
+    let binding_ref = canonical_uuid(&binding_ref).map_err(control_error)?;
+    let request = parse_json(body)?;
+    if request.binding_ref != binding_ref {
+        return Err(control_error(ControlFailure::InvalidRequest.into()));
+    }
+    request.validate().map_err(control_error)?;
+    broker
+        .blocking_on(
+            store_io::Lane::Control,
+            move |tenant, identity, redactor| {
+                let store = named_admission_store(&tenant, &redactor)?;
+                let result = store
+                    .read_legacy_named_import_verification_claim(&identity, &request)
+                    .map_err(|error| named_admission_error(&tenant.store, error))?
+                    .ok_or_else(|| {
+                        workload::response(
+                            StatusCode::NOT_FOUND,
+                            LEGACY_NAMED_IMPORT_VERIFICATION_CLAIM_RECEIPT_NOT_FOUND,
+                            "Reçu de claim de vérification d’import introuvable.",
+                        )
+                    })?;
+                if result.disposition != ClaimDispositionV1::AlreadyConsumed {
+                    return Err(control_error(anyhow::anyhow!(
+                        "named import verification claim reconciliation returned an emitting disposition"
                     )));
                 }
                 named_import_claim_response(result, &store.redactor_union(&redactor))

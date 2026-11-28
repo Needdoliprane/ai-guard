@@ -2,22 +2,30 @@ use super::*;
 use crate::{
     broker_registry::BrokerIdentityV1,
     control::{
-        ArmReceiptV1, ClaimDispositionV1, HostClockSampleV1,
+        ArmReceiptV1, ClaimDispositionV1, HelperClaimResultV1, HostClockSampleV1,
         session_control::{
+            LEGACY_NAMED_IMPORT_CLAIM_RESPONSE_BYTES,
+            LEGACY_NAMED_IMPORT_VERIFICATION_CLAIM_RECEIPT_NOT_FOUND,
             LegacyNamedImportClaimRequestV1, LegacyNamedImportVerificationArmRequestV2,
             LegacyNamedImportVerificationClaimRequestV2,
         },
     },
 };
+use axum::{
+    body::{Body, to_bytes},
+    http::{Request, StatusCode, header},
+};
+use std::sync::Arc;
+use tower::ServiceExt;
 
 #[tokio::test]
 async fn legacy_named_import_verification_claim_emits_once_and_replays_exactly() {
     named_import_arm_fixture(ImportArmCase::VerificationClaim).await;
 }
 
-pub(super) fn exercise(
+pub(super) async fn exercise(
     fixture: &Fixture,
-    store: &Store,
+    store: &Arc<Store>,
     (broker, other_broker): (&BrokerIdentityV1, &BrokerIdentityV1),
     mut human: LocalCredentialV1,
     prepared: &WorkerV1,
@@ -56,7 +64,72 @@ pub(super) fn exercise(
     extra["unsupported"] = true.into();
     assert!(serde_json::from_value::<LegacyNamedImportVerificationClaimRequestV2>(extra).is_err());
 
+    let public_claim = format!(
+        "/api/v1/control/session-confirmations/{}/admission/import-verification-claim",
+        request.binding_ref
+    );
+    let private_claim = format!("/control{public_claim}");
+    let private_reconcile = format!("{private_claim}/reconcile");
+    let app = named_import_fixture_router(Arc::clone(store));
     let initial_head = store.head().unwrap();
+    for (token, code_path, code) in [
+        (
+            BROKER_TOKEN,
+            "/error/code",
+            LEGACY_NAMED_IMPORT_VERIFICATION_CLAIM_RECEIPT_NOT_FOUND,
+        ),
+        (
+            NAMED_IMPORT_FIXTURE_OTHER_BROKER,
+            "/code",
+            "worker_not_found",
+        ),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(claim_request(&private_reconcile, token, &request))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let bytes = to_bytes(
+            response.into_body(),
+            LEGACY_NAMED_IMPORT_CLAIM_RESPONSE_BYTES,
+        )
+        .await
+        .unwrap();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body.pointer(code_path).and_then(Value::as_str), Some(code));
+    }
+    let public_reconcile = format!("{public_claim}/reconcile");
+    let wrong_binding = private_reconcile.replace(
+        &request.binding_ref.to_string(),
+        &Uuid::new_v4().to_string(),
+    );
+    for (path, token, status) in [
+        (
+            public_reconcile.as_str(),
+            BROKER_TOKEN,
+            StatusCode::NOT_FOUND,
+        ),
+        (private_claim.as_str(), BROKER_TOKEN, StatusCode::NOT_FOUND),
+        (
+            private_reconcile.as_str(),
+            NAMED_IMPORT_FIXTURE_RUNNER,
+            StatusCode::FORBIDDEN,
+        ),
+        (
+            wrong_binding.as_str(),
+            BROKER_TOKEN,
+            StatusCode::BAD_REQUEST,
+        ),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(claim_request(path, token, &request))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), status);
+    }
+    assert_eq!(store.head().unwrap(), initial_head);
     let quota = QuotaPolicyV1::default();
     let held_quota = serde_json::to_value(store.worker_quota(&quota).unwrap()).unwrap();
     assert!(
@@ -178,11 +251,30 @@ pub(super) fn exercise(
             },
         })
         .unwrap();
-    let reopened = fixture.reopen();
-    let read = reopened
-        .read_legacy_named_import_verification_claim(broker, &request)
-        .unwrap()
+    let reopened = Arc::new(fixture.reopen());
+    let app = named_import_fixture_router(Arc::clone(&reopened));
+    let reconciled = app
+        .clone()
+        .oneshot(claim_request(&private_reconcile, BROKER_TOKEN, &request))
+        .await
         .unwrap();
+    assert_eq!(reconciled.status(), StatusCode::OK);
+    let bytes = to_bytes(
+        reconciled.into_body(),
+        LEGACY_NAMED_IMPORT_CLAIM_RESPONSE_BYTES,
+    )
+    .await
+    .unwrap();
+    let read: HelperClaimResultV1 = serde_json::from_slice(&bytes).unwrap();
+    let conflict = app
+        .oneshot(claim_request(
+            &private_reconcile,
+            BROKER_TOKEN,
+            &different_emitter,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(conflict.status(), StatusCode::CONFLICT);
     let replay = reopened
         .claim_legacy_named_import_verification(broker, &request)
         .unwrap();
@@ -208,4 +300,16 @@ pub(super) fn exercise(
         serde_json::to_value(reopened.worker_quota(&quota).unwrap()).unwrap(),
         held_quota
     );
+}
+
+fn claim_request(
+    path: &str,
+    token: &str,
+    input: &LegacyNamedImportVerificationClaimRequestV2,
+) -> Request<Body> {
+    Request::post(path)
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(serde_json::to_vec(input).unwrap()))
+        .unwrap()
 }
