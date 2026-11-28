@@ -1,4 +1,4 @@
-//! Operator preflight and publication for a fresh owned MySQL schema.
+//! Operator publication and audit-chain inspection for an owned MySQL schema.
 
 use super::{
     OwnedAuditLock, decode_row, driver_error,
@@ -106,6 +106,19 @@ pub struct MysqlOwnedPreparationReceipt {
     pub tls_version: String,
 }
 
+/// Read-only verification of the catalog, exact origin and audit chain.
+/// The receipt carries no projection, epoch or writer-admission authority.
+#[derive(Serialize)]
+pub struct MysqlOwnedAuditChainReceipt {
+    pub verification_mode: &'static str,
+    pub target_schema_version: u16,
+    pub head_seq: i64,
+    pub head_hash: String,
+    pub payload_bytes: u64,
+    pub configured_authentication: MysqlAuthentication,
+    pub tls_version: String,
+}
+
 /// The identity of one explicit publication against a configured operator target.
 pub struct MysqlOwnedPreparationRequest<'a> {
     pub tenant_id: &'a str,
@@ -115,6 +128,28 @@ pub struct MysqlOwnedPreparationRequest<'a> {
     pub operation_id: Uuid,
     pub installation_id: Uuid,
     pub source_id: Uuid,
+}
+
+impl MysqlOwnedPreparationRequest<'_> {
+    fn anchor(&self, database: &str) -> FreshAnchorRequestV1 {
+        FreshAnchorRequestV1 {
+            operation_id: self.operation_id,
+            schema_version: self.schema_version,
+            tenant_id: self.tenant_id.into(),
+            namespace_id: self.namespace_id,
+            installation_id: self.installation_id,
+            source_id: self.source_id,
+            server_uuid: self.server_uuid,
+            schema: database.into(),
+        }
+    }
+
+    fn configured(&self) -> ConfiguredTenantNamespace<'_> {
+        ConfiguredTenantNamespace {
+            tenant_id: self.tenant_id,
+            namespace_id: self.namespace_id,
+        }
+    }
 }
 
 enum FreshSourceMode {
@@ -149,31 +184,52 @@ pub async fn verify_owned_fresh_source(
         .await
 }
 
+/// Inspect an already published owned source under the physical target lock.
+/// Compare the exact creation request and stream every event in one read-only
+/// snapshot. The caller still needs separate projection and epoch proofs.
+pub async fn verify_owned_audit_chain(
+    endpoint: MysqlEndpoint<'_>,
+    credentials: MysqlCredentials<'_>,
+    request: MysqlOwnedPreparationRequest<'_>,
+) -> Result<MysqlOwnedAuditChainReceipt> {
+    let anchor = request.anchor(endpoint.database);
+    let redactor = Redactor::new(Vec::new());
+    let (configured_authentication, tls_version, head) = prepare_empty_owned_target(
+        endpoint,
+        credentials,
+        request.server_uuid,
+        request.schema_version,
+        EmptyTargetOperation::VerifyAuditChain {
+            request: &anchor,
+            configured: request.configured(),
+            redactor: &redactor,
+        },
+    )
+    .await?;
+    let head = head.context("MySQL owned audit chain receipt is missing")?;
+    Ok(MysqlOwnedAuditChainReceipt {
+        verification_mode: "owned_audit_chain",
+        target_schema_version: request.schema_version,
+        head_seq: head.seq,
+        head_hash: head.hash,
+        payload_bytes: head.payload_bytes,
+        configured_authentication,
+        tls_version,
+    })
+}
+
 async fn prepare_configured_fresh_source(
     endpoint: MysqlEndpoint<'_>,
     credentials: MysqlCredentials<'_>,
     request: MysqlOwnedPreparationRequest<'_>,
     mode: FreshSourceMode,
 ) -> Result<MysqlOwnedPreparationReceipt> {
-    let anchor = FreshAnchorRequestV1 {
-        operation_id: request.operation_id,
-        schema_version: request.schema_version,
-        tenant_id: request.tenant_id.into(),
-        namespace_id: request.namespace_id,
-        installation_id: request.installation_id,
-        source_id: request.source_id,
-        server_uuid: request.server_uuid,
-        schema: endpoint.database.into(),
-    };
-    let configured = ConfiguredTenantNamespace {
-        tenant_id: request.tenant_id,
-        namespace_id: request.namespace_id,
-    };
+    let anchor = request.anchor(endpoint.database);
     prepare_owned_fresh_source(
         endpoint,
         credentials,
         &anchor,
-        configured,
+        request.configured(),
         &Redactor::new(Vec::new()),
         mode,
     )
@@ -236,6 +292,11 @@ enum EmptyTargetOperation<'a> {
         configured: ConfiguredTenantNamespace<'a>,
         redactor: &'a Redactor,
         mode: FreshSourceMode,
+    },
+    VerifyAuditChain {
+        request: &'a FreshAnchorRequestV1,
+        configured: ConfiguredTenantNamespace<'a>,
+        redactor: &'a Redactor,
     },
 }
 
@@ -360,6 +421,27 @@ async fn prepare_empty_owned_target(
                         "MySQL owned publication head changed after commit"
                     );
                     Ok(Some(verified))
+                }
+                EmptyTargetOperation::VerifyAuditChain {
+                    request,
+                    configured,
+                    redactor,
+                } => {
+                    let redactor = redactor.with_secrets([password.to_owned()]);
+                    let anchor = request.plan(
+                        schema_version,
+                        server,
+                        endpoint.database,
+                        configured,
+                        &redactor,
+                    )?;
+                    ensure!(
+                        schema_has_user_objects(&mut conn, &ownership).await?,
+                        MysqlOwnedPreparationRefusal::PublicationMissing
+                    );
+                    publication::verify_anchored_chain(&mut conn, &ownership, &anchor)
+                        .await
+                        .map(Some)
                 }
             }
         }

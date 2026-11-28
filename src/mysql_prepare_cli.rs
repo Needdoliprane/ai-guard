@@ -1,7 +1,7 @@
 use crate::gateway_config::{MysqlPreparationProfileRefusal, load_mysql_preparation_target};
 use agentsandbox::mysql_storage::{
     MysqlOwnedPreparationRefusal, MysqlOwnedPreparationRequest, MysqlProbeError,
-    publish_owned_fresh_source, verify_owned_fresh_source,
+    publish_owned_fresh_source, verify_owned_audit_chain, verify_owned_fresh_source,
 };
 use anyhow::{Context, Result, anyhow};
 use clap::Args;
@@ -38,8 +38,11 @@ pub(crate) struct PrepareMysqlOwnedArgs {
     #[arg(long, value_parser = parse_uuid)]
     source_id: Uuid,
     /// Verify the exact fresh publication in read-only mode. Refuse an empty schema.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "verify_chain")]
     verify_only: bool,
+    /// Verify the exact owned audit manifest, anchor and chain without mutations.
+    #[arg(long, conflicts_with = "verify_only")]
+    verify_chain: bool,
 }
 
 fn parse_schema_version(value: &str) -> std::result::Result<u16, &'static str> {
@@ -80,24 +83,32 @@ pub(crate) async fn run(args: PrepareMysqlOwnedArgs) -> Result<()> {
     };
     let endpoint = target.endpoint();
     let credentials = target.credentials();
-    let receipt = if args.verify_only {
-        verify_owned_fresh_source(endpoint, credentials, request).await
+    let json = if args.verify_chain {
+        let receipt = verify_owned_audit_chain(endpoint, credentials, request)
+            .await
+            .map_err(|_| {
+                anyhow!("MySQL owned audit chain verification failed; preserve the target")
+            })?;
+        serde_json::to_string(&receipt).context("cannot encode the verified chain receipt")?
     } else {
-        publish_owned_fresh_source(endpoint, credentials, request).await
-    }
-    .map_err(|error| {
-        if let Some(refusal) = error.downcast_ref::<MysqlOwnedPreparationRefusal>() {
-            return (*refusal).into();
+        let receipt = if args.verify_only {
+            verify_owned_fresh_source(endpoint, credentials, request).await
+        } else {
+            publish_owned_fresh_source(endpoint, credentials, request).await
         }
-        if let Some(refusal) = error.downcast_ref::<MysqlProbeError>() {
-            return (*refusal).into();
-        }
-        anyhow!(
-            "MySQL owned publication could not be verified; preserve the target and check its exact configuration and state"
-        )
-    })?;
-
-    let json = serde_json::to_string(&receipt).context("cannot encode the verified receipt")?;
+        .map_err(|error| {
+            if let Some(refusal) = error.downcast_ref::<MysqlOwnedPreparationRefusal>() {
+                return (*refusal).into();
+            }
+            if let Some(refusal) = error.downcast_ref::<MysqlProbeError>() {
+                return (*refusal).into();
+            }
+            anyhow!(
+                "MySQL owned publication could not be verified; preserve the target and check its exact configuration and state"
+            )
+        })?;
+        serde_json::to_string(&receipt).context("cannot encode the verified receipt")?
+    };
     let mut stdout = io::stdout().lock();
     writeln!(stdout, "{json}")
         .and_then(|()| stdout.flush())

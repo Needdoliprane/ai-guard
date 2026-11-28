@@ -1864,14 +1864,18 @@ mod tests {
             "--source-id",
             SOURCE,
         ];
-        for (format, expected, verify_only) in
-            [("14", 14_u16, false), ("15", 15, false), ("14", 14, true)]
-        {
+        for (format, expected, verify_only, verify_chain) in [
+            ("14", 14_u16, false, false),
+            ("15", 15, false, false),
+            ("14", 14, true, false),
+            ("14", 14, false, true),
+        ] {
             let parsed = Cli::command()
                 .try_get_matches_from(
                     base.into_iter()
                         .chain(["--schema-version", format])
-                        .chain(verify_only.then_some("--verify-only")),
+                        .chain(verify_only.then_some("--verify-only"))
+                        .chain(verify_chain.then_some("--verify-chain")),
                 )
                 .unwrap();
             let args = parsed.subcommand_matches("prepare-mysql-owned").unwrap();
@@ -1882,6 +1886,7 @@ mod tests {
             );
             assert_eq!(args.get_one::<u16>("schema_version"), Some(&expected));
             assert_eq!(args.get_flag("verify_only"), verify_only);
+            assert_eq!(args.get_flag("verify_chain"), verify_chain);
             for (name, value) in [
                 ("server_uuid", SERVER),
                 ("operation_id", OPERATION),
@@ -1906,17 +1911,48 @@ mod tests {
                 .try_get_matches_from(base.into_iter().chain(["--verify-only"]))
                 .is_err()
         );
+        assert!(
+            Cli::command()
+                .try_get_matches_from(base.into_iter().chain(["--verify-chain"]))
+                .is_err()
+        );
+        assert!(
+            Cli::command()
+                .try_get_matches_from(base.into_iter().chain([
+                    "--schema-version",
+                    "14",
+                    "--verify-only",
+                    "--verify-chain"
+                ]),)
+                .is_err()
+        );
         for omitted in (2..base.len()).step_by(2) {
-            let args = base
+            let args: Vec<_> = base
                 .into_iter()
                 .enumerate()
                 .filter(|(index, _)| !(omitted..=omitted + 1).contains(index))
-                .map(|(_, arg)| arg);
+                .map(|(_, arg)| arg)
+                .collect();
             assert!(
                 Cli::command()
-                    .try_get_matches_from(args.chain(["--schema-version", "14", "--verify-only"]))
+                    .try_get_matches_from(args.iter().copied().chain([
+                        "--schema-version",
+                        "14",
+                        "--verify-only"
+                    ]))
                     .is_err(),
                 "accepted omission of {}",
+                base[omitted]
+            );
+            assert!(
+                Cli::command()
+                    .try_get_matches_from(args.iter().copied().chain([
+                        "--schema-version",
+                        "14",
+                        "--verify-chain"
+                    ]))
+                    .is_err(),
+                "accepted omission of {} in chain verification",
                 base[omitted]
             );
         }

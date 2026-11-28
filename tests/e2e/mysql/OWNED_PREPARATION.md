@@ -212,6 +212,31 @@ pouvoir référencer les tables de la cible et garder `foreign_key_checks` et
    [Descripteur actuel](../../../src/human_authority/manifest.rs) ·
    [Epoch et propriétaire](../../../src/human_authority.rs)
 
+## Vérification en lecture seule d’une chaîne existante
+
+`prepare-mysql-owned --verify-chain` vérifie une cible owned existante sans
+exécuter le chemin de préparation fraîche. Utiliser les mêmes registres,
+tenant, format et UUID que pour l’ancre attendue, puis ajouter cette option à
+la commande habituelle :
+
+```sh
+agentsandbox prepare-mysql-owned \
+  --registry "${QA_MYSQL_OPERATOR_REGISTRY:?}" \
+  --gateway-registry "${QA_MYSQL_GATEWAY_REGISTRY:?}" --tenant "${QA_MYSQL_TENANT:?}" \
+  --schema-version 15 --server-uuid "${QA_MYSQL_SERVER_UUID:?}" \
+  --operation-id "${QA_MYSQL_OPERATION_ID:?}" \
+  --installation-id "${QA_MYSQL_INSTALLATION_ID:?}" \
+  --source-id "${QA_MYSQL_SOURCE_ID:?}" --verify-chain
+```
+
+Cette lecture seule vérifie le manifeste owned, l’ancre exacte et la chaîne
+d’audit dans un même instantané. Elle ne vérifie pas les projections et ne
+donne aucune admission d’écriture au gateway. `--verify-chain` et
+`--verify-only` sont exclusifs; sans l’un ou l’autre, la préparation fraîche
+existante reste le comportement par défaut. Le reçu distingue ce mode par
+`verification_mode: owned_audit_chain`. Cette nouvelle option n’a pas encore
+de preuve d’exécution physique.
+
 ## Recettes physiques
 
 - **Libtest `e992a5a1`.** Le sélecteur

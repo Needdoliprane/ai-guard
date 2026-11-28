@@ -123,6 +123,30 @@ pub(super) async fn verify_published(
     lock: &OwnedAuditLock,
     draft: &FreshAnchorDraft<'_>,
 ) -> Result<AuditHead> {
+    verify_snapshot(conn, lock, draft, AuditRange::Fresh).await
+}
+
+/// Inspect the anchored audit chain through its durable head. The audit
+/// projections and the current writer epoch require their own verification.
+pub(super) async fn verify_anchored_chain(
+    conn: &mut Conn,
+    lock: &OwnedAuditLock,
+    draft: &FreshAnchorDraft<'_>,
+) -> Result<AuditHead> {
+    verify_snapshot(conn, lock, draft, AuditRange::History).await
+}
+
+enum AuditRange {
+    Fresh,
+    History,
+}
+
+async fn verify_snapshot(
+    conn: &mut Conn,
+    lock: &OwnedAuditLock,
+    draft: &FreshAnchorDraft<'_>,
+    range: AuditRange,
+) -> Result<AuditHead> {
     draft.require_locked_target(lock)?;
     let request = draft.request();
     let version = request.schema_version;
@@ -138,14 +162,65 @@ pub(super) async fn verify_published(
     let verified = async {
         audit_manifest::verify_structure(&mut tx, lock, version).await?;
         let head = read_published_binding(&mut tx, version, &request.tenant_id, &namespace).await?;
-        replay_published_prefix(&mut tx, &head, draft).await?;
-        audit_manifest::require_empty_projections(&mut tx, version).await?;
+        match range {
+            AuditRange::Fresh => {
+                replay_published_prefix(&mut tx, &head, draft).await?;
+                audit_manifest::require_empty_projections(&mut tx, version).await?;
+            }
+            AuditRange::History => replay_anchored_chain(&mut tx, &head, draft).await?,
+        }
         lock.verify(&mut tx).await?;
         Ok::<_, anyhow::Error>(head)
     }
     .await;
     tx.rollback().await.map_err(driver_error)?;
     verified
+}
+
+async fn replay_anchored_chain(
+    tx: &mut Transaction<'_>,
+    bound: &AuditHead,
+    draft: &FreshAnchorDraft<'_>,
+) -> Result<()> {
+    ensure!(
+        bound.seq >= PUBLISHED_EVENTS,
+        "MySQL owned publication chain length mismatch"
+    );
+    // One extra row suffices to detect any suffix beyond the declared head.
+    // The limit also bounds the cursor drain when a check fails early.
+    let limit = u64::try_from(bound.seq)? + 1;
+    let mut result = tx
+        .exec_iter(
+            "SELECT seq,event_id,received_at,prev_hash,hash,payload \
+             FROM ai_guard_audit_event ORDER BY seq LIMIT ?",
+            (limit,),
+        )
+        .await
+        .map_err(driver_error)?;
+    let checked = async {
+        let missing_origin = "MySQL owned publication chain length mismatch";
+        let genesis = result
+            .next()
+            .await
+            .map_err(driver_error)?
+            .context(missing_origin)?;
+        let anchor = result
+            .next()
+            .await
+            .map_err(driver_error)?
+            .context(missing_origin)?;
+        let mut head =
+            verify_owned_origin_prefix([decode_row(genesis)?, decode_row(anchor)?], draft)?;
+        while let Some(row) = result.next().await.map_err(driver_error)? {
+            head = verify_owned_tail_row(head, decode_row(row)?, bound)?;
+        }
+        require_owned_head(&head, bound)
+    }
+    .await;
+    let drained = result.drop_result().await.map_err(driver_error);
+    checked?;
+    drained?;
+    Ok(())
 }
 
 async fn require_durable_writable(tx: &mut Transaction<'_>) -> Result<()> {
@@ -268,15 +343,25 @@ fn verify_owned_history(
     let anchor = rows.next().context(missing_origin)??;
     let mut head = verify_owned_origin_prefix([genesis, anchor], draft)?;
     for columns in rows {
-        let columns = columns?;
-        ensure!(
-            head.seq < bound.seq,
-            "MySQL audit row follows the durable head"
-        );
-        let encoded = decode_event_columns(columns)?;
-        head = verify_owned_link(&encoded, head)?;
+        head = verify_owned_tail_row(head, columns?, bound)?;
     }
-    ensure!(head == *bound, "MySQL audit head mismatch");
+    require_owned_head(&head, bound)
+}
+
+fn verify_owned_tail_row(
+    head: AuditHead,
+    columns: EventColumns,
+    bound: &AuditHead,
+) -> Result<AuditHead> {
+    ensure!(
+        head.seq < bound.seq,
+        "MySQL audit row follows the durable head"
+    );
+    verify_owned_link(&decode_event_columns(columns)?, head)
+}
+
+fn require_owned_head(head: &AuditHead, bound: &AuditHead) -> Result<()> {
+    ensure!(head == bound, "MySQL audit head mismatch");
     Ok(())
 }
 
@@ -428,6 +513,34 @@ mod tests {
             error.to_string(),
             "MySQL audit row follows the durable head"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn owned_history_rejects_a_coherent_chain_for_another_installation() -> Result<()> {
+        for schema_version in [14, 15] {
+            let request = origin_request(schema_version);
+            let foreign_request = FreshAnchorRequestV1 {
+                installation_id: Uuid::from_u128(6),
+                ..request.clone()
+            };
+            let foreign = origin_draft(&foreign_request)?;
+            let [genesis, anchor] = origin_rows(&foreign)?;
+            let tail = encoded_origin_row(3, anchor.4.clone(), Event::new("qa.mysql.history"))?;
+            let head = AuditHead {
+                seq: 3,
+                hash: tail.4.clone(),
+                payload_bytes: (genesis.5.len() + anchor.5.len() + tail.5.len()) as u64,
+            };
+            let rows = [genesis, anchor, tail];
+            verify_owned_history(rows.clone().map(Ok), &head, &foreign)?;
+            let error = verify_owned_history(rows.map(Ok), &head, &origin_draft(&request)?)
+                .expect_err("the chain's integrity does not establish the requested installation");
+            assert_eq!(
+                error.to_string(),
+                "MySQL fresh anchor differs from the requested operation"
+            );
+        }
         Ok(())
     }
 
