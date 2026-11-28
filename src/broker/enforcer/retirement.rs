@@ -158,8 +158,10 @@ impl ActorState {
                 {
                     self.retained_terminal = RetainedTerminalObservation::Conflicting;
                 } else {
-                    **previous = observation.clone();
-                    *observed_for_current_stop = true;
+                    if !*observed_for_current_stop {
+                        **previous = observation.clone();
+                        *observed_for_current_stop = true;
+                    }
                     *known_oom_killed = known_oom_killed.or(observation.process.oom_killed);
                 }
             }

@@ -745,6 +745,13 @@ async fn full3_terminal_query_requires_more_than_an_acknowledged_stop() -> Enfor
             &terminal,
             &actor.registration,
         );
+        let mut later = terminal.clone();
+        later.observed_at += chrono::Duration::seconds(1);
+        actor.state.lock().unwrap().retain_terminal_candidate(
+            original_cancel.as_ref(),
+            &later,
+            &actor.registration,
+        );
         let original_observation =
             recovery_v3::query_full3_terminal_for_fixture(&fixture.root, client.epoch(), &stop)
                 .await;
@@ -850,7 +857,9 @@ async fn full3_terminal_query_requires_more_than_an_acknowledged_stop() -> Enfor
     ) = observed?;
     assert!(retained_cancel);
     assert!(matches!(acknowledged_only, Err(EnforcerError::NotReady)));
-    assert_eq!(original_observation?.process.oom_killed, Some(false));
+    let original = original_observation?;
+    assert_eq!(original.observed_at, terminal.observed_at);
+    assert_eq!(original.process.oom_killed, Some(false));
     assert!(matches!(wrong_epoch, Err(EnforcerError::Conflict)));
     assert!(matches!(no_observation, Err(EnforcerError::NotReady)));
     let current = exact_observation?;
