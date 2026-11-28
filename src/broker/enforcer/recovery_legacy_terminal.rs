@@ -1,8 +1,8 @@
-//! Corroborate a durable Legacy STOP with the already restored owner.
+//! Corroborate the durable STOP latch in an existing Legacy guardian.
 use super::*;
 use crate::broker::journal::recovery::legacy_worker_terminal::LegacyWorkerTerminalEvidenceV1;
 
-struct LegacyTerminalStopTarget {
+struct LegacyTerminalStopLatchTarget {
     arm_id: String,
     registration_hash: String,
     scope_hash: String,
@@ -11,21 +11,22 @@ struct LegacyTerminalStopTarget {
 }
 
 impl EnforcerStopClient {
-    /// Read the existing guardian under the retained journal lease. Success
-    /// corroborates one STOP in the authenticated snapshot. The caller still
-    /// needs to recheck its current journal head and configured invocation.
+    /// Confirm the exact durable STOP latch in an authenticated snapshot
+    /// under the retained journal lease. Worker liveness and terminal effects
+    /// require separate observations. The terminal observer must pin its own
+    /// engine under closed admission and recheck journal head and invocation.
     #[allow(
         dead_code,
         reason = "the Legacy terminal observer is composed separately"
     )]
-    pub(in crate::broker) async fn confirm_legacy_terminal_stop_owner(
+    pub(in crate::broker) async fn confirm_legacy_terminal_stop_latch(
         &self,
         proof: &LegacyWorkerTerminalEvidenceV1,
     ) -> EnforcerResult<()> {
         let (arm, receipt) = proof.arm();
         let (authority, owned) = proof.target();
         let registration = recovery_registration(proof.scope(), arm, receipt, authority, owned)?;
-        self.confirm_existing_legacy_stop(&LegacyTerminalStopTarget {
+        self.confirm_existing_legacy_stop_latch(&LegacyTerminalStopLatchTarget {
             arm_id: arm.operation_id.clone(),
             registration_hash: registration.digest()?,
             scope_hash: recovery_scope_hash(proof.scope())?,
@@ -35,16 +36,16 @@ impl EnforcerStopClient {
         .await
     }
 
-    async fn confirm_existing_legacy_stop(
+    async fn confirm_existing_legacy_stop_latch(
         &self,
-        target: &LegacyTerminalStopTarget,
+        target: &LegacyTerminalStopLatchTarget,
     ) -> EnforcerResult<()> {
         if self.0.protocol != StopProtocol::V2 || !matches!(self.0.affinity, StopAffinity::Legacy) {
             return Err(EnforcerError::Unauthorized);
         }
         let (epoch, version, revision, retained) = {
             let cache = self.0.cache.lock().map_err(|_| EnforcerError::Unhealthy)?;
-            let (epoch, entry) = acknowledged_stop(&cache, &target.arm_id)?;
+            let (epoch, entry) = acknowledged_restore_for_latch(&cache, &target.arm_id)?;
             let retained = &entry.retained;
             let request = &retained.request;
             if retained.binding.is_some()
@@ -129,7 +130,7 @@ impl EnforcerStopClient {
             .await
             .map_err(|_| EnforcerError::Unavailable)??;
             let cache = self.0.cache.lock().map_err(|_| EnforcerError::Unhealthy)?;
-            let (latest, entry) = acknowledged_stop(&cache, &target.arm_id)?;
+            let (latest, entry) = acknowledged_restore_for_latch(&cache, &target.arm_id)?;
             if latest != epoch || cache.observation_version != version || entry.revision != revision
             {
                 return Err(EnforcerError::Conflict);
@@ -141,7 +142,7 @@ impl EnforcerStopClient {
     }
 }
 
-fn acknowledged_stop<'a>(
+fn acknowledged_restore_for_latch<'a>(
     cache: &'a StopCache,
     arm_id: &str,
 ) -> EnforcerResult<(Uuid, &'a PendingRestore)> {

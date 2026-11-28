@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 use std::os::unix::fs::PermissionsExt;
 
 #[tokio::test]
-async fn legacy_terminal_read_checks_only_the_existing_stop_owner() -> anyhow::Result<()> {
+async fn legacy_terminal_read_confirms_only_the_existing_stop_latch() -> anyhow::Result<()> {
     let tmp = std::fs::canonicalize("/tmp")?;
     let files = tempfile::Builder::new()
         .prefix("aig-stop-")
@@ -165,7 +165,9 @@ async fn legacy_terminal_read_checks_only_the_existing_stop_owner() -> anyhow::R
         open_barrier: Mutex::new(None),
         observed_epochs: Mutex::new(Vec::new()),
     }));
-    let mut target = LegacyTerminalStopTarget {
+    // Exercise the bound data, checked endpoint and real STOP receipt. The
+    // running Worker fixture covers the separate journal evidence projection.
+    let mut target = LegacyTerminalStopLatchTarget {
         arm_id,
         registration_hash,
         scope_hash,
@@ -175,17 +177,18 @@ async fn legacy_terminal_read_checks_only_the_existing_stop_owner() -> anyhow::R
     let other_scope_hash = hex::encode([0xff; 32]);
     let scope_hash = std::mem::replace(&mut target.scope_hash, other_scope_hash);
     assert_eq!(
-        client.confirm_existing_legacy_stop(&target).await,
+        client.confirm_existing_legacy_stop_latch(&target).await,
         Err(EnforcerError::Conflict)
     );
     target.scope_hash = scope_hash;
 
     let query = || async {
-        let (result, served) = tokio::join!(client.confirm_existing_legacy_stop(&target), async {
-            let stream = tokio::time::timeout(IO_TIMEOUT, listener.accept_checked()).await??;
-            serve_connection(stream, Arc::clone(&state)).await?;
-            Ok::<_, anyhow::Error>(())
-        });
+        let (result, served) =
+            tokio::join!(client.confirm_existing_legacy_stop_latch(&target), async {
+                let stream = tokio::time::timeout(IO_TIMEOUT, listener.accept_checked()).await??;
+                serve_connection(stream, Arc::clone(&state)).await?;
+                Ok::<_, anyhow::Error>(())
+            });
         served?;
         Ok::<_, anyhow::Error>(result)
     };
@@ -233,7 +236,7 @@ async fn legacy_terminal_read_checks_only_the_existing_stop_owner() -> anyhow::R
     assert_eq!(read?, Err(EnforcerError::Conflict));
     // No reconnect to the successor and no restore.
     assert_eq!(
-        client.confirm_existing_legacy_stop(&target).await,
+        client.confirm_existing_legacy_stop_latch(&target).await,
         Err(EnforcerError::Conflict)
     );
     let cache = client.0.cache.lock().unwrap();

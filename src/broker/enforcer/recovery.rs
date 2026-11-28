@@ -2025,35 +2025,32 @@ impl EnforcerStopClient {
         expected_epoch: Option<Uuid>,
     ) -> Result<(StopConnection, String), OpenFailure> {
         let root = &self.0.root;
-        root.revalidate()
-            .map_err(|_| OpenFailure::Other(EnforcerError::UnsafeFilesystem))?;
-        self.0
-            .affinity
-            .check_root(root)
-            .map_err(OpenFailure::Other)?;
-        if capability(root, false).map_err(OpenFailure::Other)? != self.0.capability {
-            return Err(OpenFailure::Other(EnforcerError::Unauthorized));
-        }
-        let endpoint = load_endpoint(root)
-            .map_err(|e| OpenFailure::Other(e.into()))?
-            .ok_or(OpenFailure::Absent)?;
-        if expected_epoch.is_some_and(|expected| expected != endpoint.epoch()) {
-            return Err(OpenFailure::Other(EnforcerError::Conflict));
-        }
-        let endpoints = root
-            .persistent_child("endpoints", false)
-            .map_err(|_| OpenFailure::Other(EnforcerError::UnsafeFilesystem))?
-            .ok_or(OpenFailure::Other(EnforcerError::UnsafeFilesystem))?;
-        let binding =
-            recovery_root_binding(root, &endpoint).map_err(|e| OpenFailure::Other(e.into()))?;
-        let handshake_deadline = (self.0.protocol == StopProtocol::V3)
-            .then(|| Instant::now() + recovery_v3::HANDSHAKE_WINDOW);
-        let mut stream = match endpoint.connect_checked(&endpoints).await {
-            Ok(stream) => stream,
-            Err(crate::broker::local_ipc::IpcError::Unavailable) => {
-                return Err(OpenFailure::Absent);
-            }
-            Err(error) => return Err(OpenFailure::Other(error.into())),
+        let ((endpoint, _endpoints, binding), mut stream, handshake_deadline) = if let Some(epoch) =
+            expected_epoch
+        {
+            let root = root.clone();
+            let affinity = self.0.affinity.clone();
+            let key = self.0.capability;
+            let driver = tokio::runtime::Handle::current();
+            // The checked connector includes synchronous inode and peer
+            // checks around the bounded Unix connect. Keep that existing
+            // operation together off the latch reader's async task.
+            let (prepared, stream) = tokio::task::spawn_blocking(move || {
+                let prepared = prepare_stop_endpoint(&root, &affinity, key, Some(epoch))?;
+                let (endpoint, endpoints, _) = &prepared;
+                let stream = driver.block_on(connect_stop_endpoint(endpoint, endpoints))?;
+                Ok::<_, OpenFailure>((prepared, stream))
+            })
+            .await
+            .map_err(|_| OpenFailure::Other(EnforcerError::Unavailable))??;
+            (prepared, stream, None)
+        } else {
+            let prepared = prepare_stop_endpoint(root, &self.0.affinity, self.0.capability, None)?;
+            let deadline = (self.0.protocol == StopProtocol::V3)
+                .then(|| Instant::now() + recovery_v3::HANDSHAKE_WINDOW);
+            let (endpoint, endpoints, _) = &prepared;
+            let stream = connect_stop_endpoint(endpoint, endpoints).await?;
+            (prepared, stream, deadline)
         };
         let frame_timeout = match handshake_deadline {
             Some(deadline) => recovery_v3::time_left(deadline).map_err(OpenFailure::Other)?,
@@ -2134,16 +2131,15 @@ impl EnforcerStopClient {
             }
             None
         };
-        if recovery_root_binding(root, &endpoint).map_err(|e| OpenFailure::Other(e.into()))?
-            != binding
-        {
-            return Err(OpenFailure::Other(EnforcerError::UnsafeFilesystem));
-        }
-        if load_endpoint(root)
-            .map_err(|e| OpenFailure::Other(e.into()))?
-            .is_none_or(|latest| latest.epoch() != endpoint.epoch())
-        {
-            return Err(OpenFailure::Other(EnforcerError::Conflict));
+        if expected_epoch.is_some() {
+            let root = root.clone();
+            let endpoint = endpoint.clone();
+            let binding = binding.clone();
+            tokio::task::spawn_blocking(move || recheck_stop_endpoint(&root, &endpoint, &binding))
+                .await
+                .map_err(|_| OpenFailure::Other(EnforcerError::Unavailable))??;
+        } else {
+            recheck_stop_endpoint(root, &endpoint, &binding)?;
         }
         if let Some(deadline) = handshake_deadline {
             recovery_v3::time_left(deadline).map_err(OpenFailure::Other)?;
@@ -2747,6 +2743,63 @@ impl EnforcerStopClient {
         }
     }
 }
+fn prepare_stop_endpoint(
+    root: &Directory,
+    affinity: &StopAffinity,
+    key: [u8; 32],
+    expected_epoch: Option<Uuid>,
+) -> Result<(EndpointRecordV1, Directory, String), OpenFailure> {
+    root.revalidate()
+        .map_err(|_| OpenFailure::Other(EnforcerError::UnsafeFilesystem))?;
+    affinity.check_root(root).map_err(OpenFailure::Other)?;
+    if capability(root, false).map_err(OpenFailure::Other)? != key {
+        return Err(OpenFailure::Other(EnforcerError::Unauthorized));
+    }
+    let endpoint = load_endpoint(root)
+        .map_err(|error| OpenFailure::Other(error.into()))?
+        .ok_or(OpenFailure::Absent)?;
+    if expected_epoch.is_some_and(|expected| expected != endpoint.epoch()) {
+        return Err(OpenFailure::Other(EnforcerError::Conflict));
+    }
+    let endpoints = root
+        .persistent_child("endpoints", false)
+        .map_err(|_| OpenFailure::Other(EnforcerError::UnsafeFilesystem))?
+        .ok_or(OpenFailure::Other(EnforcerError::UnsafeFilesystem))?;
+    let binding =
+        recovery_root_binding(root, &endpoint).map_err(|error| OpenFailure::Other(error.into()))?;
+    Ok((endpoint, endpoints, binding))
+}
+
+async fn connect_stop_endpoint(
+    endpoint: &EndpointRecordV1,
+    endpoints: &Directory,
+) -> Result<UnixStream, OpenFailure> {
+    match endpoint.connect_checked(endpoints).await {
+        Ok(stream) => Ok(stream),
+        Err(crate::broker::local_ipc::IpcError::Unavailable) => Err(OpenFailure::Absent),
+        Err(error) => Err(OpenFailure::Other(error.into())),
+    }
+}
+
+fn recheck_stop_endpoint(
+    root: &Directory,
+    endpoint: &EndpointRecordV1,
+    binding: &str,
+) -> Result<(), OpenFailure> {
+    if recovery_root_binding(root, endpoint).map_err(|error| OpenFailure::Other(error.into()))?
+        != binding
+    {
+        return Err(OpenFailure::Other(EnforcerError::UnsafeFilesystem));
+    }
+    if load_endpoint(root)
+        .map_err(|error| OpenFailure::Other(error.into()))?
+        .is_none_or(|latest| latest.epoch() != endpoint.epoch())
+    {
+        return Err(OpenFailure::Other(EnforcerError::Conflict));
+    }
+    Ok(())
+}
+
 async fn request_stops2(
     stream: &mut UnixStream,
     request: StopRequest,
