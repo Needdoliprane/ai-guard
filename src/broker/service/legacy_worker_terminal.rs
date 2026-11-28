@@ -1,8 +1,12 @@
 //! Authenticate and observe an already retained Legacy target.
 use super::*;
 use crate::{
-    broker::journal::recovery::legacy_worker_terminal::{
-        LegacyWorkerTerminalEvidenceV1, RetainedLegacyWorkerTerminalObservationV1,
+    broker::journal::{
+        JournalScopeV1, RevisionRefV1,
+        recovery::legacy_worker_terminal::{
+            ConfirmedLegacyWorkerTerminalObservationV1, LegacyWorkerTerminalEvidenceV1,
+            RetainedLegacyWorkerTerminalObservationV1,
+        },
     },
     control::{RuntimeStatusV1, WorkerMutationV1, WorkerStateV1, WorkerTransitionV1, WorkerV1},
     runner::ColdAuditBudget,
@@ -222,6 +226,118 @@ impl Service {
         let budget = ColdAuditBudget::start();
         self.check_legacy_terminal_target(&proof, &budget).await?;
         Ok(ValidatedLegacyWorkerTerminal { evidence: proof })
+    }
+
+    /// Publish the already retained terminal observation under closed
+    /// admission. A confirmed local receipt answers recovery immediately.
+    /// An uncertain exchange leaves the same request available for replay.
+    pub(super) async fn publish_legacy_worker_terminal_observation(
+        &self,
+        scope: &JournalScopeV1,
+        operation_id: Uuid,
+        ancestor: &RevisionRefV1,
+    ) -> Result<ConfirmedLegacyWorkerTerminalObservationV1, Code> {
+        self.require_legacy_terminal_validation_fence()?;
+        if operation_id.is_nil() {
+            return Err(Code::InvalidInput);
+        }
+        let profile = self
+            .registry
+            .profile_for_scope(scope)
+            .map_err(|_| Code::Forbidden)?
+            .clone();
+        let jobs = self.profile_jobs(scope.profile_id())?;
+        let writer = jobs
+            .writer
+            .get()
+            .filter(|capabilities| capabilities.is_stop_only())
+            .ok_or(Code::NeedsReconciliation)?
+            .stops();
+        let _capacity = self.execution.try_acquire().map_err(|_| Code::Busy)?;
+        let budget = ColdAuditBudget::start();
+
+        tokio::time::timeout_at(budget.deadline(), async {
+            self.validate_registry().await?;
+            let read_ack = || async {
+                writer
+                    .confirmed_legacy_worker_terminal_observation(operation_id, scope, ancestor)
+                    .await
+                    .map_err(jobs::journal_error)
+            };
+            if let Some(confirmed) = read_ack().await? {
+                return Ok(confirmed);
+            }
+            let pending = writer
+                .legacy_worker_terminal_observation(operation_id)
+                .await
+                .map_err(jobs::journal_error)?
+                .ok_or(Code::NeedsReconciliation)?;
+
+            let material = Arc::clone(&self.material);
+            let credential = self
+                .filesystem(move || {
+                    material
+                        .checked_reconciler(&profile)
+                        .map_err(|_| Code::Unavailable)
+                })
+                .await?;
+            let expected_scope = canonical(scope).map_err(jobs::journal_error)?;
+            let authenticate = || async {
+                let verified = VerifiedProfile::authenticate(
+                    &self.registry,
+                    scope.profile_id(),
+                    &credential,
+                    false,
+                )
+                .await?;
+                if canonical(&verified.scope).map_err(jobs::journal_error)? != expected_scope {
+                    return Err(Code::Forbidden);
+                }
+                Ok(verified)
+            };
+            let verified = authenticate().await?;
+            let current = verified
+                .client
+                .cold_worker(&pending.request().worker_id, &budget)
+                .await
+                .map_err(|_| Code::Unavailable)?;
+            self.validate_registry().await?;
+            authenticate().await?;
+
+            if let Some(confirmed) = read_ack().await? {
+                return Ok(confirmed);
+            }
+            // Re-read the original STOP and exact pending head on the retained
+            // actor immediately before dispatch. The writer lease stays held
+            // across the exchange and its journal mutex is free during I/O.
+            let proof = writer
+                .legacy_worker_terminal_evidence(operation_id, pending.stop().command_id())
+                .await
+                .map_err(jobs::journal_error)?;
+            legacy_terminal_publication_state(&proof, &pending, &current)?;
+            self.require_legacy_terminal_validation_fence()?;
+            if budget.remaining().is_zero() {
+                return Err(Code::Unavailable);
+            }
+            // Both eligible states send the exact durable body and require
+            // the operation's receipt from the Core.
+            let response = verified
+                .client
+                .post_legacy_terminal_observation(pending.request())
+                .await
+                .map_err(|_| Code::NeedsReconciliation)?;
+            pending
+                .validate_response(&response)
+                .map_err(|_| Code::NeedsReconciliation)?;
+            // Settle an exact response under this writer even if shutdown was
+            // requested after dispatch. The writer revalidates scope and lease.
+            writer
+                .confirm_legacy_worker_terminal_observation(&pending, response)
+                .await
+                .map_err(|_| Code::NeedsReconciliation)
+        })
+        .await
+        .map_err(|_| Code::NeedsReconciliation)?
     }
 
     async fn check_legacy_terminal_target(

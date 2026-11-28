@@ -13,9 +13,10 @@ use crate::{
             StopJournal,
             recovery::legacy_worker_terminal::{
                 LegacyWorkerTerminalEvidenceV1, ReservedLegacyWorkerTerminalObservationV1,
+                RetainedLegacyWorkerTerminalObservationV1,
             },
         },
-        writer::CancelInputV1,
+        writer::{CancelInputV1, StopWriterClient},
     },
     control::{QuotaPolicyV1, RuntimeStatusV1, WorkerStateV1, WorkerTransitionV1, WorkerV1},
     runner::broker::{
@@ -385,6 +386,239 @@ async fn legacy_terminal_publication_distinguishes_exact_parent_from_possible_re
     assert_eq!(after.head(), pending.head());
     assert_eq!(canonical(after.request())?, canonical(pending.request())?);
     Ok(())
+}
+
+#[tokio::test]
+async fn legacy_terminal_publication_replays_a_lost_core_reply_with_one_durable_effect()
+-> Result<()> {
+    let seed = running_seed_for_cold_terminal_test().await;
+    let operation = seed.operation_id;
+    let scope = seed.scope();
+    let (mut service, writer, pending) = stage_terminal_publication(
+        seed.root(),
+        seed.config(),
+        &seed.journal_root,
+        scope,
+        operation,
+        seed.cancel_id,
+    )
+    .await?;
+    let store = seed.store();
+    let before = store.head()?;
+    let parent = store
+        .worker(&seed.worker_id)?
+        .context("fixture worker missing")?;
+    assert_eq!(
+        store.worker_quota(&QuotaPolicyV1::default())?.held_workers,
+        1
+    );
+    assert!(store.worker_usage()?.is_empty());
+    let reads = seed.worker_get_count();
+    let posts = seed.post_count();
+    let calls_path = seed.root().join("calls");
+    let calls = fs::read(&calls_path)?;
+
+    seed.arm_transition_response_cut_for_test();
+    assert!(matches!(
+        service
+            .publish_legacy_worker_terminal_observation(scope, operation, pending.head())
+            .await,
+        Err(BrokerErrorCodeV1::NeedsReconciliation)
+    ));
+    assert_eq!(seed.worker_get_count(), reads + 1);
+    assert_eq!(seed.post_count(), posts + 1);
+    let core_head = store.head()?;
+    assert_ne!(core_head, before);
+    let terminal = store
+        .worker(&seed.worker_id)?
+        .context("terminal Worker missing")?;
+    assert_eq!(terminal.state, WorkerStateV1::Terminal);
+    assert_eq!(terminal.revision, parent.revision + 1);
+    assert_eq!(terminal.attempt, parent.attempt);
+    assert!(!terminal.quota_held);
+    let quota = store.worker_quota(&QuotaPolicyV1::default())?;
+    assert_eq!(quota.held_workers, 0);
+    let usage = store.worker_usage()?;
+    assert_eq!(usage.len(), 1);
+    assert_eq!(
+        usage[0].terminal_observation_id,
+        pending.request().operation_id
+    );
+    assert!(!usage[0].billable);
+    let after_cut = writer
+        .legacy_worker_terminal_observation(operation)
+        .await?
+        .context("the lost response must leave the exact pending request")?;
+    assert_eq!(after_cut.head(), pending.head());
+    assert_eq!(
+        canonical(after_cut.request())?,
+        canonical(pending.request())?
+    );
+
+    let confirmed = service
+        .publish_legacy_worker_terminal_observation(scope, operation, pending.head())
+        .await?;
+    assert_eq!(confirmed.head().revision(), pending.head().revision() + 1);
+    pending.validate_response(confirmed.response())?;
+    assert_eq!(
+        canonical(&confirmed.response().worker)?,
+        canonical(&terminal)?
+    );
+    assert_eq!(seed.worker_get_count(), reads + 2);
+    assert_eq!(seed.post_count(), posts + 2);
+    assert_eq!(store.head()?, core_head);
+    assert_eq!(
+        canonical(&store.worker_quota(&QuotaPolicyV1::default())?)?,
+        canonical(&quota)?
+    );
+    assert_eq!(canonical(&store.worker_usage()?)?, canonical(&usage)?);
+
+    service.profiles.remove(scope.profile_id());
+    drop(writer);
+    let reopened = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            match terminal_publication_stops(&seed.journal_root, scope) {
+                Err(error) if error.downcast_ref::<JournalError>() == Some(&JournalError::Busy) => {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                result => break result,
+            }
+        }
+    })
+    .await??;
+    let jobs = Arc::new(ProfileJobs::new());
+    jobs.writer.set(reopened).expect("one reopened STOP writer");
+    service.profiles.insert(scope.profile_id().to_owned(), jobs);
+    let cold = service
+        .publish_legacy_worker_terminal_observation(scope, operation, pending.head())
+        .await?;
+    assert_eq!(cold.head(), confirmed.head());
+    assert_eq!(
+        canonical(cold.response())?,
+        canonical(confirmed.response())?
+    );
+    assert_eq!(seed.worker_get_count(), reads + 2);
+    assert_eq!(seed.post_count(), posts + 2);
+    assert_eq!(store.head()?, core_head);
+    assert_eq!(canonical(&store.worker_usage()?)?, canonical(&usage)?);
+    assert_eq!(fs::read(calls_path)?, calls);
+    Ok(())
+}
+
+#[tokio::test]
+async fn legacy_terminal_publication_refuses_a_divergent_core_worker_before_post() -> Result<()> {
+    let seed = running_seed_for_cold_terminal_test().await;
+    let operation = seed.operation_id;
+    let scope = seed.scope();
+    let (service, writer, pending) = stage_terminal_publication(
+        seed.root(),
+        seed.config(),
+        &seed.journal_root,
+        scope,
+        operation,
+        seed.cancel_id,
+    )
+    .await?;
+    let mut other = pending.request().clone();
+    other.operation_id = Uuid::new_v4().to_string();
+    let WorkerTransitionV1::Observe { observation } = &mut other.transition else {
+        anyhow::bail!("expected a terminal Observe in fixture");
+    };
+    observation.exit_code = Some(23);
+    let store = seed.store();
+    let other = store.mutate_worker(&other)?;
+    assert_eq!(other.worker.state, WorkerStateV1::Terminal);
+    let head = store.head()?;
+    let quota = canonical(&store.worker_quota(&QuotaPolicyV1::default())?)?;
+    let usage = canonical(&store.worker_usage()?)?;
+    let reads = seed.worker_get_count();
+    let posts = seed.post_count();
+    let calls_path = seed.root().join("calls");
+    let calls = fs::read(&calls_path)?;
+    assert!(matches!(
+        service
+            .publish_legacy_worker_terminal_observation(scope, operation, pending.head())
+            .await,
+        Err(BrokerErrorCodeV1::Conflict)
+    ));
+    assert_eq!(seed.worker_get_count(), reads + 1);
+    assert_eq!(seed.post_count(), posts);
+    assert_eq!(store.head()?, head);
+    assert_eq!(
+        canonical(&store.worker_quota(&QuotaPolicyV1::default())?)?,
+        quota
+    );
+    assert_eq!(canonical(&store.worker_usage()?)?, usage);
+    assert_eq!(fs::read(calls_path)?, calls);
+    let after = writer
+        .legacy_worker_terminal_observation(operation)
+        .await?
+        .context("divergence must keep the original pending")?;
+    assert_eq!(after.head(), pending.head());
+    assert_eq!(canonical(after.request())?, canonical(pending.request())?);
+    Ok(())
+}
+
+fn terminal_publication_stops(
+    root: &Path,
+    scope: &JournalScopeV1,
+) -> Result<ProfileWriterCapabilities> {
+    let root = Directory::open_existing(root)?;
+    let report = StopRecoveryReaderV1::open_existing(
+        &root,
+        scope.clone(),
+        &FsExclusions::new(),
+        JournalLimitsV1::default(),
+        ControlSecrets::new(Vec::new())?,
+    )?
+    .context("retained Legacy lease missing")?
+    .scan();
+    let capabilities =
+        ProfileWriterCapabilities::from_recovery_report(&report, true, 1, Duration::from_secs(10))?;
+    assert!(capabilities.is_stop_only());
+    Ok(capabilities)
+}
+
+async fn stage_terminal_publication(
+    root: &Path,
+    config: &Path,
+    journal_root: &Path,
+    scope: &JournalScopeV1,
+    operation: Uuid,
+    command: Uuid,
+) -> Result<(
+    Service,
+    StopWriterClient,
+    RetainedLegacyWorkerTerminalObservationV1,
+)> {
+    let capabilities = terminal_publication_stops(journal_root, scope)?;
+    let writer = capabilities.stops();
+    let evidence = writer
+        .legacy_worker_terminal_evidence(operation, command)
+        .await?;
+    let mut service = read_only_service(root, config, &evidence)?;
+    let jobs = Arc::new(ProfileJobs::new());
+    jobs.writer
+        .set(capabilities)
+        .expect("one retained STOP writer");
+    service.profiles.insert(scope.profile_id().to_owned(), jobs);
+    let mut observation = synthetic_terminal_observation(&evidence)?;
+    observation.restart_count = Some(0);
+    let observed = ObservedLegacyWorkerTerminal {
+        validated: ValidatedLegacyWorkerTerminal { evidence },
+        observation,
+    };
+    observed
+        .validated
+        .validate_terminal_observation(observed.observation())?;
+    let request = observed.terminal_mutation()?;
+    let Ok(ReservedLegacyWorkerTerminalObservationV1::Appended(pending)) = writer
+        .reserve_legacy_worker_terminal_observation(observed.validated.evidence, request)
+        .await
+    else {
+        anyhow::bail!("test could not retain terminal observation");
+    };
+    Ok((service, writer, pending))
 }
 
 #[tokio::test]

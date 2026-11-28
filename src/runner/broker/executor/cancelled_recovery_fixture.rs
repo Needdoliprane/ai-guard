@@ -1116,6 +1116,12 @@ impl RunningColdRecoverySeed {
     pub(crate) fn post_count(&self) -> usize {
         self.base.posts.load(Ordering::SeqCst)
     }
+
+    pub(crate) fn arm_transition_response_cut_for_test(&self) {
+        self.base
+            .drop_next_worker_transition_response
+            .store(true, Ordering::SeqCst);
+    }
 }
 
 pub(crate) async fn running_seed_for_cold_terminal_test() -> RunningColdRecoverySeed {

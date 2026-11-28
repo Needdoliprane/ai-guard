@@ -1364,6 +1364,24 @@ impl AuditClient {
             .await?;
         serde_json::from_value(value).context("gateway returned an incompatible control response")
     }
+
+    pub(crate) async fn post_legacy_terminal_observation(
+        &self,
+        request: &crate::control::WorkerMutationV1,
+    ) -> Result<crate::control::MutationResultV1> {
+        use crate::control::{
+            RuntimeStatusV1, WorkerTransitionV1, session_control::canonical_uuid,
+        };
+
+        anyhow::ensure!(
+            matches!(&request.transition, WorkerTransitionV1::Observe { observation }
+                if observation.status == RuntimeStatusV1::Exited && observation.running == Some(false)),
+            "Legacy terminal publication requires an exited Worker observation"
+        );
+        let worker_id = canonical_uuid(&request.worker_id)?;
+        self.post_control(&format!("api/v1/workers/{worker_id}/transitions"), request)
+            .await
+    }
 }
 fn managed(plan: &RunPlan) -> Result<&ManagedCheckpoint> {
     plan.managed
