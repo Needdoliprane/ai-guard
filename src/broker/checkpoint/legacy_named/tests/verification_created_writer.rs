@@ -1,5 +1,6 @@
 use super::*;
 use crate::{
+    broker::writer::LegacyNamedImportVerificationArmWrite,
     runner::broker::{broker_helper_spec, create_import_volume},
     runtime::{ContainerPurpose, ContainerSpec, ManagedRuntime, NetworkMode, Runtime},
 };
@@ -9,10 +10,27 @@ use tokio::{process::Command, time::timeout};
 
 pub(super) const JOURNAL: &str = "verification-created-writer";
 
+pub(super) enum Scenario {
+    AckAfterStop,
+    ArmWriter { lose_reply: bool },
+}
+
 #[tokio::test]
 async fn named_verification_created_ack_survives_durable_stop_and_lost_reply() -> anyhow::Result<()>
 {
-    Box::pin(named_admission_fixture(true)).await
+    Box::pin(named_admission_fixture(Some(Scenario::AckAfterStop))).await
+}
+
+#[tokio::test]
+async fn named_verification_arm_writer_retains_one_birth_and_only_replays_after_stop()
+-> anyhow::Result<()> {
+    for lose_reply in [false, true] {
+        Box::pin(named_admission_fixture(Some(Scenario::ArmWriter {
+            lose_reply,
+        })))
+        .await?;
+    }
+    Ok(())
 }
 
 async fn fixture_runtime(root: &Path, authority: Uuid) -> anyhow::Result<ManagedRuntime> {
@@ -57,8 +75,8 @@ pub(super) async fn exercise(
     plan: &LegacyConfirmedPlanV1,
     archive_digest: &str,
     mut arm: ArmResultV1,
-    mut claim: LegacyNamedImportClaimRequestV1,
-    mut claim_receipt: MutationReceiptV1,
+    (mut claim, mut claim_receipt): (LegacyNamedImportClaimRequestV1, MutationReceiptV1),
+    scenario: Scenario,
 ) -> anyhow::Result<()> {
     let operation = plan.operation_id;
     let admitted = writer.load(operation).await?.context("named job missing")?;
@@ -175,6 +193,37 @@ pub(super) async fn exercise(
         )
         .await?
         .context("single verification Create authorization missing")?;
+    if let Scenario::ArmWriter { lose_reply } = scenario {
+        return Box::pin(async {
+            // The same synthetic inspection can complete before STOP here.
+            fs::write(root.join("verification-inspection-release"), b"")?;
+            let created = timeout(
+                Duration::from_secs(30),
+                runtime.create_owned_named_import_verification_for_generation(
+                    &spec,
+                    operation,
+                    policy,
+                    authorization,
+                    || Ok(()),
+                ),
+            )
+            .await??;
+            writer
+                .acknowledge_legacy_named_import_verification_created(&admitted, created)
+                .await?;
+            Box::pin(exercise_arm_writer(
+                root,
+                writer,
+                &admitted,
+                binding,
+                &generation,
+                expected_generation,
+                lose_reply,
+            ))
+            .await
+        })
+        .await;
+    }
     let create_head = authorization.confirmed_head().clone();
     let cancel_id = Uuid::new_v4();
     let (created, stop_head) = tokio::join!(
@@ -233,27 +282,7 @@ pub(super) async fn exercise(
         assert_eq!(ack.await, Err(JournalError::Io));
     }
     drop(barrier);
-    let scope = writer.scope().clone();
-    drop(writer);
-
-    let directory = Directory::open_existing(&root.join(JOURNAL))?;
-    let journal = timeout(Duration::from_secs(5), async {
-        loop {
-            match Journal::open(
-                &directory,
-                scope.clone(),
-                &FsExclusions::new(),
-                JournalLimitsV1::default(),
-                ControlSecrets::new(vec![])?,
-            ) {
-                Ok(journal) => break Ok(journal),
-                Err(JournalError::Busy) => tokio::time::sleep(Duration::from_millis(5)).await,
-                Err(error) => break Err(error),
-            }
-        }
-    })
-    .await??;
-    let reopened = WriterClient::start(journal, 8, Duration::from_secs(5))?;
+    let reopened = reopen_writer(root, writer).await?;
     let saved = reopened.load_legacy_named_admission(operation).await?;
     assert_eq!(
         canonical(
@@ -310,4 +339,218 @@ pub(super) async fn exercise(
             .any(|prefix| line.starts_with(prefix))
     }));
     Ok(())
+}
+
+async fn exercise_arm_writer(
+    root: &Path,
+    writer: WriterClient,
+    admitted: &crate::broker::journal::AcceptedJobV1,
+    binding: &RuntimeAuthority,
+    generation: &CancelGeneration,
+    expected_generation: u64,
+    lose_reply: bool,
+) -> anyhow::Result<()> {
+    use LegacyNamedImportVerificationArmWrite::{Recorded, Replayed};
+
+    let operation = admitted.operation_id();
+    let before = writer
+        .load(operation)
+        .await?
+        .context("Created job missing")?;
+    let before_revision = before.head().revision();
+    let checkpoint = before
+        .broker_checkpoint_v3()
+        .context("Created lifecycle missing")?;
+    assert!(checkpoint.commands().is_empty());
+    let retained = checkpoint
+        .broker()
+        .supervision()
+        .legacy_named_admission()
+        .context("named Created prefix missing")?;
+    assert!(retained.import_verification_arm_request().is_none());
+    let request = verification_arm_request(retained)?;
+    drop(before);
+    let calls = fs::read(root.join("calls"))?;
+    let retain = || {
+        Box::pin(writer.record_legacy_named_import_verification_arm(
+            admitted,
+            request.clone(),
+            binding,
+            generation,
+            expected_generation,
+        ))
+    };
+
+    let confirmation = if lose_reply {
+        let mut barrier = writer.advance_reply_barrier_for_test(true).await?;
+        let mut first = retain();
+        tokio::select! {
+            _ = &mut first => anyhow::bail!("Arm result arrived before publication barrier"),
+            entered = timeout(Duration::from_secs(4), barrier.try_entered_for_test()) => {
+                entered?.map_err(anyhow::Error::msg)?;
+            }
+        }
+        barrier.release_for_test();
+        assert!(matches!(
+            first.await,
+            Err(NamedImportArmWriteFailure::PublicationUnconfirmed(
+                JournalError::Io
+            ))
+        ));
+        None
+    } else {
+        let pause = writer.pause_for_test().await?;
+        let mut first = retain();
+        let mut second = retain();
+        // Both Loads reach the FIFO before either future can offer its CAS.
+        assert!(futures_util::poll!(first.as_mut()).is_pending());
+        assert!(futures_util::poll!(second.as_mut()).is_pending());
+        drop(pause);
+        let (first, second) = tokio::join!(first, second);
+        let (recorded, replayed) = match (first, second) {
+            (Ok(Recorded(recorded)), Ok(Replayed(replayed)))
+            | (Ok(Replayed(replayed)), Ok(Recorded(recorded))) => (recorded, replayed),
+            _ => anyhow::bail!("concurrent Arm writes must return one birth and one exact replay"),
+        };
+        assert_eq!(canonical(replayed.as_ref())?, canonical(&request)?);
+        Some(recorded)
+    };
+
+    let arm_head = writer
+        .load(operation)
+        .await?
+        .context("retained Arm job missing")?
+        .head()
+        .clone();
+    assert_eq!(arm_head.revision(), before_revision + 1);
+    if let Some(confirmation) = &confirmation {
+        assert_eq!(confirmation.job().head(), &arm_head);
+        assert_eq!(confirmation.job().operation_id(), operation);
+        assert_eq!(confirmation.job().intent_hash(), admitted.intent_hash());
+        assert_eq!(
+            canonical(confirmation.job().scope())?,
+            canonical(writer.scope())?
+        );
+        assert_eq!(confirmation.generation().1, expected_generation);
+    }
+    assert_replayed(retain().await, &request)?;
+    assert_eq!(
+        writer
+            .load(operation)
+            .await?
+            .context("replayed Arm job missing")?
+            .head(),
+        &arm_head,
+    );
+
+    let stopped_generation = generation.invalidate();
+    assert_eq!(stopped_generation, expected_generation + 1);
+    if let Some(confirmation) = confirmation {
+        assert_eq!(confirmation.generation().0.current(), stopped_generation);
+    }
+    let stop = writer
+        .stops()
+        .append_cancel(CancelInputV1::new(operation, Uuid::new_v4())?)
+        .await
+        .map_err(|failure| failure.error())?;
+    let stop_head = stop.receipt().head().clone();
+    assert_eq!(stop_head.revision(), arm_head.revision() + 1);
+    let reopened = reopen_writer(root, writer).await?;
+    assert_replayed(
+        reopened
+            .record_legacy_named_import_verification_arm(
+                admitted,
+                request.clone(),
+                binding,
+                generation,
+                expected_generation,
+            )
+            .await,
+        &request,
+    )?;
+    let saved = reopened
+        .load(operation)
+        .await?
+        .context("stopped Arm job missing after reopen")?;
+    assert_eq!(saved.head(), &stop_head);
+    let retained = saved
+        .broker_checkpoint_v2()
+        .and_then(|checkpoint| checkpoint.supervision().legacy_named_admission())
+        .and_then(LegacyNamedAdmissionCheckpoint::import_verification_arm_request)
+        .context("verification Arm body missing after reopen")?;
+    assert_eq!(canonical(retained)?, canonical(&request)?);
+    assert_eq!(fs::read(root.join("calls"))?, calls);
+    Ok(())
+}
+
+fn verification_arm_request(
+    retained: &LegacyNamedAdmissionCheckpoint,
+) -> anyhow::Result<LegacyNamedImportVerificationArmRequestV2> {
+    let facts = retained
+        .import_verification_arm_facts()?
+        .context("verification Arm facts missing")?;
+    // Reuse the fixture's clock and deadline bytes as input to this Writer oracle.
+    let mut arm = retained
+        .import_arm_request()
+        .context("first Import Arm missing")?
+        .arm;
+    let policy = facts.preparation().policy();
+    arm.operation_id = facts.operation_id().to_owned();
+    arm.subject = ArmSubjectV1::Helper {
+        helper_id: policy.helper_id.clone(),
+        purpose: HelperPurposeV1::ImportVerification,
+        policy_version: policy.version,
+        permission: Box::new(facts.preparation().permission().clone()),
+    };
+    arm.inspection = facts.inspection().clone();
+    arm.authority_binding_hash = facts.owned().handle.authority_fingerprint().to_owned();
+    arm.configuration_fingerprint_version = facts.owned().handle.fingerprint_version();
+    arm.configuration_fingerprint = facts
+        .owned()
+        .observation
+        .configuration_fingerprint
+        .clone()
+        .context("verification configuration fingerprint missing")?;
+    Ok(LegacyNamedImportVerificationArmRequestV2 {
+        version: 2,
+        binding_ref: facts.plan().binding_ref,
+        namespace: facts.plan().control_namespace_uuid.clone(),
+        arm,
+    })
+}
+
+fn assert_replayed(
+    result: Result<LegacyNamedImportVerificationArmWrite, NamedImportArmWriteFailure>,
+    expected: &LegacyNamedImportVerificationArmRequestV2,
+) -> anyhow::Result<()> {
+    let LegacyNamedImportVerificationArmWrite::Replayed(saved) =
+        result.map_err(|error| anyhow::anyhow!("verification Arm replay failed: {error:?}"))?
+    else {
+        anyhow::bail!("Arm replay minted a birth");
+    };
+    assert_eq!(canonical(saved.as_ref())?, canonical(expected)?);
+    Ok(())
+}
+
+async fn reopen_writer(root: &Path, writer: WriterClient) -> anyhow::Result<WriterClient> {
+    let scope = writer.scope().clone();
+    drop(writer);
+    let directory = Directory::open_existing(&root.join(JOURNAL))?;
+    let journal = timeout(Duration::from_secs(5), async {
+        loop {
+            match Journal::open(
+                &directory,
+                scope.clone(),
+                &FsExclusions::new(),
+                JournalLimitsV1::default(),
+                ControlSecrets::new(vec![])?,
+            ) {
+                Ok(journal) => break Ok(journal),
+                Err(JournalError::Busy) => tokio::time::sleep(Duration::from_millis(5)).await,
+                Err(error) => break Err(error),
+            }
+        }
+    })
+    .await??;
+    Ok(WriterClient::start(journal, 8, Duration::from_secs(5))?)
 }

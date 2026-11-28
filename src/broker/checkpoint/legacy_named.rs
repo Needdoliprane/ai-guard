@@ -1881,10 +1881,12 @@ mod tests {
     #[tokio::test]
     async fn explicit_named_admission_requires_an_immutable_archive_digest() -> anyhow::Result<()> {
         // Keep the large checkpoint fixture out of the libtest thread's future.
-        Box::pin(named_admission_fixture(false)).await
+        Box::pin(named_admission_fixture(None)).await
     }
 
-    async fn named_admission_fixture(verification_created_ack: bool) -> anyhow::Result<()> {
+    async fn named_admission_fixture(
+        verification_case: Option<verification_created_writer::Scenario>,
+    ) -> anyhow::Result<()> {
         let temporary = tempfile::Builder::new()
             .permissions(std::fs::Permissions::from_mode(0o700))
             .tempdir()?;
@@ -2480,15 +2482,15 @@ mod tests {
                 .await?;
             Ok(writer)
         };
-        if verification_created_ack {
+        if let Some(scenario) = verification_case {
             return Box::pin(verification_created_writer::exercise(
                 &root,
                 start_admitted_writer(verification_created_writer::JOURNAL).await?,
                 &plan,
                 &digest,
                 arm_result,
-                claim,
-                claim_receipt,
+                (claim, claim_receipt),
+                scenario,
             ))
             .await;
         }
