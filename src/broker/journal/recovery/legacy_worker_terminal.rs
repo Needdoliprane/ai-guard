@@ -237,6 +237,42 @@ impl StopJournal {
         Ok(retained)
     }
 
+    /// Read a durable ACK under the current lease from an exact journal
+    /// ancestor. None identifies a verified request still awaiting its ACK.
+    pub(in crate::broker) fn confirmed_legacy_worker_terminal_observation(
+        &self,
+        operation_id: Uuid,
+        expected_scope: &JournalScopeV1,
+        ancestor: &RevisionRefV1,
+    ) -> JournalResult<Option<ConfirmedLegacyWorkerTerminalObservationV1>> {
+        if canonical(expected_scope)? != canonical(self.scope())? {
+            return Err(JournalError::Conflict);
+        }
+        let mut writer = self.core.writer.lock().map_err(|_| JournalError::Corrupt)?;
+        let (reader, job, incomplete) = self
+            .read_locked(operation_id, &mut writer)?
+            .ok_or(JournalError::Interrupted)?;
+        if incomplete {
+            return Err(JournalError::Interrupted);
+        }
+        if !job.chain.contains(ancestor) {
+            return Err(JournalError::Conflict);
+        }
+        let command = *job
+            .cancel_command_ids()
+            .last()
+            .ok_or(JournalError::Interrupted)?;
+        let proof = project(&self.core, &job, command)?;
+        let recorded = recorded_observation(&job, &proof)?.ok_or(JournalError::Interrupted)?;
+        reader.check_shared()?;
+        Ok(recorded
+            .response
+            .map(|response| ConfirmedLegacyWorkerTerminalObservationV1 {
+                head: job.head().clone(),
+                response: response.clone(),
+            }))
+    }
+
     pub(in crate::broker) fn reserve_legacy_worker_terminal_observation(
         &self,
         evidence: &LegacyWorkerTerminalEvidenceV1,

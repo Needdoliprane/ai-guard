@@ -381,6 +381,11 @@ enum Command {
         operation_id: Uuid,
         reply: Reply<Option<RetainedLegacyWorkerTerminalObservationV1>>,
     },
+    ReadConfirmedLegacyWorkerTerminalObservation {
+        operation_id: Uuid,
+        expected: Box<(JournalScopeV1, RevisionRefV1)>,
+        reply: Reply<Option<ConfirmedLegacyWorkerTerminalObservationV1>>,
+    },
     ReserveLegacyWorkerTerminalObservation {
         input: Box<(LegacyWorkerTerminalEvidenceV1, WorkerMutationV1)>,
         publication_attempted: Arc<AtomicBool>,
@@ -802,6 +807,28 @@ impl StopWriterClient {
                 operation_id,
                 reply,
             })
+            .await
+    }
+
+    #[allow(
+        dead_code,
+        reason = "the Legacy terminal recovery caller is composed separately"
+    )]
+    pub(in crate::broker) async fn confirmed_legacy_worker_terminal_observation(
+        &self,
+        operation_id: Uuid,
+        expected_scope: &JournalScopeV1,
+        ancestor: &RevisionRefV1,
+    ) -> JournalResult<Option<ConfirmedLegacyWorkerTerminalObservationV1>> {
+        let expected = Box::new((expected_scope.clone(), ancestor.clone()));
+        self.0
+            .call(
+                move |reply| Command::ReadConfirmedLegacyWorkerTerminalObservation {
+                    operation_id,
+                    expected,
+                    reply,
+                },
+            )
             .await
     }
 
@@ -2403,6 +2430,30 @@ fn serve_backend(
                     Backend::Stops(journal) => {
                         journal.legacy_worker_terminal_observation(operation_id)
                     }
+                    Backend::Full(_) => Err(JournalError::InvalidInput),
+                };
+                let _ = respond(
+                    &backend,
+                    &status,
+                    reply,
+                    result,
+                    status_cache::Update::None,
+                    false,
+                );
+            }
+            Command::ReadConfirmedLegacyWorkerTerminalObservation {
+                operation_id,
+                expected,
+                reply,
+            } => {
+                let (scope, ancestor) = *expected;
+                let result = match &backend {
+                    Backend::Stops(journal) => journal
+                        .confirmed_legacy_worker_terminal_observation(
+                            operation_id,
+                            &scope,
+                            &ancestor,
+                        ),
                     Backend::Full(_) => Err(JournalError::InvalidInput),
                 };
                 let _ = respond(

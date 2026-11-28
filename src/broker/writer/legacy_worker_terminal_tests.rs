@@ -222,6 +222,12 @@ async fn stops_writer_retains_the_first_terminal_observation_across_later_stops(
             .await?
             .is_none()
     );
+    assert!(matches!(
+        stops
+            .confirmed_legacy_worker_terminal_observation(operation, seed.scope(), &stop_head)
+            .await,
+        Err(JournalError::Interrupted)
+    ));
 
     let same_head = stops
         .legacy_worker_terminal_evidence(operation, command)
@@ -298,6 +304,12 @@ async fn stops_writer_retains_the_first_terminal_observation_across_later_stops(
     assert_eq!(pending.stop().command_id(), command);
     assert_eq!(pending.stop().head(), &stop_head);
     assert_eq!(pending.head(), &later_head);
+    assert!(
+        reopened
+            .confirmed_legacy_worker_terminal_observation(operation, seed.scope(), pending.head())
+            .await?
+            .is_none()
+    );
 
     let parent = reopened
         .legacy_worker_terminal_evidence(operation, command)
@@ -389,6 +401,44 @@ async fn stops_writer_retains_the_first_terminal_observation_across_later_stops(
     assert_eq!(stop.input_hash(), intercalated_hash);
     drop(observed);
 
+    close_stops_actor(reopened).await?;
+    let restarted = open_stops()?;
+    let cold = restarted
+        .confirmed_legacy_worker_terminal_observation(operation, seed.scope(), pending.head())
+        .await?
+        .context("terminal ACK was lost across the reopened lease")?;
+    assert_eq!(cold.head(), acknowledged.head());
+    assert_eq!(
+        canonical(cold.response())?,
+        canonical(acknowledged.response())?
+    );
+    let mut wrong_scope = serde_json::to_value(seed.scope())?;
+    wrong_scope["control_namespace_uuid"] = serde_json::json!(Uuid::new_v4());
+    let wrong_scope: JournalScopeV1 = serde_json::from_value(wrong_scope)?;
+    assert!(matches!(
+        restarted
+            .confirmed_legacy_worker_terminal_observation(operation, &wrong_scope, pending.head())
+            .await,
+        Err(JournalError::Conflict)
+    ));
+    let mut wrong_hash = pending.head().hash().to_owned();
+    let replacement = if wrong_hash.starts_with('0') {
+        "1"
+    } else {
+        "0"
+    };
+    wrong_hash.replace_range(..1, replacement);
+    let wrong_head = serde_json::from_value(serde_json::json!({
+        "revision": pending.head().revision(),
+        "hash": wrong_hash,
+    }))?;
+    assert!(matches!(
+        restarted
+            .confirmed_legacy_worker_terminal_observation(operation, seed.scope(), &wrong_head)
+            .await,
+        Err(JournalError::Conflict)
+    ));
+
     assert_eq!(seed.store().head()?, store_head);
     assert_eq!(
         canonical(&seed.store().worker_quota(&QuotaPolicyV1::default())?)?,
@@ -398,9 +448,10 @@ async fn stops_writer_retains_the_first_terminal_observation_across_later_stops(
     assert_eq!(seed.worker_get_count(), core_reads);
     assert_eq!(seed.post_count(), core_mutations);
     assert_eq!(std::fs::read(calls_path)?, engine_calls);
-    close_stops_actor(reopened).await?;
+    close_stops_actor(restarted).await?;
     let journal = open_fixture_journal()?;
     let job = journal.load(operation)?.context("fixture job missing")?;
+    assert_eq!(job.head(), acknowledged.head());
     let after = job.broker_checkpoint_v4().context("outbox was lost")?;
     assert_eq!(canonical(&after.events())?, outbox_before);
     let broker = after.lifecycle().broker();
