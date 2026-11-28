@@ -126,8 +126,9 @@ pub(super) async fn verify_published(
     verify_snapshot(conn, lock, draft, AuditRange::Fresh).await
 }
 
-/// Inspect the anchored audit chain through its durable head. The audit
-/// projections and the current writer epoch require their own verification.
+/// Inspect the anchored audit chain through its durable head and check any
+/// stored Review authority reference to the creation anchor. The Review
+/// snapshot and the current writer epoch require separate verification.
 pub(super) async fn verify_anchored_chain(
     conn: &mut Conn,
     lock: &OwnedAuditLock,
@@ -170,7 +171,21 @@ async fn verify_snapshot(
                 replay_published_prefix(&mut tx, &head, draft).await?;
                 audit_manifest::require_empty_projections(&mut tx, version).await?;
             }
-            AuditRange::History => replay_anchored_chain(&mut tx, &head, draft).await?,
+            AuditRange::History => {
+                let anchor = replay_anchored_chain(&mut tx, &head, draft).await?;
+                let rows: Vec<Row> = tx
+                    .query(
+                        "SELECT singleton,source_id,anchor_seq,anchor_hash \
+                         FROM review_authority_meta ORDER BY singleton LIMIT 2",
+                    )
+                    .await
+                    .map_err(driver_error)?;
+                let references = rows
+                    .into_iter()
+                    .map(decode_row::<ReviewAnchorColumns>)
+                    .collect::<Result<Vec<_>>>()?;
+                require_review_anchor(&references, request.source_id, &anchor)?;
+            }
         }
         lock.verify(&mut tx).await?;
         Ok::<_, anyhow::Error>(head)
@@ -184,7 +199,7 @@ async fn replay_anchored_chain(
     tx: &mut Transaction<'_>,
     bound: &AuditHead,
     draft: &FreshAnchorDraft<'_>,
-) -> Result<()> {
+) -> Result<AuditHead> {
     ensure!(
         bound.seq >= PUBLISHED_EVENTS,
         "MySQL owned publication chain length mismatch"
@@ -212,19 +227,44 @@ async fn replay_anchored_chain(
             .await
             .map_err(driver_error)?
             .context(missing_origin)?;
-        let mut head =
+        let anchor =
             verify_owned_origin_prefix([decode_row(genesis)?, decode_row(anchor)?], draft)?;
+        let mut head = anchor.clone();
         while let Some(row) = result.next().await.map_err(driver_error)? {
             head = verify_owned_tail_row(head, decode_row(row)?, bound)?;
         }
-        Ok::<_, anyhow::Error>(head)
+        Ok::<_, anyhow::Error>((anchor, head))
     }
     .await;
     // Finish the cursor even on a row error, preserving that first failure.
     let drained = result.drop_result().await.map_err(driver_error);
-    let head = replayed?;
+    let (anchor, head) = replayed?;
     drained?;
-    require_owned_head(&head, bound)
+    require_owned_head(&head, bound)?;
+    Ok(anchor)
+}
+
+type ReviewAnchorColumns = (u8, Vec<u8>, i64, Vec<u8>);
+
+fn require_review_anchor(
+    rows: &[ReviewAnchorColumns],
+    source_id: Uuid,
+    anchor: &AuditHead,
+) -> Result<()> {
+    match rows {
+        [] => Ok(()),
+        [(singleton, source, seq, hash)] => {
+            ensure!(
+                *singleton == 1
+                    && source.as_slice() == source_id.to_string().as_bytes()
+                    && *seq == anchor.seq
+                    && hash.as_slice() == anchor.hash.as_bytes(),
+                "MySQL Review authority reference differs from the creation anchor"
+            );
+            Ok(())
+        }
+        _ => Err(anyhow!("MySQL Review authority singleton is not unique")),
+    }
 }
 
 async fn require_durable_writable(tx: &mut Transaction<'_>) -> Result<()> {
@@ -517,6 +557,52 @@ mod tests {
             error.to_string(),
             "MySQL audit row follows the durable head"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn owned_review_reference_matches_the_fresh_anchor_before_the_history_tail() -> Result<()> {
+        for schema_version in [14, 15] {
+            let request = FreshAnchorRequestV1 {
+                source_id: Uuid::from_u128(0xabcd),
+                ..origin_request(schema_version)
+            };
+            let draft = origin_draft(&request)?;
+            let [genesis, published] = origin_rows(&draft)?;
+            let tail = encoded_origin_row(3, published.4.clone(), Event::new("qa.mysql.history"))?;
+            let source = b"00000000-0000-0000-0000-00000000abcd".to_vec();
+            let exact = (1, source.clone(), 2, published.4.as_bytes().to_vec());
+            let head = AuditHead {
+                seq: 3,
+                hash: tail.4.clone(),
+                payload_bytes: (genesis.5.len() + published.5.len() + tail.5.len()) as u64,
+            };
+
+            let anchor = verify_owned_origin_prefix([genesis, published], &draft)?;
+            let replayed = verify_owned_tail_row(anchor.clone(), tail, &head)?;
+            require_owned_head(&replayed, &head)?;
+            require_review_anchor(&[], request.source_id, &anchor)?;
+            require_review_anchor(std::slice::from_ref(&exact), request.source_id, &anchor)?;
+
+            let tail_hash = replayed.hash.into_bytes();
+            for divergent in [
+                (1, source.clone(), 3, tail_hash.clone()),
+                (1, source.clone(), 3, exact.3.clone()),
+                (1, source.clone(), 2, tail_hash),
+                (
+                    1,
+                    b"00000000-0000-0000-0000-00000000ABCD".to_vec(),
+                    2,
+                    exact.3.clone(),
+                ),
+                (2, source, 2, exact.3.clone()),
+            ] {
+                assert!(require_review_anchor(&[divergent], request.source_id, &anchor).is_err());
+            }
+            assert!(
+                require_review_anchor(&[exact.clone(), exact], request.source_id, &anchor).is_err()
+            );
+        }
         Ok(())
     }
 

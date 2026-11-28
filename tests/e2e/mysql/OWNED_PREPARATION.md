@@ -230,12 +230,18 @@ agentsandbox prepare-mysql-owned \
 ```
 
 Cette lecture seule compare le manifeste owned, l’ancre exacte et la chaîne
-d’audit dans un même instantané. Coordonner les opérations d’administration
-du schéma avec le verrou de la cible. Pour les objets créés sous d’autres noms
+d’audit dans un même instantané. La table d’autorité Review peut être vide.
+Si elle contient une ligne, le contrôle exige que sa source, sa séquence et son
+hash correspondent à l’ancre de création, en séquence 2. Le contenu du
+snapshot Review, les liaisons et l’époque du propriétaire exigent des
+vérifications distinctes.
+
+Coordonner les opérations d’administration du schéma avec le verrou de la
+cible. Pour les objets créés sous d’autres noms
 hors de cette coordination, le contrôle porte sur l’inventaire observé.
-Le reçu `verification_mode: owned_audit_chain` couvre uniquement ces
-vérifications. Les projections et l’admission d’écriture du gateway gardent
-leurs contrôles propres. `--verify-chain` et `--verify-only` sont exclusifs.
+Le reçu `verification_mode: owned_audit_chain` atteste ces vérifications.
+L’admission d’écriture du gateway conserve ses propres contrôles.
+`--verify-chain` et `--verify-only` sont exclusifs.
 Sans option, la commande conserve le mode de préparation fraîche.
 La vérification a un budget de huit secondes. Si le délai expire, aucun reçu
 n’est produit et la libération du verrou côté MySQL reste non confirmée.

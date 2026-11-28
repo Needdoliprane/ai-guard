@@ -106,7 +106,8 @@ pub struct MysqlOwnedPreparationReceipt {
     pub tls_version: String,
 }
 
-/// Read-only verification of the catalog, exact origin and audit chain.
+/// Read-only verification of the catalog, exact origin, audit chain and any
+/// stored Review authority reference to the creation anchor.
 /// The receipt carries no projection, epoch or writer-admission authority.
 #[derive(Serialize)]
 pub struct MysqlOwnedAuditChainReceipt {
@@ -186,7 +187,8 @@ pub async fn verify_owned_fresh_source(
 
 /// Inspect an already published owned source under the physical target lock.
 /// Compare the exact creation request and stream every event in one read-only
-/// snapshot. The caller still needs separate projection and epoch proofs.
+/// snapshot. In that snapshot, require any Review authority reference to match
+/// the creation anchor. The caller needs separate projection and epoch proofs.
 /// Coordinate schema administration with the target lock. The catalog observes
 /// unrelated objects created outside that lock at the time of inspection.
 /// A timeout bounds the caller's wait. It does not attest that MySQL has
