@@ -30,6 +30,7 @@ jobs:
         with:
           ref: ${{ env.SOURCE_SHA }}
           persist-credentials: false
+          fetch-depth: 3
 
       - name: Build one libtest and verify typed prearmed spawn refusal
         shell: bash
