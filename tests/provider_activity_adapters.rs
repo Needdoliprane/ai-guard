@@ -245,6 +245,7 @@ fn claude_hooks_map_tools_prompts_and_subagents_without_inventing_a_parent() {
         vec!["agent.declared"],
         vec!["tool.requested"],
         vec!["tool.result"],
+        vec!["tool.result"],
         vec!["agent.declared", "message.declared"],
         vec!["session.declared"],
         vec!["message.declared"],
@@ -269,6 +270,28 @@ fn claude_hooks_map_tools_prompts_and_subagents_without_inventing_a_parent() {
     let failure = find(&events, "tool.result", "provider_tool_use_id", "toolu_04");
     assert_eq!(failure["result"]["is_error"], true);
     assert_eq!(failure["result"]["error"], "Exit code 1");
+    assert_eq!(failure["provenance"], "declared");
+    assert_eq!(failure["coverage"], "native");
+    assert_eq!(failure["source"], "claude-adapter");
+    assert!(failure["result"].get("content").is_none());
+    let denied = find(&events, "tool.result", "provider_tool_use_id", "toolu_05");
+    assert_eq!(denied["data"]["provider_hook_event"], "PermissionDenied");
+    assert_eq!(denied["result"]["is_error"], true);
+    assert_eq!(denied["result"]["reported_status"], "permission_denied");
+    assert_eq!(denied["result"]["error"], "User denied the request");
+    assert_eq!(denied["provenance"], "declared");
+    assert_eq!(denied["coverage"], "native");
+    assert_eq!(denied["source"], "claude-adapter");
+    assert!(denied["result"].get("content").is_none());
+    for tool_id in ["toolu_04", "toolu_05"] {
+        let outcomes: Vec<_> = events
+            .iter()
+            .filter(|event| event["data"]["provider_tool_use_id"] == tool_id)
+            .collect();
+        assert_eq!(outcomes.len(), 1, "{tool_id} has only its reported outcome");
+        assert_eq!(outcomes[0]["kind"], "tool.result");
+        assert_eq!(outcomes[0]["result"]["is_error"], true);
+    }
     let started = events
         .iter()
         .find(|event| {
@@ -294,6 +317,10 @@ fn claude_hooks_map_tools_prompts_and_subagents_without_inventing_a_parent() {
         .find(|event| event["kind"] == "agent.declared" && event["data"]["state"] == "completed")
         .unwrap();
     assert_eq!(stopped["data"]["provider_agent_id"], CLAUDE_CHILD);
+    let child_result = find(&events, "message.declared", "text", "Tests live in tests/.");
+    assert_eq!(child_result["data"]["provider_agent_id"], CLAUDE_CHILD);
+    assert_eq!(child_result["data"]["role"], "assistant");
+    assert_eq!(child_result["data"]["provider_hook_event"], "SubagentStop");
     let final_message = events
         .iter()
         .filter(|event| event["kind"] == "message.declared")
@@ -368,8 +395,8 @@ fn every_provider_event_is_declared_native_and_keeps_the_trusted_context() {
     events.extend(flat(&stdout("claude-code", CLAUDE_STREAM)));
     events.extend(flat(&hooks("claude-code", CLAUDE_HOOKS)));
     events.extend(flat(&hooks("codex", CODEX_HOOKS)));
-    // 19 Codex exec + 16 Claude stream + 13 Claude hook + 11 Codex hook events.
-    assert_eq!(events.len(), 59);
+    // 19 Codex exec + 16 Claude stream + 14 Claude hook + 11 Codex hook events.
+    assert_eq!(events.len(), 60);
     for value in events {
         assert_eq!(value["provenance"], "declared", "{value}");
         assert_eq!(value["coverage"], "native", "{value}");
