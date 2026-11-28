@@ -2984,20 +2984,19 @@ mod tests {
         let create_two = create_two?;
         assert_ne!(create_one.is_some(), create_two.is_some());
         let create_token = create_one.or(create_two).ok_or(JournalError::Conflict)?;
-        let committed_create_lifecycle = verification_writer
+        let committed_create = verification_writer
             .load(operation)
             .await?
-            .and_then(|job| job.broker_checkpoint_v3().cloned())
+            .ok_or(JournalError::Conflict)?;
+        let committed_create_lifecycle = committed_create
+            .broker_checkpoint_v3()
             .ok_or(JournalError::Conflict)?;
         assert_eq!(
             committed_create_lifecycle.canonical_bytes()?,
             exact_pending_create.canonical_bytes()?
         );
         assert_eq!(create_token.operation_id(), operation);
-        assert_eq!(
-            create_token.confirmed_head(),
-            committed_create_lifecycle.head()
-        );
+        assert_eq!(create_token.confirmed_head(), committed_create.head());
         assert_eq!(create_token.facts_hash().len(), 64);
         assert!(matches!(
             verification_writer
